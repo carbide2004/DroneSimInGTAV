@@ -1,0 +1,8 @@
+deps/
+packages/
+.vs/
+.vscode/
+*.log
+*.tlog
+*.pdb
+*.obj
