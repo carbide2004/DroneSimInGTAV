@@ -6,3 +6,6 @@ packages/
 *.tlog
 *.pdb
 *.obj
+**/release/
+**/debug/
+*.raw

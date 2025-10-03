@@ -41,7 +41,7 @@ void presentCallback(void* chain);
 //void draw_indexed_hook(ID3D11DeviceContext3* self, UINT IndexStart, UINT StartIndexLocation, INT BaseVertexLocation);
 static time_point<system_clock> last_capture_color;
 static time_point<system_clock> last_capture_depth;
-static const char* logFilePath = "GTANativePlugin.log";
+static const char* logFilePath = "logs\\GTANativePlugin.log";
 //--------
 //offsets
 //--------
@@ -70,9 +70,10 @@ enum catchState
 	catchScreen
 };
 
+const size_t fileLength = 256;
 static catchState cmdToCatch = catchStop;
-static WCHAR imgPath[fileLength] = L"screen.bmp";
-static char rawpath[fileLength] = "stencil.raw";
+static WCHAR imgPath[fileLength] = L"data\\screen.png";
+static char rawPath[fileLength] = "data\\depth.raw";
 static bool onlyScreen = false, forceSave = false;
 
 inline void makeCmdStart()
@@ -93,7 +94,7 @@ void catchCurveAndScreen(WCHAR *_imgPath, char *_rawPath, bool _forceSave, bool 
 	wcscpy(imgPath, _imgPath);
 	onlyScreen = _onlyScreen;
 	forceSave = _forceSave;
-	if(!onlyScreen) strcpy(rawpath, _rawPath);
+	if(!onlyScreen) strcpy(rawPath, _rawPath);
 	makeCmdStart();
 }
 
@@ -108,14 +109,14 @@ int __stdcall DllMain(HMODULE hinstance, DWORD reason, LPVOID lpReserved)
 		res = MH_Initialize();
 		if (res != MH_OK) fprintf(f, "Could not init Minihook\n");
 		presentCallbackRegister(presentCallback);
-		keyboardHandlerRegister(OnKeyboardMessage);
+		//keyboardHandlerRegister(OnKeyboardMessage);
 		scriptRegister(hinstance, scriptMain);
 		break;
 	case DLL_PROCESS_DETACH:
 		res = MH_Uninitialize();
 		if (res != MH_OK) fprintf(f, "Could not deinit MiniHook\n");
 		presentCallbackUnregister(presentCallback);
-		keyboardHandlerUnregister(OnKeyboardMessage);
+		//keyboardHandlerUnregister(OnKeyboardMessage);
 		//scriptUnregister(hinstance);
 
 		break;
@@ -133,7 +134,7 @@ void hook_function(T* inst, void* hook, bool unhook = false)
 {
 	//__debugbreak();
 	void** vtbl = *reinterpret_cast<void***>(inst);
-	FILE* f = fopen("GTANativePlugin.log", "a");
+	FILE* f = fopen(logFilePath, "a");
 	//fprintf(f, "Hooking %p at offset %d\n", inst, offset);
 	MH_STATUS res = MH_OK;
 	DWORD oldProt = 0;
@@ -230,17 +231,18 @@ void clear_render_target_view_hook(ID3D11DeviceContext* self, ID3D11RenderTarget
 }
 
 auto screenShot = [](FILE* f) {
-	int screenCapResult = export_get_screen_buffer(imgPath);
 	std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
-		std::chrono::system_clock::now().time_since_epoch()
-		);
+				std::chrono::system_clock::now().time_since_epoch()
+				);
+	wchar_t currentImgPath[fileLength]; 
+	swprintf(currentImgPath, fileLength, L".\\data\\temp_capture_RGB_%lld.png", ms.count());
+	int screenCapResult = export_get_screen_buffer(currentImgPath);
 	if (screenCapResult != 1) {
 		fprintf(f, "[%I64d] : export screen %ls failed.\n", ms, imgPath);
 	}
 	else {
 		fprintf(f, "[%I64d] : export screen %ls success.\n", ms, imgPath);
 	}
-	wcscpy(imgPath, L"screen.bmp");
 };
 
 void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencilView* dsv, UINT8 flags, float depth, UINT8 stencil)
@@ -260,7 +262,7 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 		if (hr != S_OK) return;
 		tex->GetDesc(&desc);
 		
-		if (lastDsv == nullptr && desc.Width > 600 && desc.Height > 600) {  // && desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS
+		if (lastDsv == nullptr && desc.Width > 600 && desc.Height > 600 && desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS && cmdToCatch == catchStart) {
 			lastDsv = curDSV;
 			std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
 				std::chrono::system_clock::now().time_since_epoch()
@@ -271,34 +273,34 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 			
 			ExtractDepthBuffer(dev.Get(), self, res.Get());
 			last_capture_depth = system_clock::now();
+			char currentRawPath[fileLength];
+			sprintf(currentRawPath, ".\\data\\temp_capture_depth_%lld.raw", ms.count()); //先这样处理一下
 
-			if (cmdToCatch == catchStart) {
-				void *buf;
-				int size = export_get_stencil_buffer(&buf);
-				fprintf(f, "[%I64d] : onlyscreen = %s.\n", ms, onlyScreen ? "yes" : "no");
-				if (!onlyScreen) {
-					screenShot(f);
-					auto raw = fopen(rawpath, "w");
-					fwrite(buf, 1, size, raw);
-					fclose(raw);
-					fprintf(f, "[%I64d] : write stencil %s into file.\n", ms, rawpath);
-					strcpy(rawpath, "stencil.raw");
-				}
-				else {
-					onlyScreen = false;
-					bool writeBmp = true;
-					if (!forceSave) {
-						for (int i = 0; i < size; i++) {
-							if (((unsigned char*)buf)[i] == unsigned char(1)) {
-								writeBmp = false;
-								break;
-							}
+			void *buf;
+			int size = export_get_depth_buffer(&buf);
+			// fprintf(f, "[%I64d] : onlyscreen = %s.\n", ms, onlyScreen ? "yes" : "no");
+			if (!onlyScreen) {
+				screenShot(f);
+				auto raw = fopen(currentRawPath, "wb");
+				fwrite(buf, 1, size, raw);
+				fclose(raw);
+				fprintf(f, "[%I64d] : write depth %s into file.\n", ms, rawPath);
+				strcpy(rawPath, "depth.raw");
+			}
+			else {
+				onlyScreen = false;
+				bool writePng = true;
+				if (!forceSave) {
+					for (int i = 0; i < size; i++) {
+						if (((unsigned char*)buf)[i] == unsigned char(1)) {
+							writePng = false;
+							break;
 						}
 					}
-					if(writeBmp) screenShot(f);
 				}
-				makeCmdStop();
+				if(writePng) screenShot(f);
 			}
+			makeCmdStop();
 			fclose(f);
 		}
 	}

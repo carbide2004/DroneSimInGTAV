@@ -56,7 +56,7 @@ void writeLog(std::string msg)
 	std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
 		std::chrono::system_clock::now().time_since_epoch()
 		);
-	std::ofstream log("export.log", std::ios_base::app);
+	std::ofstream log("logs\\export.log", std::ios_base::app);
 	log << ms.count() << " : " <<  msg << std::endl;
 	log.close();
 }
