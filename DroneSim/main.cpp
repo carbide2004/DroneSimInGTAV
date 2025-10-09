@@ -63,18 +63,15 @@ static bool hooked = false;
 
 static bool draw_indexed_count = false;
 
-enum catchState
-{
-	catchStop,
-	catchStart,
-	catchScreen
-};
-
 const size_t fileLength = 256;
-static catchState cmdToCatch = catchStop;
+catchState cmdToCatch = catchStop;	
 static WCHAR imgPath[fileLength] = L"data\\screen.png";
 static char rawPath[fileLength] = "data\\depth.raw";
 static bool onlyScreen = false, forceSave = false;
+std::string g_rgbCapturedFilePath;
+std::string g_depthCapturedFilePath;
+std::queue<std::string> g_cmdQueue;
+
 
 inline void makeCmdStart()
 {
@@ -236,6 +233,9 @@ auto screenShot = [](FILE* f) {
 				);
 	wchar_t currentImgPath[fileLength]; 
 	swprintf(currentImgPath, fileLength, L".\\data\\temp_capture_RGB_%lld.png", ms.count());
+	char currentImgPathNarrow[fileLength];
+	sprintf(currentImgPathNarrow, ".\\data\\temp_capture_RGB_%lld.png", ms.count());
+	g_rgbCapturedFilePath = currentImgPathNarrow;
 	int screenCapResult = export_get_screen_buffer(currentImgPath);
 	if (screenCapResult != 1) {
 		fprintf(f, "[%I64d] : export screen %ls failed.\n", ms, imgPath);
@@ -275,6 +275,7 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 			last_capture_depth = system_clock::now();
 			char currentRawPath[fileLength];
 			sprintf(currentRawPath, ".\\data\\temp_capture_depth_%lld.raw", ms.count()); //先这样处理一下
+			g_depthCapturedFilePath = currentRawPath;
 
 			void *buf;
 			int size = export_get_depth_buffer(&buf);

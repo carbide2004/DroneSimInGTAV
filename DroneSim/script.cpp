@@ -1,6 +1,9 @@
 #include "script.h"
 #include "export.h"
 #include "main.h"
+#include "utils.h"
+#include "camera.h"
+#include "server.h"
 #include <string>
 #include <fstream>
 #include <algorithm>
@@ -14,19 +17,18 @@ static const char* logFilePathScript = "logs\\script.log";
 
 scriptStatusEnum scriptStatus = scriptStop;
 
-void setStatusText(std::string text)
-{
-	UI::_SET_NOTIFICATION_TEXT_ENTRY("STRING");
-	UI::_ADD_TEXT_COMPONENT_STRING((LPSTR)text.c_str());
-	UI::_DRAW_NOTIFICATION(1, 1);
-}
-
 void scriptMain()
 {
 
 	int sleepTime = 0;
 	setStatusText("DroneSim start fine!!!");
+	InitializeModServer();
+
+	setStatusText("Start camera mode in 5 seconds.");
+	WAIT(5000);
 	
+	startNewCamera();
+
 	while (true)
 	{
 		auto f = fopen(logFilePathScript, "a");
