@@ -27,39 +27,19 @@ void scriptMain()
 	setStatusText("Start camera mode in 5 seconds.");
 	WAIT(5000);
 	
-	startNewCamera();
+	scriptStatus = cameraMode;
 
 	while (true)
 	{
-		auto f = fopen(logFilePathScript, "a");
-		std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
-				std::chrono::system_clock::now().time_since_epoch()
-				);
-		fprintf(f, "[%I64d] : Catch RGBD\n", ms.count());
-		fclose(f);
-		makeCmdStart();
-		WAIT(10000);
-		// if (scriptStatus == cameraMode) {
-		// 	if (CameraMode == false) {
-		// 		startNewCamera();
-		// 		setStatusText("Now you can move the camera.");
-		// 	}
-		// 	else {
-		// 		adjustCamera();
-		// 	}
-		// }
-		// else if (scriptStatus == scriptStop && CameraMode == true) {
-		// 	StopCamera();
-		// }
-		// else {
-		// 	if (++sleepTime == 2000) {
-		// 		log_to_file("sleep 2000 game ms...");
-		// 		log_to_file(std::to_string(scriptStatus));
-		// 		sleepTime = 0;
-		// 	}
-		// 	WAIT(1);
-		// }
-		// WAIT(0);
-		
+		if (scriptStatus == cameraMode) {
+			if (CameraMode == false) {
+				startNewCamera();
+				setStatusText("Now you can move the camera.");
+			}
+			else {
+				adjustCamera();
+			}
+		}
+		WAIT(0);
 	}
 }

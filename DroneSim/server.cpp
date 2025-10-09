@@ -135,7 +135,7 @@ void ModServer::handle_client_connection()
                 if (command == "CAPTURE")
                 {
                     log_to_pedTxt("Command recognized: CAPTURE", SERVER_LOG_FILE);
-                    cmdToCatch = catchStart;
+                    makeCmdStart();
                     while (cmdToCatch != catchStop) {
                         WAIT(100); // 等待直到捕获完成
                     }
@@ -144,8 +144,25 @@ void ModServer::handle_client_connection()
 
                     g_rgbCapturedFilePath.clear(); 
                     log_to_pedTxt("image captured with size: " + std::to_string(rgb_data.size()) + " bytes", SERVER_LOG_FILE);
-                    send_data_async(std::move(rgb_data));
-                    send_data_async(std::move(depth_data));
+                    // Prepare combined data
+                    std::vector<unsigned char> combined_data;
+                    
+                    // Add RGB data size to combined_data
+                    uint32_t rgb_size = static_cast<uint32_t>(rgb_data.size());
+                    combined_data.insert(combined_data.end(), reinterpret_cast<unsigned char*>(&rgb_size), reinterpret_cast<unsigned char*>(&rgb_size) + sizeof(uint32_t));
+
+                    // Add Depth data size to combined_data
+                    uint32_t depth_size = static_cast<uint32_t>(depth_data.size());
+                    combined_data.insert(combined_data.end(), reinterpret_cast<unsigned char*>(&depth_size), reinterpret_cast<unsigned char*>(&depth_size) + sizeof(uint32_t));
+
+                    // Add RGB data to combined_data
+                    combined_data.insert(combined_data.end(), rgb_data.begin(), rgb_data.end());
+
+                    // Add Depth data to combined_data
+                    combined_data.insert(combined_data.end(), depth_data.begin(), depth_data.end());
+
+                    log_to_pedTxt("Combined image data prepared with total size: " + std::to_string(combined_data.size()) + " bytes", SERVER_LOG_FILE);
+                    send_data_async(std::move(combined_data));
                 }
                 else
                 {
