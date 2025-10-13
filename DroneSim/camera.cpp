@@ -27,25 +27,13 @@ void startNewCamera()
 				);
 	
 	Vector3 camOffset;
-	camOffset.x = (float)sin((startHeading *PI / 180.0f))*10.0f;
-	camOffset.y = (float)cos((startHeading *PI / 180.0f))*10.0f;
-	camOffset.z = 6.4;
-	if (startLocation.x < 0) {
-		camOffset.x = -camOffset.x;
-	}
-	if (startLocation.y < 0) {
-		camOffset.y = -camOffset.y;
-	}
-	fprintf(f, "[%I64d] : actor location (%f, %f, %f)\n", ms.count(), startLocation.x, startLocation.y, startLocation.z);
-	fprintf(f, "[%I64d] : Camera offset (%f, %f, %f)\n", ms.count(), camOffset.x, camOffset.y, camOffset.z);
+	camOffset.x = 0.0;
+	camOffset.y = 0.0;
+	camOffset.z = 10;
 
 	Vector3 camLocation = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(actorPed, camOffset.x, camOffset.y, camOffset.z);
 	fprintf(f, "[%I64d] : Camera location (%f, %f, %f)\n", ms.count(), camLocation.x, camLocation.y, camLocation.z);
 	cameraHandle = CAM::CREATE_CAM_WITH_PARAMS("DEFAULT_SCRIPTED_CAMERA", camLocation.x, camLocation.y, camLocation.z, 0.0, 0.0, 0.0, 40.0, 1, 2);
-
-	CAM::POINT_CAM_AT_ENTITY(cameraHandle, actorPed, 0.0f, 0.0f, 0.0f, true);
-	WAIT(100);
-	CAM::STOP_CAM_POINTING(cameraHandle);
 
 	CAM::RENDER_SCRIPT_CAMS(true, 1, 1800, 1, 0);
 	WAIT(2000);
@@ -65,44 +53,44 @@ void adjustCamera()
 		g_cmdQueue.pop();
 		log_to_pedTxt("front cmd is: " + cmd, logFilePathCamera);
 		if (cmd == "FORWARD") {
-			camDelta.x = 10.0;
+			camDelta.x = STEPSIZE;
 			isMovement = true;
 			setStatusText("Camera moving forward.");
 		}
 		else if (cmd == "BACKWARD") {
-			camDelta.x = -10.0;
+			camDelta.x = -STEPSIZE;
 			isMovement = true;
 			setStatusText("Camera moving backward.");
 		}
 		else if (cmd == "LEFT") {
-			camDelta.y = -10.0;
+			camDelta.y = -STEPSIZE;
 			isMovement = true;
 			setStatusText("Camera moving left.");
 		}
 		else if (cmd == "RIGHT") {
-			camDelta.y = 10.0;
+			camDelta.y = STEPSIZE;	
 			isMovement = true;
 			setStatusText("Camera moving right.");
 		}
 		else if (cmd == "UP") {
-			camDelta.z = 3;
+			camDelta.z = STEPSIZE;
 			isMovement = true;
 			setStatusText("Camera moving up.");
 		}
 		else if (cmd == "DOWN") {
-			camDelta.z = -3;
+			camDelta.z = -STEPSIZE;
 			isMovement = true;
 			setStatusText("Camera moving down.");
 		}
 		else if (cmd == "LEFTROTATE") {
 			Vector3 currentRotation = CAM::GET_CAM_ROT(cameraHandle, 2);
-			currentRotation.z += 15.0f;
+			currentRotation.z += 45.0f;
 			CAM::SET_CAM_ROT(cameraHandle, currentRotation.x, currentRotation.y, currentRotation.z, 2);
 			setStatusText("Camera rotating left.");
 		}
 		else if (cmd == "RIGHTROTATE") {
 			Vector3 currentRotation = CAM::GET_CAM_ROT(cameraHandle, 2);
-			currentRotation.z += -15.0f;
+			currentRotation.z += -45.0f;
 			CAM::SET_CAM_ROT(cameraHandle, currentRotation.x, currentRotation.y, currentRotation.z, 2);
 			setStatusText("Camera rotating right.");
 		}

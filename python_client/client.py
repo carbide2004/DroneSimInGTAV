@@ -154,7 +154,7 @@ if __name__ == "__main__":
     
     for cmd in commands:
         send_camera_command(cmd)
-        time.sleep(1)
+        time.sleep(0.1)
         
         rgb_data, depth_data = get_data_from_server("CAPTURE")
         if rgb_data:
@@ -162,6 +162,6 @@ if __name__ == "__main__":
         if depth_data:
             save_depth_image(depth_data)
 
-        time.sleep(0.5)
+        time.sleep(0.1)
     
     print("\n所有命令及其数据获取任务已完成。")
