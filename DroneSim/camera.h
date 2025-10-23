@@ -7,7 +7,7 @@
 #include <cmath>
 
 const float PI = acos(1.0) * 2;
-const float cameraSpeedFactor = 0.1;
+const float cameraSpeedFactor = 1;
 const float STEPSIZE = 5.0;
 
 extern bool CameraMode;

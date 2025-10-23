@@ -93,7 +93,7 @@ def get_data_from_server(command: str):
         print(f"发生错误: {e}")
     return None, None
 
-def save_rgb_image(image_data):
+def save_rgb_image(image_data, filename=None):
     """
     将字节数据转换为RGB图片并保存到文件。
     """
@@ -104,14 +104,15 @@ def save_rgb_image(image_data):
         img = Image.open(BytesIO(image_data))
         print(f"RGB图片成功接收。格式: {img.format}, 大小: {img.size}, 模式: {img.mode}")
         
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
-        filename = f"record/rgb_{timestamp}.png"
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
+            filename = f"record/rgb_{timestamp}.png"
         img.save(filename)
         print(f"RGB图片已保存为 {filename}")
     except IOError as e:
         print(f"无法将接收到的数据转换为图片: {e}")
 
-def save_depth_image(image_data):
+def save_depth_image(image_data, filename=None):
     """
     将字节数据转换为深度图片并保存到文件。
     """
@@ -126,8 +127,9 @@ def save_depth_image(image_data):
         depth_array = np.frombuffer(image_data, dtype=np.float32)
         depth_array = depth_array.reshape((HEIGHT, WIDTH))
         
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
-        filename = f"record/depth_{timestamp}.png"
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
+            filename = f"record/depth_{timestamp}.png"
         plt.imsave(filename, depth_array, cmap='gray')
         print(f"深度图片已保存为 {filename}")
 
@@ -144,12 +146,12 @@ if __name__ == "__main__":
         time.sleep(1)
     
     commands = [
-        "FORWARD", 
-        "RIGHTROTATE", 
-        "BACKWARD", 
-        "LEFTROTATE",
-        "UP",
-        "DOWN"
+        "FORWARD",      # 前进10m
+        "RIGHTROTATE",  # 右转45度
+        "BACKWARD",     # 后退10m
+        "LEFTROTATE",   # 左转45度
+        "UP",           # 上升10m
+        "DOWN"          # 下降10m
     ]
     
     for cmd in commands:

@@ -9,3 +9,4 @@ packages/
 **/debug/
 *.raw
 *.png
+__pycache__/
