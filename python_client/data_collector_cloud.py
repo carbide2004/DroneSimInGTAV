@@ -122,7 +122,7 @@ def capture_rgbd_data():
     """
     while True:
         send_camera_command("REQUEST")
-        time.sleep(1) # 等待服务器处理请求
+        time.sleep(2) # 等待服务器处理请求
         rgb_data_bytes, depth_data_bytes = get_data_from_server("CAPTURE")
         if not rgb_data_bytes or not depth_data_bytes:
             print("未获取到有效数据，重试...")

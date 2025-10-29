@@ -144,6 +144,10 @@ void ModServer::handle_client_connection()
                     }
                     start_accept(); 
                 }
+                else if (command == "CHECK") {
+                    // 检查是否捕获RGBD完成
+                    
+                }
                 else if (command == "CAPTURE")
                 {
                     // CAPTURE：立即发送上次捕获的文件
