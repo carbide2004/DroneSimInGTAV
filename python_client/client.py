@@ -139,6 +139,49 @@ def save_depth_image(image_data, filename=None):
     except Exception as e:
         print(f"保存深度图时发生错误: {e}")
 
+def get_string_from_server(command: str):
+    """
+    连接服务器，发送指令，接收服务器返回的字符串响应。
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((HOST, PORT))
+            print(f"\n正在发送字符串获取指令: '{command}'")
+
+            s.sendall(command.encode('utf-8'))
+
+            # 接收响应字符串的长度
+            length_bytes = s.recv(4)
+            if not length_bytes:
+                print("未接收到响应长度信息，服务器可能已关闭连接。")
+                return None
+            response_length = struct.unpack('<I', length_bytes)[0]
+            print(f"接收到响应字符串长度信息: {response_length} 字节。")
+
+            if response_length == 0:
+                print("接收到的响应字符串长度为0。")
+                return None
+
+            # 接收完整的响应字符串
+            response_data = b""
+            while len(response_data) < response_length:
+                remaining_bytes = response_length - len(response_data)
+                chunk = s.recv(min(4096, remaining_bytes))
+                if not chunk:
+                    print("服务器在数据传输完成前断开连接。")
+                    return None
+                response_data += chunk
+
+            response_string = response_data.decode('utf-8')
+            print(f"成功接收到响应字符串: {response_string}")
+            return response_string
+
+    except ConnectionRefusedError:
+        print("连接失败。请确保C++服务器正在运行并监听正确的IP和端口。")
+    except Exception as e:
+        print(f"发生错误: {e}")
+    return None
+
 if __name__ == "__main__":
     ensure_record_dir_exists()
     

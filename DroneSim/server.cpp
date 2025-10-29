@@ -146,7 +146,13 @@ void ModServer::handle_client_connection()
                 }
                 else if (command == "CHECK") {
                     // 检查是否捕获RGBD完成
-                    
+					std::string catch_flag = (cmdToCatch == catchStop) ? "READY" : "NOTREADY";
+					log_to_pedTxt("Command recognized: CHECK. Capture status: " + catch_flag, SERVER_LOG_FILE);
+                    if (cmdToCatch == catchStop) {
+                        send_data_async(std::vector<unsigned char>{'R','E','A','D','Y'});
+                    } else {
+                        send_data_async(std::vector<unsigned char>{'N','O','T','R','E','A','D','Y'});
+                    }
                 }
                 else if (command == "CAPTURE")
                 {

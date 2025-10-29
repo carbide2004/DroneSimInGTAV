@@ -6,7 +6,7 @@ import open3d as o3d
 import math
 from io import BytesIO
 import matplotlib.pyplot as plt
-from client import send_camera_command, get_data_from_server, save_rgb_image, save_depth_image, ensure_record_dir_exists, WIDTH, HEIGHT, FOV
+from client import *
 
 ROOT_DATA_FOLDER = "record\\record_data_cloud_" + time.strftime("%Y%m%d_%H%M%S", time.localtime())
 
@@ -28,7 +28,7 @@ Z_MIN, Z_MAX, Z_STEP = 0.0, 0.0, 5.0
 
 # 定义水平八个朝向 (yaw)
 HORIZONTAL_ORIENTATIONS = [
-        0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0
+        0.0, 90.0, 180.0, 270.0,
     ]
 
 def rotate_to_yaw(target_yaw):
@@ -122,7 +122,12 @@ def capture_rgbd_data():
     """
     while True:
         send_camera_command("REQUEST")
-        time.sleep(2) # 等待服务器处理请求
+        while True:
+            response = get_string_from_server("CHECK")
+            print(f"CHECK response: {response}")
+            if response == "READY":
+                break
+            time.sleep(2)
         rgb_data_bytes, depth_data_bytes = get_data_from_server("CAPTURE")
         if not rgb_data_bytes or not depth_data_bytes:
             print("未获取到有效数据，重试...")
@@ -250,8 +255,8 @@ if __name__ == "__main__":
                         # 将当前点云合并到全局点云中
                         global_point_cloud += current_pcd
                         # 可视化全局点云
-                        # print("正在可视化全局点云...")
-                        # o3d.visualization.draw_geometries([global_point_cloud])
+                        print("正在可视化全局点云...")
+                        o3d.visualization.draw_geometries([global_point_cloud])
 
                         print(f"已获取并合并位置 ({x:.2f}, {y:.2f}, {z:.2f}), 朝向 {yaw:.2f} 度的点云。")
                     else:
