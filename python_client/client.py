@@ -10,8 +10,8 @@ from datetime import datetime
 
 HOST = '127.0.0.1'
 PORT = 12345
-WIDTH = 2560
-HEIGHT = 1440
+WIDTH = 1280
+HEIGHT = 720
 FOV = 40.0
 
 # 确保 'record' 文件夹存在

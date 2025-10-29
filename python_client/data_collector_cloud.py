@@ -28,7 +28,7 @@ Z_MIN, Z_MAX, Z_STEP = 0.0, 0.0, 5.0
 
 # 定义水平八个朝向 (yaw)
 HORIZONTAL_ORIENTATIONS = [
-        0.0, 90.0, 180.0, 270.0,
+        0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0
     ]
 
 def rotate_to_yaw(target_yaw):
@@ -48,14 +48,14 @@ def rotate_to_yaw(target_yaw):
     # 根据 delta_yaw 发送旋转指令
     while abs(delta_yaw) > ROTATE_STEP / 2: # 允许一定的误差范围
         if delta_yaw > 0:
-            send_camera_command("RIGHTROTATE")
+            send_camera_command("LEFTROTATE")
             current_drone_yaw = (current_drone_yaw + ROTATE_STEP) % 360
             delta_yaw -= ROTATE_STEP
         else:
-            send_camera_command("LEFTROTATE")
+            send_camera_command("RIGHTROTATE")
             current_drone_yaw = (current_drone_yaw - ROTATE_STEP + 360) % 360
             delta_yaw += ROTATE_STEP
-        time.sleep(0.01)
+        time.sleep(1)
     print(f"无人机已旋转到朝向: {current_drone_yaw:.2f} 度")
 
 def move_to_position(target_x, target_y, target_z):
@@ -69,7 +69,7 @@ def move_to_position(target_x, target_y, target_z):
         else:
             send_camera_command("DOWN")
             current_drone_z -= MOVE_STEP
-        time.sleep(0.01)
+        time.sleep(1)
 
     # 调整X坐标
     rotate_to_yaw(0) # 旋转到0度，假设0度是X轴正方向
@@ -80,7 +80,7 @@ def move_to_position(target_x, target_y, target_z):
         else:
             send_camera_command("BACKWARD") # 沿X轴负方向移动
             current_drone_x -= MOVE_STEP
-        time.sleep(0.01)
+        time.sleep(1)
 
     # 调整Y坐标
     rotate_to_yaw(90) # 旋转到90度，假设90度是Y轴正方向
@@ -91,7 +91,7 @@ def move_to_position(target_x, target_y, target_z):
         else:
             send_camera_command("BACKWARD") # 沿Y轴负方向移动
             current_drone_y -= MOVE_STEP
-        time.sleep(0.01)
+        time.sleep(1)
 
     print(f"无人机已移动到位置: ({current_drone_x:.2f}, {current_drone_y:.2f}, {current_drone_z:.2f})")
 
@@ -123,7 +123,7 @@ def capture_rgbd_data():
     while True:
         send_camera_command("REQUEST")
         while True:
-            time.sleep(2)
+            time.sleep(1)
             response = get_string_from_server("CHECK")
             print(f"CHECK response: {response}")
             if response == "READY":
@@ -148,13 +148,13 @@ def capture_rgbd_data():
 
     # 避免除以零或非常小的值，设置一个阈值
     depth_array[depth_array < 1e-8] = 1e-8 # 避免除以零
-    depth_array = 1.0 / depth_array
+    depth_array = 0.1 / depth_array
 
     # 可视化深度图像（旁边带有颜色条）
-    # plt.imshow(depth_array, cmap='gray')
-    # plt.title("Depth Image")
-    # plt.colorbar(label="Distance (m)")
-    # plt.show()
+    plt.imshow(depth_array, cmap='gray')
+    plt.title("Depth Image")
+    plt.colorbar(label="Value")
+    plt.show()
     
     return rgb_array, depth_array
 
@@ -167,7 +167,7 @@ def rgbd_to_pointcloud(rgb_image_np, depth_image_np, camera_intrinsics, drone_po
         o3d.geometry.Image(rgb_image_np), 
         o3d.geometry.Image(depth_image_np), 
         depth_scale=1.0, # 深度值单位为米
-        depth_trunc=1000.0, # 最大深度值
+        depth_trunc=50.0, # 最大深度值
         convert_rgb_to_intensity=False
     )
 

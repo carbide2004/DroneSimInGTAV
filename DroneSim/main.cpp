@@ -279,28 +279,13 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 			void *buf;
 			int size = export_get_depth_buffer(&buf);
 			// fprintf(f, "[%I64d] : onlyscreen = %s.\n", ms, onlyScreen ? "yes" : "no");
-			if (!onlyScreen) {
-				screenShot(f);
-				auto raw = fopen(currentRawPath, "wb");
-				fwrite(buf, 1, size, raw);
-				fclose(raw);
-				g_depthCapturedFilePath = currentRawPath;
-				fprintf(f, "[%I64d] : write depth %s into file.\n", ms, rawPath);
-				strcpy(rawPath, "depth.raw");
-			}
-			else {
-				onlyScreen = false;
-				bool writePng = true;
-				if (!forceSave) {
-					for (int i = 0; i < size; i++) {
-						if (((unsigned char*)buf)[i] == unsigned char(1)) {
-							writePng = false;
-							break;
-						}
-					}
-				}
-				if(writePng) screenShot(f);
-			}
+			screenShot(f);
+			auto raw = fopen(currentRawPath, "wb");
+			fwrite(buf, 1, size, raw);
+			fclose(raw);
+			g_depthCapturedFilePath = currentRawPath;
+			fprintf(f, "[%I64d] : write depth %s into file.\n", ms, rawPath);
+			strcpy(rawPath, "depth.raw");
 			makeCmdStop();
 			fclose(f);
 		}

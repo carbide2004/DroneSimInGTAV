@@ -139,14 +139,14 @@ void adjustCamera(std::string cmd)
 	}
 	
 	// rotation
-	float rightAxisX = CONTROLS::GET_DISABLED_CONTROL_NORMAL(0, 220);
-	float rightAxisY = CONTROLS::GET_DISABLED_CONTROL_NORMAL(0, 221);
+	// float rightAxisX = CONTROLS::GET_DISABLED_CONTROL_NORMAL(0, 220);
+	// float rightAxisY = CONTROLS::GET_DISABLED_CONTROL_NORMAL(0, 221);
 
-	if (rightAxisX != 0.0 || rightAxisY != 0.0) {
-		//Rotate camera - Multiply by sensitivity settings
-		Vector3 currentRotation = CAM::GET_CAM_ROT(cameraHandle, 2);
-		currentRotation.x += rightAxisY * -5.0f;
-		currentRotation.z += rightAxisX * -10.0f;
-		CAM::SET_CAM_ROT(cameraHandle, currentRotation.x, currentRotation.y, currentRotation.z, 2);
-	}
+	// if (rightAxisX != 0.0 || rightAxisY != 0.0) {
+	// 	//Rotate camera - Multiply by sensitivity settings
+	// 	Vector3 currentRotation = CAM::GET_CAM_ROT(cameraHandle, 2);
+	// 	currentRotation.x += rightAxisY * -5.0f;
+	// 	currentRotation.z += rightAxisX * -10.0f;
+	// 	CAM::SET_CAM_ROT(cameraHandle, currentRotation.x, currentRotation.y, currentRotation.z, 2);
+	// }
 }
