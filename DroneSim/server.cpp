@@ -132,37 +132,52 @@ void ModServer::handle_client_connection()
                 
                 log_to_pedTxt("Received command (string conversion): '" + command + "'", SERVER_LOG_FILE);
 
-                if (command == "CAPTURE")
+                if (command == "REQUEST")
                 {
-                    log_to_pedTxt("Command recognized: CAPTURE", SERVER_LOG_FILE);
-                    makeCmdStart();
-                    while (cmdToCatch != catchStop) {
-                        WAIT(100); // 等待直到捕获完成
+                    // REQUEST：将命令推入队列，由 GTAV 脚本线程（script.cpp）处理
+                    g_cmdQueue.push(command); 
+                    log_to_pedTxt("Command added to queue: 'REQUEST'", SERVER_LOG_FILE);
+
+                    // 立即关闭连接并重新开始接受新连接
+                    if (socket_.is_open()) {
+                        socket_.close(); 
                     }
+                    start_accept(); 
+                }
+                else if (command == "CAPTURE")
+                {
+                    // CAPTURE：立即发送上次捕获的文件
+                    log_to_pedTxt("Command recognized: CAPTURE. Sending last captured data.", SERVER_LOG_FILE);
+                    
+                    // 从全局路径变量中获取数据（这些路径是在 REQUEST 期间设置的）
                     std::vector<unsigned char> rgb_data = GetBytes(g_rgbCapturedFilePath);
                     std::vector<unsigned char> depth_data = GetBytes(g_depthCapturedFilePath);
 
-                    g_rgbCapturedFilePath.clear(); 
-                    log_to_pedTxt("image captured with size: " + std::to_string(rgb_data.size()) + " bytes", SERVER_LOG_FILE);
-                    // Prepare combined data
-                    std::vector<unsigned char> combined_data;
+                    // 检查数据是否有效，如果无效（例如大小为0），则发送错误或空数据
+                    if (rgb_data.empty() || depth_data.empty()) {
+                        log_to_pedTxt("Error: RGB or Depth data is empty. Was REQUEST command sent?", SERVER_LOG_FILE);
+                        std::string error_resp = "ERROR: Last capture data not ready.";
+                        boost::asio::async_write(socket_, boost::asio::buffer(error_resp), [this](const boost::system::error_code& write_error, size_t) {
+                            if (write_error) log_to_pedTxt("Error sending error response: " + write_error.message(), SERVER_LOG_FILE);
+                            if (socket_.is_open()) socket_.close();
+                            start_accept();
+                        });
+                        return; // 结束处理
+                    }
                     
-                    // Add RGB data size to combined_data
+                    // 准备组合数据 (与您原来的 CAPTURE 逻辑相同)
+                    std::vector<unsigned char> combined_data;
                     uint32_t rgb_size = static_cast<uint32_t>(rgb_data.size());
                     combined_data.insert(combined_data.end(), reinterpret_cast<unsigned char*>(&rgb_size), reinterpret_cast<unsigned char*>(&rgb_size) + sizeof(uint32_t));
-
-                    // Add Depth data size to combined_data
                     uint32_t depth_size = static_cast<uint32_t>(depth_data.size());
                     combined_data.insert(combined_data.end(), reinterpret_cast<unsigned char*>(&depth_size), reinterpret_cast<unsigned char*>(&depth_size) + sizeof(uint32_t));
-
-                    // Add RGB data to combined_data
                     combined_data.insert(combined_data.end(), rgb_data.begin(), rgb_data.end());
-
-                    // Add Depth data to combined_data
                     combined_data.insert(combined_data.end(), depth_data.begin(), depth_data.end());
-
+                    
                     log_to_pedTxt("Combined image data prepared with total size: " + std::to_string(combined_data.size()) + " bytes", SERVER_LOG_FILE);
-                    send_data_async(std::move(combined_data));
+                    send_data_async(std::move(combined_data)); // 异步发送数据
+                    
+                    // 注意：send_data_async 会在发送完成后关闭连接并调用 start_accept()
                 }
                 else
                 {

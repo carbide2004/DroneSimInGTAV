@@ -5,6 +5,7 @@
 #include "enums.h"
 #include "main.h"
 #include <cmath>
+#include <string>
 
 const float PI = acos(1.0) * 2;
 const float cameraSpeedFactor = 1;
@@ -14,7 +15,7 @@ extern bool CameraMode;
 extern int adjustCameraFinished;
 
 void startNewCamera();
-void adjustCamera();
+void adjustCamera(std::string cmd);
 void StopCamera(int foldNo = 0);
 
 bool showCamera();

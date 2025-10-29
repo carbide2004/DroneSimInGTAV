@@ -232,11 +232,11 @@ auto screenShot = [](FILE* f) {
 				std::chrono::system_clock::now().time_since_epoch()
 				);
 	wchar_t currentImgPath[fileLength]; 
-	swprintf(currentImgPath, fileLength, L".\\data\\temp_capture_RGB_%lld.png", ms.count());
+	swprintf(currentImgPath, fileLength, L".\\data\\temp_capture_RGB.png");
 	char currentImgPathNarrow[fileLength];
-	sprintf(currentImgPathNarrow, ".\\data\\temp_capture_RGB_%lld.png", ms.count());
-	g_rgbCapturedFilePath = currentImgPathNarrow;
+	sprintf(currentImgPathNarrow, ".\\data\\temp_capture_RGB.png");
 	int screenCapResult = export_get_screen_buffer(currentImgPath);
+	g_rgbCapturedFilePath = currentImgPathNarrow;
 	if (screenCapResult != 1) {
 		fprintf(f, "[%I64d] : export screen %ls failed.\n", ms, imgPath);
 	}
@@ -274,8 +274,7 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 			ExtractDepthBuffer(dev.Get(), self, res.Get());
 			last_capture_depth = system_clock::now();
 			char currentRawPath[fileLength];
-			sprintf(currentRawPath, ".\\data\\temp_capture_depth_%lld.raw", ms.count()); //先这样处理一下
-			g_depthCapturedFilePath = currentRawPath;
+			sprintf(currentRawPath, ".\\data\\temp_capture_depth.raw"); //先这样处理一下
 
 			void *buf;
 			int size = export_get_depth_buffer(&buf);
@@ -285,6 +284,7 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 				auto raw = fopen(currentRawPath, "wb");
 				fwrite(buf, 1, size, raw);
 				fclose(raw);
+				g_depthCapturedFilePath = currentRawPath;
 				fprintf(f, "[%I64d] : write depth %s into file.\n", ms, rawPath);
 				strcpy(rawPath, "depth.raw");
 			}

@@ -41,59 +41,55 @@ void startNewCamera()
 	CameraMode = true;
 }
 
-void adjustCamera()
+void adjustCamera(std::string cmd)
 {
 
 	// movement
 	Vector3 camDelta = {};
 	float nfov = 0.0;
 	bool isMovement = false;
-	if (g_cmdQueue.size() > 0) {
-		std::string cmd = g_cmdQueue.front();
-		g_cmdQueue.pop();
-		log_to_pedTxt("front cmd is: " + cmd, logFilePathCamera);
-		if (cmd == "FORWARD") {
-			camDelta.x = STEPSIZE;
-			isMovement = true;
-			setStatusText("Camera moving forward.");
-		}
-		else if (cmd == "BACKWARD") {
-			camDelta.x = -STEPSIZE;
-			isMovement = true;
-			setStatusText("Camera moving backward.");
-		}
-		else if (cmd == "LEFT") {
-			camDelta.y = -STEPSIZE;
-			isMovement = true;
-			setStatusText("Camera moving left.");
-		}
-		else if (cmd == "RIGHT") {
-			camDelta.y = STEPSIZE;	
-			isMovement = true;
-			setStatusText("Camera moving right.");
-		}
-		else if (cmd == "UP") {
-			camDelta.z = STEPSIZE;
-			isMovement = true;
-			setStatusText("Camera moving up.");
-		}
-		else if (cmd == "DOWN") {
-			camDelta.z = -STEPSIZE;
-			isMovement = true;
-			setStatusText("Camera moving down.");
-		}
-		else if (cmd == "LEFTROTATE") {
-			Vector3 currentRotation = CAM::GET_CAM_ROT(cameraHandle, 2);
-			currentRotation.z += 45.0f;
-			CAM::SET_CAM_ROT(cameraHandle, currentRotation.x, currentRotation.y, currentRotation.z, 2);
-			setStatusText("Camera rotating left.");
-		}
-		else if (cmd == "RIGHTROTATE") {
-			Vector3 currentRotation = CAM::GET_CAM_ROT(cameraHandle, 2);
-			currentRotation.z += -45.0f;
-			CAM::SET_CAM_ROT(cameraHandle, currentRotation.x, currentRotation.y, currentRotation.z, 2);
-			setStatusText("Camera rotating right.");
-		}
+	log_to_pedTxt("front cmd is: " + cmd, logFilePathCamera);
+	if (cmd == "FORWARD") {
+		camDelta.x = STEPSIZE;
+		isMovement = true;
+		setStatusText("Camera moving forward.");
+	}
+	else if (cmd == "BACKWARD") {
+		camDelta.x = -STEPSIZE;
+		isMovement = true;
+		setStatusText("Camera moving backward.");
+	}
+	else if (cmd == "LEFT") {
+		camDelta.y = -STEPSIZE;
+		isMovement = true;
+		setStatusText("Camera moving left.");
+	}
+	else if (cmd == "RIGHT") {
+		camDelta.y = STEPSIZE;	
+		isMovement = true;
+		setStatusText("Camera moving right.");
+	}
+	else if (cmd == "UP") {
+		camDelta.z = STEPSIZE;
+		isMovement = true;
+		setStatusText("Camera moving up.");
+	}
+	else if (cmd == "DOWN") {
+		camDelta.z = -STEPSIZE;
+		isMovement = true;
+		setStatusText("Camera moving down.");
+	}
+	else if (cmd == "LEFTROTATE") {
+		Vector3 currentRotation = CAM::GET_CAM_ROT(cameraHandle, 2);
+		currentRotation.z += 45.0f;
+		CAM::SET_CAM_ROT(cameraHandle, currentRotation.x, currentRotation.y, currentRotation.z, 2);
+		setStatusText("Camera rotating left.");
+	}
+	else if (cmd == "RIGHTROTATE") {
+		Vector3 currentRotation = CAM::GET_CAM_ROT(cameraHandle, 2);
+		currentRotation.z += -45.0f;
+		CAM::SET_CAM_ROT(cameraHandle, currentRotation.x, currentRotation.y, currentRotation.z, 2);
+		setStatusText("Camera rotating right.");
 	}
 	if (isMovement) {
 		Vector3 camNewPos = CAM::GET_CAM_COORD(cameraHandle);
