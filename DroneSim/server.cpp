@@ -10,6 +10,13 @@ static ba::io_context g_ioContext;
 // 用于管理服务器线程的全局指针
 static std::unique_ptr<std::thread> g_serverThread;
 
+extern catchState cmdToCatch;
+extern std::string g_rgbCapturedFilePath;
+extern std::string g_depthCapturedFilePath;
+extern std::string g_stencilCapturedFilePath;
+extern std::string g_matrixCapturedFilePath;
+extern std::queue<std::string> g_cmdQueue;
+
 char* SERVER_LOG_FILE = "logs\\server.log";
 
 // ====================================================================
@@ -162,6 +169,8 @@ void ModServer::handle_client_connection()
                     // 从全局路径变量中获取数据（这些路径是在 REQUEST 期间设置的）
                     std::vector<unsigned char> rgb_data = GetBytes(g_rgbCapturedFilePath);
                     std::vector<unsigned char> depth_data = GetBytes(g_depthCapturedFilePath);
+                    std::vector<unsigned char> stencil_data = GetBytes(g_stencilCapturedFilePath);
+                    std::vector<unsigned char> matrix_data = GetBytes(g_matrixCapturedFilePath);
 
                     // 检查数据是否有效，如果无效（例如大小为0），则发送错误或空数据
                     if (rgb_data.empty() || depth_data.empty()) {
@@ -175,14 +184,21 @@ void ModServer::handle_client_connection()
                         return; // 结束处理
                     }
                     
-                    // 准备组合数据 (与您原来的 CAPTURE 逻辑相同)
+                    // 准备组合数据 
                     std::vector<unsigned char> combined_data;
                     uint32_t rgb_size = static_cast<uint32_t>(rgb_data.size());
                     combined_data.insert(combined_data.end(), reinterpret_cast<unsigned char*>(&rgb_size), reinterpret_cast<unsigned char*>(&rgb_size) + sizeof(uint32_t));
                     uint32_t depth_size = static_cast<uint32_t>(depth_data.size());
                     combined_data.insert(combined_data.end(), reinterpret_cast<unsigned char*>(&depth_size), reinterpret_cast<unsigned char*>(&depth_size) + sizeof(uint32_t));
+                    // uint32_t stencil_size = static_cast<uint32_t>(stencil_data.size());
+                    // combined_data.insert(combined_data.end(), reinterpret_cast<unsigned char*>(&stencil_size), reinterpret_cast<unsigned char*>(&stencil_size) + sizeof(uint32_t));
+                    // uint32_t matrix_size = static_cast<uint32_t>(g_matrixCapturedFilePath.size());
+                    // combined_data.insert(combined_data.end(), reinterpret_cast<unsigned char*>(&matrix_size), reinterpret_cast<unsigned char*>(&matrix_size) + sizeof(uint32_t));
+                    
                     combined_data.insert(combined_data.end(), rgb_data.begin(), rgb_data.end());
                     combined_data.insert(combined_data.end(), depth_data.begin(), depth_data.end());
+                    // combined_data.insert(combined_data.end(), stencil_data.begin(), stencil_data.end());
+                    // combined_data.insert(combined_data.end(), matrix_data.begin(), matrix_data.end());
                     
                     log_to_pedTxt("Combined image data prepared with total size: " + std::to_string(combined_data.size()) + " bytes", SERVER_LOG_FILE);
                     send_data_async(std::move(combined_data)); // 异步发送数据

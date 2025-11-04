@@ -200,14 +200,24 @@ if __name__ == "__main__":
     
     for cmd in commands:
         send_camera_command(cmd)
-        time.sleep(0.1)
+        time.sleep(1)
         
-        rgb_data, depth_data = get_data_from_server("CAPTURE")
-        if rgb_data:
-            save_rgb_image(rgb_data)
-        if depth_data:
-            save_depth_image(depth_data)
-
-        time.sleep(0.1)
+        send_camera_command("REQUEST")
+        while True:
+            time.sleep(1)
+            response = get_string_from_server("CHECK")
+            print(f"CHECK response: {response}")
+            if response == "READY":
+                break
+        rgb_data_bytes, depth_data_bytes = get_data_from_server("CAPTURE")
+        # 可视化rgb数据，不保存
+        if rgb_data_bytes:
+            img = Image.open(BytesIO(rgb_data_bytes))
+            plt.imshow(img)
+            plt.axis('off')
+            plt.show()
+        else:
+            print("未收到RGB数据，无法显示图片。")
+        time.sleep(1)
     
     print("\n所有命令及其数据获取任务已完成。")

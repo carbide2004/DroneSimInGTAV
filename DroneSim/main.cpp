@@ -19,6 +19,7 @@
 #include <d3dcompiler.h>
 #include <vector>
 #include <Eigen/Core>
+#include <Eigen/Dense>
 #include <atlimage.h>
 #include <fstream>
 #include <ScreenGrab.h>
@@ -61,15 +62,19 @@ static bool hooked = false;
 //global control variables
 //-------------------------
 
-static bool draw_indexed_count = false;
+static int draw_indexed_count = 0;
 
 const size_t fileLength = 256;
 catchState cmdToCatch = catchStop;	
-static WCHAR imgPath[fileLength] = L"data\\screen.png";
-static char rawPath[fileLength] = "data\\depth.raw";
+static WCHAR imgPath[fileLength] = L"data\\screen.bmp";
+static char rawPath[fileLength] = "data\\stencil.raw";
+static char depthPath[fileLength] = "data\\depth.raw";
+static char matrixPath[fileLength] = "data\\matrix.txt";
 static bool onlyScreen = false, forceSave = false;
 std::string g_rgbCapturedFilePath;
 std::string g_depthCapturedFilePath;
+std::string g_stencilCapturedFilePath;
+std::string g_matrixCapturedFilePath = matrixPath;
 std::queue<std::string> g_cmdQueue;
 
 
@@ -196,11 +201,47 @@ void draw_indexed_hook(ID3D11DeviceContext* self, UINT indexCount, UINT startLoc
 	ComPtr<ID3D11Device> dev;
 	self->GetDevice(&dev);
 	self->VSGetConstantBuffers(1, 1, &buf);
+	// auto f = fopen(logFilePath, "a");
+	// fprintf(f, "Draw Indexed Call count: %d\n", draw_indexed_count);
+	// fclose(f);
 	if (buf != nullptr && draw_indexed_count == 1000) {
 		lastConstants = buf;
 		ExtractConstantBuffer(dev.Get(), self, buf.Get());
 	}
 	
+	if (cmdToCatch == catchStart) {
+		if (!onlyScreen) {
+			//Eigen::Matrix4f I = Eigen::Matrix4f::Identity();
+			Eigen::Matrix4f P;
+			/* get constant */
+			rage_matrices matrix_buf;
+			matrix_buf.M = Eigen::Matrix4f::Identity();
+			matrix_buf.MV = Eigen::Matrix4f::Identity();
+			matrix_buf.MVP = Eigen::Matrix4f::Identity();
+			matrix_buf.Vinv = Eigen::Matrix4f::Identity();
+			// get projection matrix
+			int sizeMatrix = export_get_constant_buffer(&matrix_buf);    // projection matrix
+
+			/* projection matrix */
+			std::ofstream outfile;
+			outfile.open(matrixPath);
+			outfile << "P" << std::endl;
+			P = matrix_buf.MVP * matrix_buf.MV.inverse();  // Projection Matrix
+			outfile << P << std::endl;
+			outfile << "---------------" << std::endl;
+			outfile << sizeMatrix << std::endl;
+			outfile << "M" << std::endl;
+			outfile << matrix_buf.M << std::endl;
+			outfile << "MV" << std::endl;
+			outfile << matrix_buf.MV << std::endl;
+			outfile << "MVP" << std::endl;
+			outfile << matrix_buf.MVP << std::endl;
+			outfile << "Vinv" << std::endl;
+			outfile << matrix_buf.Vinv << std::endl;
+			outfile.close();
+		}
+	}
+
 	draw_indexed_count += 1;
 	origMethod(self, indexCount, startLoc, baseLoc);
 }
@@ -228,14 +269,12 @@ void clear_render_target_view_hook(ID3D11DeviceContext* self, ID3D11RenderTarget
 }
 
 auto screenShot = [](FILE* f) {
+	int screenCapResult = export_get_screen_buffer(imgPath);
 	std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
 				std::chrono::system_clock::now().time_since_epoch()
 				);
-	wchar_t currentImgPath[fileLength]; 
-	swprintf(currentImgPath, fileLength, L".\\data\\temp_capture_RGB.png");
 	char currentImgPathNarrow[fileLength];
-	sprintf(currentImgPathNarrow, ".\\data\\temp_capture_RGB.png");
-	int screenCapResult = export_get_screen_buffer(currentImgPath);
+	sprintf(currentImgPathNarrow, "data\\screen.bmp");
 	g_rgbCapturedFilePath = currentImgPathNarrow;
 	if (screenCapResult != 1) {
 		fprintf(f, "[%I64d] : export screen %ls failed.\n", ms, imgPath);
@@ -262,7 +301,7 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 		if (hr != S_OK) return;
 		tex->GetDesc(&desc);
 		
-		if (lastDsv == nullptr && desc.Width > 600 && desc.Height > 600 && desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS && cmdToCatch == catchStart) {
+		if (lastDsv == nullptr && desc.Width > 600 && desc.Height > 600 && desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS) {
 			lastDsv = curDSV;
 			std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
 				std::chrono::system_clock::now().time_since_epoch()
@@ -273,26 +312,32 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 			
 			ExtractDepthBuffer(dev.Get(), self, res.Get());
 			last_capture_depth = system_clock::now();
-			char currentRawPath[fileLength];
-			sprintf(currentRawPath, ".\\data\\temp_capture_depth.raw"); //先这样处理一下
 
-			void *buf;
-			int size = export_get_depth_buffer(&buf);
-			// fprintf(f, "[%I64d] : onlyscreen = %s.\n", ms, onlyScreen ? "yes" : "no");
-			screenShot(f);
-			auto raw = fopen(currentRawPath, "wb");
-			fwrite(buf, 1, size, raw);
-			fclose(raw);
-			g_depthCapturedFilePath = currentRawPath;
-			fprintf(f, "[%I64d] : write depth %s into file.\n", ms, rawPath);
-			strcpy(rawPath, "depth.raw");
-			makeCmdStop();
+			if (cmdToCatch == catchStart) {
+				void *stencil_buf;
+				void *depth_buf;
+				int sizeStencil = export_get_stencil_buffer(&stencil_buf);
+				int sizeDepth = export_get_depth_buffer(&depth_buf);
+				screenShot(f);
+
+				auto raw = fopen(rawPath, "wb");
+				fwrite(stencil_buf, 1, sizeStencil, raw);
+				fclose(raw);
+				fprintf(f, "[%I64d] : write stencil %s into file.\n", ms, rawPath);
+				g_stencilCapturedFilePath = rawPath;
+
+				auto depth_raw = fopen(depthPath, "wb");
+				fwrite(depth_buf, 1, sizeDepth, depth_raw);
+				fclose(depth_raw);
+				fprintf(f, "[%I64d] : write depth %s into file.\n", ms, depthPath);
+				g_depthCapturedFilePath = depthPath;
+
+				makeCmdStop();
+			}
 			fclose(f);
 		}
 	}
 	origMethod(self, dsv, flags, depth, stencil);
-	
-	
 }
 
 
@@ -303,7 +348,7 @@ void presentCallback(void* chain)
 		std::chrono::system_clock::now().time_since_epoch()
 		);
 
-	draw_indexed_count = 0;
+	// draw_indexed_count = 0;
 	HRESULT hr2 = S_OK, hr1 = S_OK;
 	ComPtr<ID3D11Device> dev;
 	ComPtr<ID3D11DeviceContext> ctx;

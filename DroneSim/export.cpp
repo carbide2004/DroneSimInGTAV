@@ -286,7 +286,7 @@ extern "C" {
 	{
 		if (lastCtx == nullptr || backBuf == nullptr || !SUCCEEDED(screenHr)) return 0;
 		HRESULT hr = DirectX::SaveWICTextureToFile(lastCtx.Get(), backBuf.Get(),
-			GUID_ContainerFormatPng, pictureName);
+			GUID_ContainerFormatBmp, pictureName);
 		if (SUCCEEDED(hr)) {
 			return 1;
 		}

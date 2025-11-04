@@ -156,9 +156,3 @@ enum catchState
 	catchStart,
 	catchScreen
 };
-
-extern catchState cmdToCatch;
-
-extern std::string g_rgbCapturedFilePath;
-extern std::string g_depthCapturedFilePath;
-extern std::queue<std::string> g_cmdQueue;
