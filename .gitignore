@@ -10,3 +10,4 @@ packages/
 *.raw
 *.png
 __pycache__/
+*.pcd

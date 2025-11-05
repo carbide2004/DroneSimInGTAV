@@ -147,15 +147,15 @@ def capture_rgbd_data():
     depth_array = np.frombuffer(depth_data_bytes, dtype=np.float32).reshape((HEIGHT, WIDTH)).copy()
 
     # 将深度数据转换为真实深度
-    true_depth_array = 2 ** depth_array - 1
-    true_depth_array = 1 / (true_depth_array + 1e-9)  # 防止除零
-    true_depth_array *= 0.001
+    b = 10003.814*0.15 / (-0.15 + 10003.814)
+    k = 10003.814 / (-0.15 + 10003.814) - 1.0
+    true_depth_array = b / (depth_array + k)
 
     # 可视化深度图像（旁边带有颜色条）
-    # plt.imshow(true_depth_array, cmap='gray')
-    # plt.title("Depth Image")
-    # plt.colorbar(label="Value")
-    # plt.show()
+    plt.imshow(true_depth_array, cmap='gray')
+    plt.title("Depth Image")
+    plt.colorbar(label="Value")
+    plt.show()
     
     return rgb_array, true_depth_array
 
@@ -168,7 +168,7 @@ def rgbd_to_pointcloud(rgb_image_np, depth_image_np, camera_intrinsics, drone_po
         o3d.geometry.Image(rgb_image_np), 
         o3d.geometry.Image(depth_image_np), 
         depth_scale=1.0, # 深度值单位为米
-        depth_trunc=1.0, # 最大深度值
+        depth_trunc=1000.0, # 最大深度值
         convert_rgb_to_intensity=False
     )
 
@@ -256,8 +256,8 @@ if __name__ == "__main__":
                         # 将当前点云合并到全局点云中
                         global_point_cloud += current_pcd
                         # 可视化全局点云
-                        # print("正在可视化全局点云...")
-                        # o3d.visualization.draw_geometries([global_point_cloud])
+                        print("正在可视化全局点云...")
+                        o3d.visualization.draw_geometries([global_point_cloud])
 
                         print(f"已获取并合并位置 ({x:.2f}, {y:.2f}, {z:.2f}), 朝向 {yaw:.2f} 度的点云。")
                     else:
