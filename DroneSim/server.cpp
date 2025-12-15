@@ -1,4 +1,5 @@
 #include "server.h"
+#include "logging.h"
 
 namespace ba = boost::asio;
 namespace bap = boost::asio::ip;
@@ -17,7 +18,7 @@ extern std::string g_stencilCapturedFilePath;
 extern std::string g_matrixCapturedFilePath;
 extern std::queue<std::string> g_cmdQueue;
 
-char* SERVER_LOG_FILE = "logs\\server.log";
+ 
 
 // ====================================================================
 // ModServer 类成员函数的实现
@@ -27,13 +28,13 @@ ModServer::ModServer(boost::asio::io_context& io_context, unsigned short port)
     : acceptor_(io_context, boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), port)),
       socket_(io_context)
 {
-    log_to_pedTxt("Mod Server listening on port " + std::to_string(port), SERVER_LOG_FILE);
+    LOGI("server", std::string("Mod Server listening on port ") + std::to_string(port));
     start_accept();
 }
 
 void ModServer::start_accept()
 {
-    log_to_pedTxt("Waiting for new client connection...", SERVER_LOG_FILE);
+    LOGI("server", "Waiting for new client connection...");
     
     acceptor_.async_accept(socket_,
         [this](const boost::system::error_code& error)
@@ -43,18 +44,18 @@ void ModServer::start_accept()
                 try {
                     std::string client_info = socket_.remote_endpoint().address().to_string() + ":" + 
                                             std::to_string(socket_.remote_endpoint().port());
-                    log_to_pedTxt("Client connected from: " + client_info, SERVER_LOG_FILE);
+                    LOGI("server", std::string("Client connected from: ") + client_info);
                     
                     // 立即开始处理客户端连接
                     handle_client_connection();
                 } catch (const std::exception& e) {
-                    log_to_pedTxt("Error getting client endpoint: " + std::string(e.what()), SERVER_LOG_FILE);
+                    LOGE("server", std::string("Error getting client endpoint: ") + e.what());
                     handle_client_connection(); // 仍然尝试处理连接
                 }
             }
             else
             {
-                log_to_pedTxt("Error accepting connection: " + error.message(), SERVER_LOG_FILE);
+                LOGE("server", std::string("Error accepting connection: ") + error.message());
                 // 继续监听新的连接
                 start_accept();
             }
@@ -89,12 +90,12 @@ void ModServer::handle_client_connection()
     // 检查socket状态
     if (!socket_.is_open())
     {
-        log_to_pedTxt("Socket is not open when trying to read", SERVER_LOG_FILE);
+        LOGW("server", "Socket is not open when trying to read");
         start_accept(); // 重新开始接受连接
         return;
     }
     
-    log_to_pedTxt("Starting async_read_some operation", SERVER_LOG_FILE);
+    LOGD("server", "Starting async_read_some operation");
     
     // 使用shared_ptr管理buffer生命周期
     auto buffer = std::make_shared<std::vector<char>>(128);
@@ -102,14 +103,14 @@ void ModServer::handle_client_connection()
     socket_.async_read_some(boost::asio::buffer(*buffer),
         [this, buffer](const boost::system::error_code& error, size_t bytes_transferred)
         {
-            log_to_pedTxt("async_read_some callback triggered", SERVER_LOG_FILE);
+            LOGD("server", "async_read_some callback triggered");
             
             if (!error)
             {
-                log_to_pedTxt("Async_read_some completed. Bytes transferred: " + std::to_string(bytes_transferred), SERVER_LOG_FILE);
+                LOGD("server", std::string("Async_read_some completed. Bytes transferred: ") + std::to_string(bytes_transferred));
 
                 if (bytes_transferred == 0) {
-                    log_to_pedTxt("Client sent 0 bytes - client disconnected before sending data", SERVER_LOG_FILE);
+                    LOGW("server", "Client sent 0 bytes - client disconnected before sending data");
                     
                     if (socket_.is_open()) {
                         socket_.close();
@@ -130,20 +131,20 @@ void ModServer::handle_client_connection()
                         debug_output += "\\x" + std::to_string(static_cast<unsigned int>(static_cast<unsigned char>(c))); // 非可打印字符显示十六进制
                     }
                 }
-                log_to_pedTxt(debug_output, SERVER_LOG_FILE);
+                LOGD("server", debug_output);
 
                 std::string command(buffer->begin(), buffer->begin() + bytes_transferred);
                 
                 // 去除字符串末尾的空白字符
                 command.erase(command.find_last_not_of(" \t\n\r\f\v") + 1);
                 
-                log_to_pedTxt("Received command (string conversion): '" + command + "'", SERVER_LOG_FILE);
+                LOGD("server", std::string("Received command (string conversion): '") + command + "'");
 
                 if (command == "REQUEST")
                 {
                     // REQUEST：将命令推入队列，由 GTAV 脚本线程（script.cpp）处理
                     g_cmdQueue.push(command); 
-                    log_to_pedTxt("Command added to queue: 'REQUEST'", SERVER_LOG_FILE);
+                    LOGI("server", "Command added to queue: 'REQUEST'");
 
                     // 立即关闭连接并重新开始接受新连接
                     if (socket_.is_open()) {
@@ -154,7 +155,7 @@ void ModServer::handle_client_connection()
                 else if (command == "CHECK") {
                     // 检查是否捕获RGBD完成
 					std::string catch_flag = (cmdToCatch == catchStop) ? "READY" : "NOTREADY";
-					log_to_pedTxt("Command recognized: CHECK. Capture status: " + catch_flag, SERVER_LOG_FILE);
+                    LOGI("server", std::string("Command recognized: CHECK. Capture status: ") + catch_flag);
                     if (cmdToCatch == catchStop) {
                         send_data_async(std::vector<unsigned char>{'R','E','A','D','Y'});
                     } else {
@@ -164,7 +165,7 @@ void ModServer::handle_client_connection()
                 else if (command == "CAPTURE")
                 {
                     // CAPTURE：立即发送上次捕获的文件
-                    log_to_pedTxt("Command recognized: CAPTURE. Sending last captured data.", SERVER_LOG_FILE);
+                    LOGI("server", "Command recognized: CAPTURE. Sending last captured data.");
                     
                     // 从全局路径变量中获取数据（这些路径是在 REQUEST 期间设置的）
                     std::vector<unsigned char> rgb_data = GetBytes(g_rgbCapturedFilePath);
@@ -174,10 +175,10 @@ void ModServer::handle_client_connection()
 
                     // 检查数据是否有效，如果无效（例如大小为0），则发送错误或空数据
                     if (rgb_data.empty() || depth_data.empty()) {
-                        log_to_pedTxt("Error: RGB or Depth data is empty. Was REQUEST command sent?", SERVER_LOG_FILE);
+                        LOGE("server", "Error: RGB or Depth data is empty. Was REQUEST command sent?");
                         std::string error_resp = "ERROR: Last capture data not ready.";
                         boost::asio::async_write(socket_, boost::asio::buffer(error_resp), [this](const boost::system::error_code& write_error, size_t) {
-                            if (write_error) log_to_pedTxt("Error sending error response: " + write_error.message(), SERVER_LOG_FILE);
+                            if (write_error) LOGE("server", std::string("Error sending error response: ") + write_error.message());
                             if (socket_.is_open()) socket_.close();
                             start_accept();
                         });
@@ -200,7 +201,7 @@ void ModServer::handle_client_connection()
                     // combined_data.insert(combined_data.end(), stencil_data.begin(), stencil_data.end());
                     // combined_data.insert(combined_data.end(), matrix_data.begin(), matrix_data.end());
                     
-                    log_to_pedTxt("Combined image data prepared with total size: " + std::to_string(combined_data.size()) + " bytes", SERVER_LOG_FILE);
+                    LOGI("server", std::string("Combined image data prepared with total size: ") + std::to_string(combined_data.size()) + " bytes");
                     send_data_async(std::move(combined_data)); // 异步发送数据
                     
                     // 注意：send_data_async 会在发送完成后关闭连接并调用 start_accept()
@@ -208,7 +209,7 @@ void ModServer::handle_client_connection()
                 else
                 {
                     g_cmdQueue.push(command); // 将命令添加到队列中
-                    log_to_pedTxt("Command added to queue: '" + command + "'", SERVER_LOG_FILE);
+                    LOGI("server", std::string("Command added to queue: '") + command + "'");
                     if (socket_.is_open()) {
                         socket_.close(); // 关闭当前连接
                     }
@@ -231,21 +232,21 @@ void ModServer::handle_client_connection()
             }
             else
             {
-                log_to_pedTxt("Error receiving command (read_some): " + error.message(), SERVER_LOG_FILE);
-                log_to_pedTxt("Error value: " + std::to_string(error.value()), SERVER_LOG_FILE);
+                LOGE("server", std::string("Error receiving command (read_some): ") + error.message());
+                LOGE("server", std::string("Error value: ") + std::to_string(error.value()));
                 
                 // 检查是否是连接重置错误
                 if (error == boost::asio::error::connection_reset || 
                     error == boost::asio::error::eof ||
                     error.value() == 10054) // Windows连接重置错误
                 {
-                    log_to_pedTxt("Client disconnected before sending data", SERVER_LOG_FILE);
+                    LOGW("server", "Client disconnected before sending data");
                 }
                 
                 if (socket_.is_open()) {
                     socket_.close();
                 }
-                log_to_pedTxt("Connection closed due to read error.", SERVER_LOG_FILE);
+                LOGW("server", "Connection closed due to read error.");
                 
                 // 重新开始接受新连接
                 start_accept();
@@ -256,12 +257,12 @@ void ModServer::handle_client_connection()
 void ModServer::send_data_async(std::vector<unsigned char> data) {
     // 检查socket状态
     if (!socket_.is_open()) {
-        log_to_pedTxt("Attempted to send data on a closed or invalid socket.", SERVER_LOG_FILE);
+        LOGW("server", "Attempted to send data on a closed or invalid socket.");
         start_accept(); // 重新开始接受连接
         return;
     }
 
-    log_to_pedTxt("Preparing to send data of size: " + std::to_string(data.size()) + " bytes", SERVER_LOG_FILE);
+    LOGD("server", std::string("Preparing to send data of size: ") + std::to_string(data.size()) + " bytes");
 
     // 使用shared_ptr管理数据生命周期
     auto shared_data = std::make_shared<std::vector<unsigned char>>(std::move(data));
@@ -271,38 +272,38 @@ void ModServer::send_data_async(std::vector<unsigned char> data) {
     uint32_t data_len = static_cast<uint32_t>(shared_data->size());
     std::memcpy(length_bytes->data(), &data_len, sizeof(data_len));
 
-    log_to_pedTxt("Sending data length: " + std::to_string(data_len) + " bytes", SERVER_LOG_FILE);
+    LOGD("server", std::string("Sending data length: ") + std::to_string(data_len) + " bytes");
 
     // 先发送长度
     boost::asio::async_write(socket_, boost::asio::buffer(*length_bytes),
         [this, shared_data, length_bytes](const boost::system::error_code& error_len, size_t bytes_transferred_len) {
         if (!error_len) {
-            log_to_pedTxt("Successfully sent length header: " + std::to_string(bytes_transferred_len) + " bytes", SERVER_LOG_FILE);
+            LOGD("server", std::string("Successfully sent length header: ") + std::to_string(bytes_transferred_len) + " bytes");
             
             // 发送实际数据
             boost::asio::async_write(socket_, boost::asio::buffer(*shared_data),
                 [this, shared_data](const boost::system::error_code& error_data, size_t bytes_transferred_data) {
                 if (!error_data) {
-                    log_to_pedTxt("Image data sent successfully: " + std::to_string(bytes_transferred_data) + " bytes", SERVER_LOG_FILE);
+                    LOGI("server", std::string("Image data sent successfully: ") + std::to_string(bytes_transferred_data) + " bytes");
                 } else {
-                    log_to_pedTxt("Error sending image data: " + error_data.message(), SERVER_LOG_FILE);
+                    LOGE("server", std::string("Error sending image data: ") + error_data.message());
                 }
                 
                 // 发送完成后关闭连接并重新开始接受新连接
                 if (socket_.is_open()) {
                     socket_.close();
                 }
-                log_to_pedTxt("Connection closed after sending image data.", SERVER_LOG_FILE);
+                LOGI("server", "Connection closed after sending image data.");
                 
                 // 重新开始接受新连接
                 start_accept();
             });
         } else {
-            log_to_pedTxt("Error sending image data length: " + error_len.message(), SERVER_LOG_FILE);
+            LOGE("server", std::string("Error sending image data length: ") + error_len.message());
             if (socket_.is_open()) {
                 socket_.close();
             }
-            log_to_pedTxt("Connection closed due to image data length send error.", SERVER_LOG_FILE);
+            LOGW("server", "Connection closed due to image data length send error.");
             
             // 重新开始接受新连接
             start_accept();
@@ -319,16 +320,16 @@ void InitializeModServer()
         WSADATA wsaData;
         int result = WSAStartup(MAKEWORD(2, 2), &wsaData); // 请求 Winsock 2.2 版本
         if (result != 0) {
-            log_to_pedTxt("WSAStartup failed with error: " + std::to_string(result), SERVER_LOG_FILE);
+            LOGE("server", std::string("WSAStartup failed with error: ") + std::to_string(result));
             return; // WSAStartup 失败，不继续初始化服务器
         }
-        log_to_pedTxt("WSAStartup successfully called.", SERVER_LOG_FILE);
+        LOGI("server", "WSAStartup successfully called.");
         g_winsock_initialized = true;
     }
     
     // 检查是否已经初始化过，避免重复启动
     if (g_modServerInstance) {
-        log_to_pedTxt("Mod Server already initialized. Skipping.", SERVER_LOG_FILE);
+        LOGW("server", "Mod Server already initialized. Skipping.");
         return;
     }
 
@@ -338,27 +339,27 @@ void InitializeModServer()
         g_serverThread = std::make_unique<std::thread>([]() {
             try {
                 g_modServerInstance = std::make_unique<ModServer>(g_ioContext, 12345);
-                log_to_pedTxt("Starting io_context.run()...", SERVER_LOG_FILE);
+                LOGI("server", "Starting io_context.run()...");
                 g_ioContext.run(); // 运行 io_context，它会阻塞直到所有任务完成或 stop() 被调用
-                log_to_pedTxt("io_context stopped running.", SERVER_LOG_FILE);
+                LOGI("server", "io_context stopped running.");
             } catch (const std::exception& e) {
-                log_to_pedTxt("Server thread exception caught: " + std::string(e.what()), SERVER_LOG_FILE);
+                LOGE("server", std::string("Server thread exception caught: ") + e.what());
             }
         });
         g_serverThread->detach(); // 分离线程，让它独立运行
 
-        log_to_pedTxt("Mod Server initialization sequence started.", SERVER_LOG_FILE);
+        LOGI("server", "Mod Server initialization sequence started.");
     }
     catch (const std::exception& e)
     {
-        log_to_pedTxt("Mod Server Initialization Exception: " + std::string(e.what()), SERVER_LOG_FILE);
+        LOGE("server", std::string("Mod Server Initialization Exception: ") + e.what());
     }
 }
 
 // 在你的Mod卸载时调用此函数，用于清理资源
 void ShutdownModServer()
 {
-    log_to_pedTxt("Mod Server shutdown sequence initiated.", SERVER_LOG_FILE);
+    LOGI("server", "Mod Server shutdown sequence initiated.");
     
     // 停止 io_context，这将导致 g_ioContext.run() 返回，从而结束服务器线程
     g_ioContext.stop();
@@ -367,5 +368,5 @@ void ShutdownModServer()
     g_modServerInstance.reset();
     g_serverThread.reset();
 
-    log_to_pedTxt("Mod Server resources cleaned up.", SERVER_LOG_FILE);
+    LOGI("server", "Mod Server resources cleaned up.");
 }

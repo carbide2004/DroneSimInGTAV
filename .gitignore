@@ -11,3 +11,4 @@ packages/
 *.png
 __pycache__/
 *.pcd
+.trae/

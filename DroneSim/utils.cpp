@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <vector>
 #include "script.h"
+#include "logging.h"
 
 extern "C" IMAGE_DOS_HEADER __ImageBase; // MSVC specific, with other compilers use HMODULE from DllMain
 
@@ -21,16 +22,7 @@ void setStatusText(std::string text)
 	UI::_DRAW_NOTIFICATION(1, 1);
 }
 
-void log_to_pedTxt(std::string text, char* file)
-{
-	FILE* fp;
-	fopen_s(&fp, file, "a");
-	if (fp == NULL) {
-		return;
-	}
-	fprintf(fp, "%s\n", text.c_str());
-	fclose(fp);
-}
+ 
 
 std::string cachedModulePath;
 

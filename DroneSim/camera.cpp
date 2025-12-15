@@ -7,8 +7,9 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include "logging.h"
 
-char* logFilePathCamera = "logs\\camera.log";
+ 
 
 int adjustCameraFinished = 0;
 bool CameraMode = false;
@@ -21,7 +22,7 @@ void startNewCamera()
 	Ped actorPed = PLAYER::PLAYER_PED_ID();
 	Vector3 startLocation = ENTITY::GET_ENTITY_COORDS(actorPed, true);
 	float startHeading = ENTITY::GET_ENTITY_HEADING(actorPed);
-	auto f = fopen(logFilePathCamera, "a");
+    
 	std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
 				std::chrono::system_clock::now().time_since_epoch()
 				);
@@ -32,11 +33,11 @@ void startNewCamera()
 	camOffset.z = 10;
 
 	Vector3 camLocation = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(actorPed, camOffset.x, camOffset.y, camOffset.z);
-	fprintf(f, "[%I64d] : Camera location (%f, %f, %f)\n", ms.count(), camLocation.x, camLocation.y, camLocation.z);
+    LOGI("camera", std::string("Camera location (") + std::to_string(camLocation.x) + ", " + std::to_string(camLocation.y) + ", " + std::to_string(camLocation.z) + ")");
 	cameraHandle = CAM::CREATE_CAM_WITH_PARAMS("DEFAULT_SCRIPTED_CAMERA", camLocation.x, camLocation.y, camLocation.z, 0.0, 0.0, 0.0, 40.0, 1, 2);
 
 	CAM::RENDER_SCRIPT_CAMS(true, 1, 1800, 1, 0);
-	WAIT(2000);
+    WAIT(2000);
 
 	CameraMode = true;
 }
@@ -48,7 +49,7 @@ void adjustCamera(std::string cmd)
 	Vector3 camDelta = {};
 	float nfov = 0.0;
 	bool isMovement = false;
-	log_to_pedTxt("front cmd is: " + cmd, logFilePathCamera);
+    LOGD("camera", std::string("front cmd is: ") + cmd);
 	if (cmd == "FORWARD") {
 		camDelta.x = STEPSIZE;
 		isMovement = true;
@@ -149,4 +150,12 @@ void adjustCamera(std::string cmd)
 	// 	currentRotation.z += rightAxisX * -10.0f;
 	// 	CAM::SET_CAM_ROT(cameraHandle, currentRotation.x, currentRotation.y, currentRotation.z, 2);
 	// }
+}
+
+void setCameraFov(float fov)
+{
+    Any cam = CAM::GET_RENDERING_CAM();
+    if (cam) {
+        CAM::SET_CAM_FOV(cam, fov);
+    }
 }

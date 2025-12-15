@@ -28,7 +28,6 @@ public:
 };
 
 void setStatusText(std::string text);
-void log_to_pedTxt(std::string text, char* file);
 
 
 class MathUtils {

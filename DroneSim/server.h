@@ -9,7 +9,6 @@
 #include <fstream>
 #include "utils.h"
 
-extern char* SERVER_LOG_FILE;
 
 
 // ====================================================================

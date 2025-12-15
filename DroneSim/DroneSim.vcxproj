@@ -143,9 +143,11 @@
   <ItemGroup>
     <ClCompile Include="camera.cpp" />
     <ClCompile Include="export.cpp" />
+    <ClCompile Include="logging.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="script.cpp" />
     <ClCompile Include="server.cpp" />
+    <ClCompile Include="server_v2.cpp" />
     <ClCompile Include="utils.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -154,8 +156,11 @@
   <ItemGroup>
     <ClInclude Include="camera.h" />
     <ClInclude Include="export.h" />
+    <ClInclude Include="logging.h" />
     <ClInclude Include="script.h" />
     <ClInclude Include="server.h" />
+    <ClInclude Include="server_v2.h" />
+    <ClInclude Include="proto.h" />
     <ClInclude Include="utils.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

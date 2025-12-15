@@ -25,5 +25,9 @@ extern "C" {
 	__declspec(dllexport) int export_get_stencil_buffer(void** buf);
 	__declspec(dllexport) int export_get_constant_buffer(rage_matrices* buf);
 	__declspec(dllexport) int export_get_screen_buffer(WCHAR *pictureName);
+	__declspec(dllexport) int export_get_last_color_width();
+	__declspec(dllexport) int export_get_last_color_height();
+	__declspec(dllexport) int export_get_last_depth_width();
+	__declspec(dllexport) int export_get_last_depth_height();
 }
 #endif

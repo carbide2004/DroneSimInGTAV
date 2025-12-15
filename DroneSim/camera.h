@@ -16,6 +16,7 @@ extern int adjustCameraFinished;
 
 void startNewCamera();
 void adjustCamera(std::string cmd);
+void setCameraFov(float fov);
 void StopCamera(int foldNo = 0);
 
 bool showCamera();

@@ -13,6 +13,7 @@
 #include <Eigen/Core>
 #include <atlimage.h>
 #include <windows.h>
+#include "logging.h"
 #include <string>
 #include <fstream>
 #include <ScreenGrab.h>
@@ -41,6 +42,10 @@ static vector<unsigned char> depthBuf;
 static vector<unsigned char> colorBuf;
 static vector<unsigned char> stencilBuf;
 static rage_matrices constants;
+static int lastColorWidth = 0;
+static int lastColorHeight = 0;
+static int lastDepthWidth = 0;
+static int lastDepthHeight = 0;
 static bool request_copy = false;
 static mutex copy_mtx;
 static condition_variable copy_cv;
@@ -53,12 +58,7 @@ static std::chrono::milliseconds capScreen;
 
 void writeLog(std::string msg)
 {
-	std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
-		std::chrono::system_clock::now().time_since_epoch()
-		);
-	std::ofstream log("logs\\export.log", std::ios_base::app);
-	log << ms.count() << " : " <<  msg << std::endl;
-	log.close();
+    LOGI("export", msg);
 }
 
 static void unpack_depth(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resource* src, vector<unsigned char>& dst, vector<unsigned char>& stencil)
@@ -71,7 +71,9 @@ static void unpack_depth(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Reso
 	if (hr != S_OK) throw std::system_error(hr, std::system_category());
 	D3D11_TEXTURE2D_DESC src_desc;
 
-	src_tex->GetDesc(&src_desc);
+    src_tex->GetDesc(&src_desc);
+    lastDepthWidth = (int)src_desc.Width;
+    lastDepthHeight = (int)src_desc.Height;
 	// assert(src_desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS);
 	D3D11_MAPPED_SUBRESOURCE src_map = { 0 };
 	hr = ctx->Map(src, 0, D3D11_MAP_READ, 0, &src_map);
@@ -160,7 +162,9 @@ void copyTexToVector(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resource
 	hr = res->QueryInterface(__uuidof(ID3D11Texture2D), &tex);
 	D3D11_TEXTURE2D_DESC desc;
 	if (hr != S_OK) throw std::system_error(hr, std::system_category());
-	tex->GetDesc(&desc);
+    tex->GetDesc(&desc);
+    lastColorWidth = (int)desc.Width;
+    lastColorHeight = (int)desc.Height;
 	ComPtr<ID3D11Texture2D> tex_copy;
 	CreateTextureIfNeeded(dev, tex.Get(), &tex_copy);
 	ctx->CopyResource(tex_copy.Get(), tex.Get());
@@ -203,9 +207,9 @@ void ExtractDepthBuffer(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resou
 {
 	lastDev = dev;
 	lastCtx = ctx;
-	CreateTextureIfNeeded(dev, res, &depthRes);
-	ctx->CopyResource(depthRes.Get(), res);
-	last_depth_time = std::chrono::high_resolution_clock::now();
+    CreateTextureIfNeeded(dev, res, &depthRes);
+    ctx->CopyResource(depthRes.Get(), res);
+    last_depth_time = std::chrono::high_resolution_clock::now();
 	//unpack_depth(dev, ctx, res, depthBuf, stencilBuf, screenBuf);
 }
 
@@ -256,24 +260,24 @@ extern "C" {
 	__declspec(dllexport) int export_get_depth_buffer(void** buf)
 	{
 		if (lastDev == nullptr || lastCtx == nullptr || depthRes == nullptr) return -1;
-		unpack_depth(lastDev.Get(), lastCtx.Get(), depthRes.Get(), depthBuf, stencilBuf);
-		*buf = &depthBuf[0];
-		return depthBuf.size();
-	}
+        unpack_depth(lastDev.Get(), lastCtx.Get(), depthRes.Get(), depthBuf, stencilBuf);
+        *buf = &depthBuf[0];
+        return depthBuf.size();
+    }
 	__declspec(dllexport) int export_get_color_buffer(void** buf)
 	{
 		if (lastDev == nullptr || lastCtx == nullptr || colorRes == nullptr) return -1;
-		copyTexToVector(lastDev.Get(), lastCtx.Get(), colorRes.Get(), colorBuf);
-		*buf = &colorBuf[0];
-		return colorBuf.size();
-	}
+        copyTexToVector(lastDev.Get(), lastCtx.Get(), colorRes.Get(), colorBuf);
+        *buf = &colorBuf[0];
+        return colorBuf.size();
+    }
 	__declspec(dllexport) int export_get_stencil_buffer(void** buf)
 	{
 		if (lastDev == nullptr || lastCtx == nullptr || depthRes == nullptr) return -1;
-		unpack_depth(lastDev.Get(), lastCtx.Get(), depthRes.Get(), depthBuf, stencilBuf);
-		*buf = &stencilBuf[0];
-		return stencilBuf.size();
-	}
+        unpack_depth(lastDev.Get(), lastCtx.Get(), depthRes.Get(), depthBuf, stencilBuf);
+        *buf = &stencilBuf[0];
+        return stencilBuf.size();
+    }
 	__declspec(dllexport) int export_get_constant_buffer(rage_matrices* buf) {
 		if (constantBuf == nullptr) return -1;
 		D3D11_MAPPED_SUBRESOURCE res = { 0 };
@@ -303,7 +307,12 @@ extern "C" {
 		return duration_cast<milliseconds>(last_constant_time.time_since_epoch()).count();
 	}
 
-	__declspec(dllexport) long long int export_get_current_time() {
-		return duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count();
-	}
-}	
+    __declspec(dllexport) long long int export_get_current_time() {
+        return duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count();
+    }
+
+    __declspec(dllexport) int export_get_last_color_width() { return lastColorWidth; }
+    __declspec(dllexport) int export_get_last_color_height() { return lastColorHeight; }
+    __declspec(dllexport) int export_get_last_depth_width() { return lastDepthWidth; }
+    __declspec(dllexport) int export_get_last_depth_height() { return lastDepthHeight; }
+}

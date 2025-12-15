@@ -14,6 +14,7 @@
 #include <chrono>
 #include "export.h"
 #include "script.h"
+#include "logging.h"
 #include <d3d11shader.h>
 #include <queue>
 #include <d3dcompiler.h>
@@ -42,7 +43,7 @@ void presentCallback(void* chain);
 //void draw_indexed_hook(ID3D11DeviceContext3* self, UINT IndexStart, UINT StartIndexLocation, INT BaseVertexLocation);
 static time_point<system_clock> last_capture_color;
 static time_point<system_clock> last_capture_depth;
-static const char* logFilePath = "logs\\GTANativePlugin.log";
+ 
 //--------
 //offsets
 //--------
@@ -103,28 +104,28 @@ void catchCurveAndScreen(WCHAR *_imgPath, char *_rawPath, bool _forceSave, bool 
 static void (_stdcall ID3D11DeviceContext::* origDrawInstanced)(UINT, UINT, INT) = nullptr;
 int __stdcall DllMain(HMODULE hinstance, DWORD reason, LPVOID lpReserved)
 {
-	MH_STATUS res;
-	auto f = fopen(logFilePath, "a");
+    MH_STATUS res;
 	switch(reason)
 	{
-	case DLL_PROCESS_ATTACH:
+case DLL_PROCESS_ATTACH:
+        Logger::init();
 		res = MH_Initialize();
-		if (res != MH_OK) fprintf(f, "Could not init Minihook\n");
+        if (res != MH_OK) LOGE("main", "Could not init Minihook");
 		presentCallbackRegister(presentCallback);
 		//keyboardHandlerRegister(OnKeyboardMessage);
 		scriptRegister(hinstance, scriptMain);
 		break;
-	case DLL_PROCESS_DETACH:
+case DLL_PROCESS_DETACH:
+        Logger::shutdown();
 		res = MH_Uninitialize();
-		if (res != MH_OK) fprintf(f, "Could not deinit MiniHook\n");
+        if (res != MH_OK) LOGE("main", "Could not deinit MiniHook");
 		presentCallbackUnregister(presentCallback);
 		//keyboardHandlerUnregister(OnKeyboardMessage);
 		//scriptUnregister(hinstance);
 
 		break;
 	}
-	fclose(f);
-	return TRUE;
+    return TRUE;
 }
 
 template<int offset, typename T>
@@ -136,7 +137,7 @@ void hook_function(T* inst, void* hook, bool unhook = false)
 {
 	//__debugbreak();
 	void** vtbl = *reinterpret_cast<void***>(inst);
-	FILE* f = fopen(logFilePath, "a");
+    
 	//fprintf(f, "Hooking %p at offset %d\n", inst, offset);
 	MH_STATUS res = MH_OK;
 	DWORD oldProt = 0;
@@ -145,17 +146,17 @@ void hook_function(T* inst, void* hook, bool unhook = false)
 	if (unhook)
 	{
 		res = MH_DisableHook(vtbl);
-		if(res != MH_OK) fprintf(f, "error %d disabling hook at offset %d\n", res,  offset);
+            if(res != MH_OK) LOGE("main", std::string("error ") + std::to_string(res) + " disabling hook at offset " + std::to_string(offset));
 		orig<offset, T> = nullptr;
 	}
 	else {
 		if(targets<offset, T> != nullptr && targets<offset, T> != *vtbl)
 		{
-			fprintf(f, "detected target change, someone else is screwing with our functions\n");
+            LOGW("main", "detected target change, someone else is screwing with our functions");
 			res = MH_DisableHook(targets<offset, T>);
-			if (res != MH_OK) fprintf(f, "errof %d disabling hook at offset %d\n", res, offset);
+            if (res != MH_OK) LOGE("main", std::string("error ") + std::to_string(res) + " disabling hook at offset " + std::to_string(offset));
 			res = MH_RemoveHook(targets<offset, T>);
-			if (res != MH_OK) fprintf(f, "error %d removing hook at offset %d\n", res, offset);
+            if (res != MH_OK) LOGE("main", std::string("error ") + std::to_string(res) + " removing hook at offset " + std::to_string(offset));
 			targets<offset, T> = nullptr;
 			orig<offset, T> = nullptr;
 		}
@@ -165,12 +166,12 @@ void hook_function(T* inst, void* hook, bool unhook = false)
 				);
 			//fprintf(f, "[%I64d] :  create hook\n", ms.count());
 			res = MH_CreateHook(*vtbl, hook, &(orig<offset, T>));
-			if(res != MH_OK) fprintf(f, "error %d creating hook at offset %d\n",res, offset);
+            if(res != MH_OK) LOGE("main", std::string("error ") + std::to_string(res) + " creating hook at offset " + std::to_string(offset));
 			
 		}
 		if (targets<offset, T> != *vtbl) {
 			res = MH_EnableHook(*vtbl);
-			if (res != MH_OK) fprintf(f, "error %d enabling hook at offset %d\n", res, offset);
+            if (res != MH_OK) LOGE("main", std::string("error ") + std::to_string(res) + " enabling hook at offset " + std::to_string(offset));
 			targets<offset, T> = *vtbl;
 		}
 		//*vtbl = reinterpret_cast<long long>(hook);
@@ -178,7 +179,7 @@ void hook_function(T* inst, void* hook, bool unhook = false)
 	//VirtualProtect(vtbl, 8, oldProt, nullptr);
 	//fprintf(f, "clear_hook: %p\n", hook);
 	//fprintf(f, "clearFn: %p\n", (void*)(*(*reinterpret_cast<long long**>(inst) + 50)));
-	fclose(f);
+    
 }
 
 template<int offset, typename T>
@@ -188,9 +189,7 @@ void unhook_function(T* inst)
 }
 void draw_hook_impl()
 {
-	FILE* f = fopen("DrawLog.log", "a");
-	fprintf(f, "Draw Call\n");
-	fclose(f);
+    LOGD("main", "Draw Call");
 }
 void draw_indexed_hook(ID3D11DeviceContext* self, UINT indexCount, UINT startLoc, UINT baseLoc) {
 	auto origMethod = reinterpret_cast<decltype(draw_indexed_hook)*>(orig<drawIndexedOffset, ID3D11DeviceContext>);
@@ -204,43 +203,10 @@ void draw_indexed_hook(ID3D11DeviceContext* self, UINT indexCount, UINT startLoc
 	// auto f = fopen(logFilePath, "a");
 	// fprintf(f, "Draw Indexed Call count: %d\n", draw_indexed_count);
 	// fclose(f);
-	if (buf != nullptr && draw_indexed_count == 1000) {
-		lastConstants = buf;
-		ExtractConstantBuffer(dev.Get(), self, buf.Get());
-	}
-	
-	if (cmdToCatch == catchStart) {
-		if (!onlyScreen) {
-			//Eigen::Matrix4f I = Eigen::Matrix4f::Identity();
-			Eigen::Matrix4f P;
-			/* get constant */
-			rage_matrices matrix_buf;
-			matrix_buf.M = Eigen::Matrix4f::Identity();
-			matrix_buf.MV = Eigen::Matrix4f::Identity();
-			matrix_buf.MVP = Eigen::Matrix4f::Identity();
-			matrix_buf.Vinv = Eigen::Matrix4f::Identity();
-			// get projection matrix
-			int sizeMatrix = export_get_constant_buffer(&matrix_buf);    // projection matrix
-
-			/* projection matrix */
-			std::ofstream outfile;
-			outfile.open(matrixPath);
-			outfile << "P" << std::endl;
-			P = matrix_buf.MVP * matrix_buf.MV.inverse();  // Projection Matrix
-			outfile << P << std::endl;
-			outfile << "---------------" << std::endl;
-			outfile << sizeMatrix << std::endl;
-			outfile << "M" << std::endl;
-			outfile << matrix_buf.M << std::endl;
-			outfile << "MV" << std::endl;
-			outfile << matrix_buf.MV << std::endl;
-			outfile << "MVP" << std::endl;
-			outfile << matrix_buf.MVP << std::endl;
-			outfile << "Vinv" << std::endl;
-			outfile << matrix_buf.Vinv << std::endl;
-			outfile.close();
-		}
-	}
+    if (buf != nullptr && draw_indexed_count == 1000) {
+        lastConstants = buf;
+        ExtractConstantBuffer(dev.Get(), self, buf.Get());
+    }
 
 	draw_indexed_count += 1;
 	origMethod(self, indexCount, startLoc, baseLoc);
@@ -268,19 +234,19 @@ void clear_render_target_view_hook(ID3D11DeviceContext* self, ID3D11RenderTarget
 	origMethod(self, rtv, color);
 }
 
-auto screenShot = [](FILE* f) {
+auto screenShot = []() {
 	int screenCapResult = export_get_screen_buffer(imgPath);
 	std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
-				std::chrono::system_clock::now().time_since_epoch()
-				);
+			std::chrono::system_clock::now().time_since_epoch()
+			);
 	char currentImgPathNarrow[fileLength];
 	sprintf(currentImgPathNarrow, "data\\screen.bmp");
 	g_rgbCapturedFilePath = currentImgPathNarrow;
 	if (screenCapResult != 1) {
-		fprintf(f, "[%I64d] : export screen %ls failed.\n", ms, imgPath);
+		LOGE("main", "export screen failed");
 	}
 	else {
-		fprintf(f, "[%I64d] : export screen %ls success.\n", ms, imgPath);
+		LOGI("main", "export screen success");
 	}
 };
 
@@ -306,7 +272,7 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 			std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
 				std::chrono::system_clock::now().time_since_epoch()
 				);
-			FILE* f = fopen(logFilePath, "a");
+            
 			//go = true;
 			//fprintf(f, "[%I64d] : trans stencil info over, cmdToCatch = %d.\n", ms.count(), cmdToCatch);
 			
@@ -318,23 +284,23 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 				void *depth_buf;
 				int sizeStencil = export_get_stencil_buffer(&stencil_buf);
 				int sizeDepth = export_get_depth_buffer(&depth_buf);
-				screenShot(f);
+                screenShot();
 
 				auto raw = fopen(rawPath, "wb");
 				fwrite(stencil_buf, 1, sizeStencil, raw);
 				fclose(raw);
-				fprintf(f, "[%I64d] : write stencil %s into file.\n", ms, rawPath);
+                LOGI("main", std::string("write stencil into file: ") + rawPath);
 				g_stencilCapturedFilePath = rawPath;
 
 				auto depth_raw = fopen(depthPath, "wb");
 				fwrite(depth_buf, 1, sizeDepth, depth_raw);
 				fclose(depth_raw);
-				fprintf(f, "[%I64d] : write depth %s into file.\n", ms, depthPath);
+                LOGI("main", std::string("write depth into file: ") + depthPath);
 				g_depthCapturedFilePath = depthPath;
 
 				makeCmdStop();
 			}
-			fclose(f);
+            
 		}
 	}
 	origMethod(self, dsv, flags, depth, stencil);
@@ -343,7 +309,7 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 
 void presentCallback(void* chain)
 {	
-	FILE* f = fopen(logFilePath, "a");
+    
 	std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
 		std::chrono::system_clock::now().time_since_epoch()
 		);
@@ -371,7 +337,7 @@ void presentCallback(void* chain)
 	hook_function<drawIndexedOffset>(ctx.Get(), &draw_indexed_hook);
 	
 	hook_function<53>(ctx.Get(), &clear_depth_stencil_view_hook);
-	if (f == nullptr) throw std::system_error(errno, std::system_category());
+    
 	
 	ComPtr<ID3D11Resource> depthres;
 	ComPtr<ID3D11Resource> colorres;
@@ -388,5 +354,5 @@ void presentCallback(void* chain)
 		std::chrono::system_clock::now().time_since_epoch()
 		);
 
-	fclose(f);
+    
 }
