@@ -1,5 +1,6 @@
 import socket
 import struct
+import time
 
 MAGIC = b"DSV2"
 VERSION = 1
@@ -13,6 +14,7 @@ TYPE_PING = 6
 TYPE_GET_POSE = 7
 TYPE_SET_TIME = 8
 TYPE_SET_WEATHER = 9
+TYPE_STOP_CAMERA = 10
 
 def _pack_header(t, req_id, length):
     return struct.pack("4sBBBBQI", MAGIC, VERSION, t, 0, 0, req_id, length)
@@ -51,22 +53,26 @@ class DroneSimClient:
         s = self._send(TYPE_CREATE_CAMERA, 1)
         t, rid, p = self._recv(s)
         cam_id = struct.unpack("Q", p)[0] if p else 0
+        time.sleep(2.5) # 服务器端启动相机需要等待2秒
         return cam_id
 
     def move(self, dx, dy, dz):
         payload = struct.pack("fff", dx, dy, dz)
         s = self._send(TYPE_MOVE, 2, payload)
         self._recv(s)
+        time.sleep(0.1)
 
     def rotate(self, rx, ry, rz):
         payload = struct.pack("fff", rx, ry, rz)
         s = self._send(TYPE_ROTATE, 3, payload)
         self._recv(s)
+        time.sleep(0.1)
 
     def set_fov(self, fov):
         payload = struct.pack("f", fov)
         s = self._send(TYPE_SET_FOV, 4, payload)
         self._recv(s)
+        time.sleep(0.1)
 
     def capture(self):
         s = self._send(TYPE_CAPTURE, 5)
@@ -76,6 +82,7 @@ class DroneSimClient:
         rgb_size, depth_size, w, h = struct.unpack("IIII", p[:16])
         rgb = p[16:16+rgb_size]
         depth = p[16+rgb_size:16+rgb_size+depth_size]
+        time.sleep(0.1)
         return w, h, rgb, depth
 
     def get_pose(self):
@@ -84,17 +91,25 @@ class DroneSimClient:
         if not p or len(p) < 24:
             return None
         x,y,z,rx,ry,rz = struct.unpack("ffffff", p)
+        time.sleep(0.1)
         return x,y,z,rx,ry,rz
 
     def set_time(self, hour, minute, second):
         payload = struct.pack("iii", int(hour), int(minute), int(second))
         s = self._send(TYPE_SET_TIME, 7, payload)
         self._recv(s)
+        time.sleep(0.1)
 
     def set_weather(self, name):
         data = name.encode('ascii')
         s = self._send(TYPE_SET_WEATHER, 8, data)
         self._recv(s)
+        time.sleep(0.1)
+
+    def stop_camera(self):
+        s = self._send(TYPE_STOP_CAMERA, 9)
+        self._recv(s)
+        time.sleep(0.1)
 
 def visualize(rgb_bytes, depth_bytes, w, h):
     try:

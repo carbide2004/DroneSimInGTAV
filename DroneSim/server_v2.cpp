@@ -14,7 +14,10 @@ static std::unique_ptr<std::thread> g_thread_v2;
 static bool g_ws_inited_v2 = false;
 
 extern std::queue<std::string> g_cmdQueue;
-extern catchState cmdToCatch;
+extern volatile catchState cmdToCatch;
+extern volatile bool g_poseReady;
+extern float g_pose[6];
+
 
 ServerV2::ServerV2(boost::asio::io_context& io, unsigned short port)
     : acceptor_(io, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)), socket_(io) {
@@ -139,18 +142,34 @@ void ServerV2::handle_client() {
         case MSG_GET_POSE: {
             g_poseReady = false;
             g_cmdQueue.push("GET_POSE");
+            LOGD("server_v2", std::string("GET_POSE enqueued"));
             int tries = 0;
-            while (!g_poseReady && tries < 200) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_GET_POSE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = sizeof(float)*6;
-            resp.resize(sizeof(rh) + sizeof(float)*6);
-            std::memcpy(resp.data(), &rh.magic[0], 4);
-            std::memcpy(resp.data() + 4, &rh.version, 1);
-            std::memcpy(resp.data() + 5, &rh.type, 1);
-            std::memcpy(resp.data() + 6, &rh.flags, 1);
-            std::memcpy(resp.data() + 7, &rh.reserved, 1);
-            std::memcpy(resp.data() + 8, &rh.request_id, 8);
-            std::memcpy(resp.data() + 16, &rh.length, 4);
-            std::memcpy(resp.data() + 20, &g_pose[0], sizeof(float)*6);
+            while (!g_poseReady && tries < 300) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_GET_POSE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
+            if (!g_poseReady) {
+                rh.length = 0;
+                resp.resize(sizeof(rh));
+                std::memcpy(resp.data(), &rh.magic[0], 4);
+                std::memcpy(resp.data() + 4, &rh.version, 1);
+                std::memcpy(resp.data() + 5, &rh.type, 1);
+                std::memcpy(resp.data() + 6, &rh.flags, 1);
+                std::memcpy(resp.data() + 7, &rh.reserved, 1);
+                std::memcpy(resp.data() + 8, &rh.request_id, 8);
+                std::memcpy(resp.data() + 16, &rh.length, 4);
+                LOGW("server_v2", "GET_POSE timeout or camera mode inactive");
+            } else {
+                rh.length = sizeof(float)*6;
+                resp.resize(sizeof(rh) + sizeof(float)*6);
+                std::memcpy(resp.data(), &rh.magic[0], 4);
+                std::memcpy(resp.data() + 4, &rh.version, 1);
+                std::memcpy(resp.data() + 5, &rh.type, 1);
+                std::memcpy(resp.data() + 6, &rh.flags, 1);
+                std::memcpy(resp.data() + 7, &rh.reserved, 1);
+                std::memcpy(resp.data() + 8, &rh.request_id, 8);
+                std::memcpy(resp.data() + 16, &rh.length, 4);
+                std::memcpy(resp.data() + 20, &g_pose[0], sizeof(float)*6);
+                LOGD("server_v2", std::string("GET_POSE ready: ") + std::to_string(g_pose[0]) + "," + std::to_string(g_pose[1]) + "," + std::to_string(g_pose[2]));
+            }
             write_response(resp);
             return;
         }
@@ -182,6 +201,20 @@ void ServerV2::handle_client() {
             std::string sCmd = std::string("SET_WEATHER ") + name;
             g_cmdQueue.push(sCmd);
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_WEATHER; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            resp.resize(sizeof(rh));
+            std::memcpy(resp.data(), &rh.magic[0], 4);
+            std::memcpy(resp.data() + 4, &rh.version, 1);
+            std::memcpy(resp.data() + 5, &rh.type, 1);
+            std::memcpy(resp.data() + 6, &rh.flags, 1);
+            std::memcpy(resp.data() + 7, &rh.reserved, 1);
+            std::memcpy(resp.data() + 8, &rh.request_id, 8);
+            std::memcpy(resp.data() + 16, &rh.length, 4);
+            write_response(resp);
+            return;
+        }
+        case MSG_STOP_CAMERA: {
+            g_cmdQueue.push("STOP_CAMERA");
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_STOP_CAMERA; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);

@@ -10,7 +10,8 @@ enum MsgType : uint8_t {
     MSG_PING = 6,
     MSG_GET_POSE = 7,
     MSG_SET_TIME = 8,
-    MSG_SET_WEATHER = 9
+    MSG_SET_WEATHER = 9,
+    MSG_STOP_CAMERA = 10
 };
 
 struct MsgHeader {

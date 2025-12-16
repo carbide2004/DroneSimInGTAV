@@ -18,8 +18,8 @@
  
 
 extern std::queue<std::string> g_cmdQueue;
-static volatile bool g_poseReady = false;
-static float g_pose[6] = {0};
+volatile bool g_poseReady = false;
+float g_pose[6] = {0};
 
 scriptStatusEnum scriptStatus = scriptStop;
 
@@ -48,6 +48,13 @@ void scriptMain()
                 setStatusText("Camera mode enabled.");
                 LOGI("script", "Camera created and mode enabled");
             }
+            else if (cmd == "STOP_CAMERA")
+            {
+                StopCamera();
+                scriptStatus = scriptStop;
+                setStatusText("Camera mode disabled.");
+                LOGI("script", "Camera stopped and returned to player view");
+            }
             else if (scriptStatus == cameraMode) {
                 if (cmd == "REQUEST")
                 {
@@ -57,40 +64,30 @@ void scriptMain()
                 else if (cmd == "GET_POSE")
                 {
                     Vector3 pos{}; Vector3 rot{};
-                    if (CameraMode) {
-                        Any cam = CAM::GET_RENDERING_CAM();
-                        pos = CAM::GET_CAM_COORD(cam);
-                        rot = CAM::GET_CAM_ROT(cam, 2);
-                    } else {
-                        Ped ped = PLAYER::PLAYER_PED_ID();
-                        pos = ENTITY::GET_ENTITY_COORDS(ped, true);
-                        float heading = ENTITY::GET_ENTITY_HEADING(ped);
-                        rot = {0.0f, 0.0f, heading};
-                    }
+                    Any cam = CAM::GET_RENDERING_CAM();
+                    pos = CAM::GET_CAM_COORD(cam);
+                    rot = CAM::GET_CAM_ROT(cam, 2);
                     g_pose[0]=pos.x; g_pose[1]=pos.y; g_pose[2]=pos.z;
                     g_pose[3]=rot.x; g_pose[4]=rot.y; g_pose[5]=rot.z;
                     g_poseReady = true;
+                    LOGD("script", std::string("GET_POSE: ") + std::to_string(g_pose[0]) + " " + std::to_string(g_pose[1]) + " " + std::to_string(g_pose[2]) + " " + std::to_string(g_pose[3]) + " " + std::to_string(g_pose[4]) + " " + std::to_string(g_pose[5]));
                 }
-            else if (cmd.rfind("MOVE ", 0) == 0)
-            {
-                if (CameraMode) {
+                else if (cmd.rfind("MOVE ", 0) == 0)
+                {
                     auto s = cmd.substr(5);
                     std::stringstream ss(s);
                     float dx=0,dy=0,dz=0; ss >> dx >> dy >> dz;
                     moveCameraDelta(dx,dy,dz);
-                    LOGD("script", std::string("MOVE ") + std::to_string(dx) + "," + std::to_string(dy) + "," + std::to_string(dz));
+                    LOGI("script", std::string("MOVE ") + std::to_string(dx) + "," + std::to_string(dy) + "," + std::to_string(dz));
                 }
-            }
-            else if (cmd.rfind("ROTATE ", 0) == 0)
-            {
-                if (CameraMode) {
+                else if (cmd.rfind("ROTATE ", 0) == 0)
+                {
                     auto s = cmd.substr(7);
                     std::stringstream ss(s);
                     float rx=0,ry=0,rz=0; ss >> rx >> ry >> rz;
                     rotateCameraDelta(rx,ry,rz);
-                    LOGD("script", std::string("ROTATE ") + std::to_string(rx) + "," + std::to_string(ry) + "," + std::to_string(rz));
+                    LOGI("script", std::string("ROTATE ") + std::to_string(rx) + "," + std::to_string(ry) + "," + std::to_string(rz));
                 }
-            }
                 else if (cmd.rfind("SETFOV:", 0) == 0)
                 {
                     float fov = std::stof(cmd.substr(7));

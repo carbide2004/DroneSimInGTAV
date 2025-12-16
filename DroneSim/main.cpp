@@ -66,7 +66,7 @@ static bool hooked = false;
 static int draw_indexed_count = 0;
 
 const size_t fileLength = 256;
-catchState cmdToCatch = catchStop;	
+volatile catchState cmdToCatch = catchStop;	
 static WCHAR imgPath[fileLength] = L"data\\screen.bmp";
 static char rawPath[fileLength] = "data\\stencil.raw";
 static char depthPath[fileLength] = "data\\depth.raw";

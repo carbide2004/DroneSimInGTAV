@@ -7,7 +7,7 @@ std::mutex Logger::mtx;
 std::ofstream Logger::ofs;
 std::string Logger::path;
 size_t Logger::max_size = 10485760;
-LogLevel Logger::cur_level = LOG_INFO;
+LogLevel Logger::cur_level = LOG_DEBUG;
 
 void Logger::init(const char* dir, size_t max_bytes) {
     std::lock_guard<std::mutex> lk(mtx);

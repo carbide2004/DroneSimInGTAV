@@ -12,7 +12,6 @@
  
 
 int adjustCameraFinished = 0;
-bool CameraMode = false;
 
 static Any cameraHandle;
 
@@ -38,8 +37,6 @@ void startNewCamera()
 
 	CAM::RENDER_SCRIPT_CAMS(true, 1, 1800, 1, 0);
     WAIT(2000);
-
-	CameraMode = true;
 }
 
 void moveCameraDelta(float dx, float dy, float dz)
@@ -79,4 +76,15 @@ void setCameraFov(float fov)
     if (cam) {
         CAM::SET_CAM_FOV(cam, fov);
     }
+}
+
+void StopCamera(int foldNo)
+{
+    CAM::RENDER_SCRIPT_CAMS(false, 1, 0, 1, 0);
+    Any cam = CAM::GET_RENDERING_CAM();
+    if (cam) {
+        CAM::DESTROY_CAM(cam, 0);
+    }
+    cameraHandle = 0;
+    CameraMode = false;
 }
