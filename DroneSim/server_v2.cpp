@@ -2,6 +2,7 @@
 #include "utils.h"
 #include "camera.h"
 #include "export.h"
+#include "logging.h"
 #include <thread>
 #include <cstring>
 
@@ -80,10 +81,9 @@ void ServerV2::handle_client() {
                 float dx = *reinterpret_cast<float*>(&payload[0]);
                 float dy = *reinterpret_cast<float*>(&payload[4]);
                 float dz = *reinterpret_cast<float*>(&payload[8]);
-                float ax = std::abs(dx), ay = std::abs(dy), az = std::abs(dz);
-                if (ax >= ay && ax >= az) g_cmdQueue.push(dx >= 0 ? "FORWARD" : "BACKWARD");
-                else if (ay >= ax && ay >= az) g_cmdQueue.push(dy >= 0 ? "RIGHT" : "LEFT");
-                else g_cmdQueue.push(dz >= 0 ? "UP" : "DOWN");
+                std::string s = std::string("MOVE ") + std::to_string(dx) + " " + std::to_string(dy) + " " + std::to_string(dz);
+                g_cmdQueue.push(s);
+                LOGD("server_v2", std::string("Enqueue ") + s);
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_MOVE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
@@ -99,8 +99,12 @@ void ServerV2::handle_client() {
         }
         case MSG_ROTATE: {
             if (hdr.length >= sizeof(float) * 3) {
+                float rx = *reinterpret_cast<float*>(&payload[0]);
+                float ry = *reinterpret_cast<float*>(&payload[4]);
                 float rz = *reinterpret_cast<float*>(&payload[8]);
-                if (rz > 0) g_cmdQueue.push("LEFTROTATE"); else if (rz < 0) g_cmdQueue.push("RIGHTROTATE");
+                std::string s = std::string("ROTATE ") + std::to_string(rx) + " " + std::to_string(ry) + " " + std::to_string(rz);
+                g_cmdQueue.push(s);
+                LOGD("server_v2", std::string("Enqueue ") + s);
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_ROTATE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
@@ -132,6 +136,63 @@ void ServerV2::handle_client() {
             write_response(resp);
             return;
         }
+        case MSG_GET_POSE: {
+            g_poseReady = false;
+            g_cmdQueue.push("GET_POSE");
+            int tries = 0;
+            while (!g_poseReady && tries < 200) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_GET_POSE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = sizeof(float)*6;
+            resp.resize(sizeof(rh) + sizeof(float)*6);
+            std::memcpy(resp.data(), &rh.magic[0], 4);
+            std::memcpy(resp.data() + 4, &rh.version, 1);
+            std::memcpy(resp.data() + 5, &rh.type, 1);
+            std::memcpy(resp.data() + 6, &rh.flags, 1);
+            std::memcpy(resp.data() + 7, &rh.reserved, 1);
+            std::memcpy(resp.data() + 8, &rh.request_id, 8);
+            std::memcpy(resp.data() + 16, &rh.length, 4);
+            std::memcpy(resp.data() + 20, &g_pose[0], sizeof(float)*6);
+            write_response(resp);
+            return;
+        }
+        case MSG_SET_TIME: {
+            if (hdr.length >= 12) {
+                int h = *reinterpret_cast<int*>(&payload[0]);
+                int m = *reinterpret_cast<int*>(&payload[4]);
+                int s = *reinterpret_cast<int*>(&payload[8]);
+                std::string sCmd = std::string("SET_TIME ") + std::to_string(h) + " " + std::to_string(m) + " " + std::to_string(s);
+                g_cmdQueue.push(sCmd);
+            }
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_TIME; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            resp.resize(sizeof(rh));
+            std::memcpy(resp.data(), &rh.magic[0], 4);
+            std::memcpy(resp.data() + 4, &rh.version, 1);
+            std::memcpy(resp.data() + 5, &rh.type, 1);
+            std::memcpy(resp.data() + 6, &rh.flags, 1);
+            std::memcpy(resp.data() + 7, &rh.reserved, 1);
+            std::memcpy(resp.data() + 8, &rh.request_id, 8);
+            std::memcpy(resp.data() + 16, &rh.length, 4);
+            write_response(resp);
+            return;
+        }
+        case MSG_SET_WEATHER: {
+            std::string name;
+            if (hdr.length > 0) {
+                name.assign(reinterpret_cast<char*>(payload.data()), hdr.length);
+            }
+            std::string sCmd = std::string("SET_WEATHER ") + name;
+            g_cmdQueue.push(sCmd);
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_WEATHER; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            resp.resize(sizeof(rh));
+            std::memcpy(resp.data(), &rh.magic[0], 4);
+            std::memcpy(resp.data() + 4, &rh.version, 1);
+            std::memcpy(resp.data() + 5, &rh.type, 1);
+            std::memcpy(resp.data() + 6, &rh.flags, 1);
+            std::memcpy(resp.data() + 7, &rh.reserved, 1);
+            std::memcpy(resp.data() + 8, &rh.request_id, 8);
+            std::memcpy(resp.data() + 16, &rh.length, 4);
+            write_response(resp);
+            return;
+        }
         case MSG_CAPTURE: {
             g_cmdQueue.push("REQUEST");
             int tries = 0;
@@ -141,6 +202,7 @@ void ServerV2::handle_client() {
             }
             void* rgb_ptr = nullptr; int rgb_size = export_get_color_buffer(&rgb_ptr);
             void* depth_ptr = nullptr; int depth_size = export_get_depth_buffer(&depth_ptr);
+            LOGD("server_v2", std::string("Capture: rgb_size=") + std::to_string(rgb_size) + ", depth_size=" + std::to_string(depth_size));
             int w_rgb = export_get_last_color_width();
             int h_rgb = export_get_last_color_height();
             int w_depth = export_get_last_depth_width();

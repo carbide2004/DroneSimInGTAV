@@ -243,7 +243,7 @@ auto screenShot = []() {
 	sprintf(currentImgPathNarrow, "data\\screen.bmp");
 	g_rgbCapturedFilePath = currentImgPathNarrow;
 	if (screenCapResult != 1) {
-		LOGE("main", "export screen failed");
+		LOGE("main", "export screen failed, screenCapResult=" + std::to_string(screenCapResult));
 	}
 	else {
 		LOGI("main", "export screen success");

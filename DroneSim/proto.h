@@ -7,7 +7,10 @@ enum MsgType : uint8_t {
     MSG_ROTATE = 3,
     MSG_SET_FOV = 4,
     MSG_CAPTURE = 5,
-    MSG_PING = 6
+    MSG_PING = 6,
+    MSG_GET_POSE = 7,
+    MSG_SET_TIME = 8,
+    MSG_SET_WEATHER = 9
 };
 
 struct MsgHeader {

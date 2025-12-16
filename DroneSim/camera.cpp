@@ -42,114 +42,35 @@ void startNewCamera()
 	CameraMode = true;
 }
 
-void adjustCamera(std::string cmd)
+void moveCameraDelta(float dx, float dy, float dz)
 {
+    Vector3 camNewPos = CAM::GET_CAM_COORD(cameraHandle);
+    Vector3 camRot = CAM::GET_CAM_ROT(cameraHandle, 2);
+    Vector3 direction = MathUtils::rotationToDirection(camRot);
+    if (dx != 0.0f) {
+        camNewPos.x += direction.x * dx * cameraSpeedFactor;
+        camNewPos.y += direction.y * dx * cameraSpeedFactor;
+        camNewPos.z += direction.z * dx * cameraSpeedFactor;
+    }
+    if (dy != 0.0f) {
+        Vector3 b{}; b.z = 1.0f;
+        Vector3 sideWays = MathUtils::crossProduct(direction, b);
+        camNewPos.x += sideWays.x * dy * cameraSpeedFactor;
+        camNewPos.y += sideWays.y * dy * cameraSpeedFactor;
+    }
+    if (dz != 0.0f) {
+        camNewPos.z += dz * cameraSpeedFactor;
+    }
+    CAM::SET_CAM_COORD(cameraHandle, camNewPos.x, camNewPos.y, camNewPos.z);
+}
 
-	// movement
-	Vector3 camDelta = {};
-	float nfov = 0.0;
-	bool isMovement = false;
-    LOGD("camera", std::string("front cmd is: ") + cmd);
-	if (cmd == "FORWARD") {
-		camDelta.x = STEPSIZE;
-		isMovement = true;
-		setStatusText("Camera moving forward.");
-	}
-	else if (cmd == "BACKWARD") {
-		camDelta.x = -STEPSIZE;
-		isMovement = true;
-		setStatusText("Camera moving backward.");
-	}
-	else if (cmd == "LEFT") {
-		camDelta.y = -STEPSIZE;
-		isMovement = true;
-		setStatusText("Camera moving left.");
-	}
-	else if (cmd == "RIGHT") {
-		camDelta.y = STEPSIZE;	
-		isMovement = true;
-		setStatusText("Camera moving right.");
-	}
-	else if (cmd == "UP") {
-		camDelta.z = STEPSIZE;
-		isMovement = true;
-		setStatusText("Camera moving up.");
-	}
-	else if (cmd == "DOWN") {
-		camDelta.z = -STEPSIZE;
-		isMovement = true;
-		setStatusText("Camera moving down.");
-	}
-	else if (cmd == "LEFTROTATE") {
-		Vector3 currentRotation = CAM::GET_CAM_ROT(cameraHandle, 2);
-		currentRotation.z += 45.0f;
-		CAM::SET_CAM_ROT(cameraHandle, currentRotation.x, currentRotation.y, currentRotation.z, 2);
-		setStatusText("Camera rotating left.");
-	}
-	else if (cmd == "RIGHTROTATE") {
-		Vector3 currentRotation = CAM::GET_CAM_ROT(cameraHandle, 2);
-		currentRotation.z += -45.0f;
-		CAM::SET_CAM_ROT(cameraHandle, currentRotation.x, currentRotation.y, currentRotation.z, 2);
-		setStatusText("Camera rotating right.");
-	}
-	if (isMovement) {
-		Vector3 camNewPos = CAM::GET_CAM_COORD(cameraHandle);
-		float fov = CAM::GET_CAM_FOV(cameraHandle);
-		/*camLastPos.x = camNewPos.x;
-		camLastPos.y = camNewPos.y;
-		camLastPos.z = camNewPos.z;*/
-
-		Vector3 camRot = {};
-		camRot = CAM::GET_CAM_ROT(cameraHandle, 2);
-		//camera rotation is not as expected. .x value is rotation in the z-plane (view up/down) and third paramter is the rotation in the x,y plane.
-
-		Vector3 direction = {};
-		direction = MathUtils::rotationToDirection(camRot);
-
-		//forward motion
-		if (camDelta.x != 0.0) {
-			camNewPos.x += direction.x * camDelta.x * cameraSpeedFactor;
-			camNewPos.y += direction.y * camDelta.x * cameraSpeedFactor;
-			camNewPos.z += direction.z * camDelta.x * cameraSpeedFactor;
-		}
-
-		//sideways motion
-		if (camDelta.y != 0.0) {
-			//straight up
-			Vector3 b = {};
-			b.z = 1.0;
-
-			Vector3 sideWays = {};
-			sideWays = MathUtils::crossProduct(direction, b);
-
-			camNewPos.x += sideWays.x * camDelta.y * cameraSpeedFactor;
-			camNewPos.y += sideWays.y * camDelta.y * cameraSpeedFactor;
-		}
-
-		//up/down
-		if (camDelta.z != 0.0) {
-			camNewPos.z += camDelta.z * cameraSpeedFactor;
-		}
-
-		if (nfov != 0.0) {
-			fov += nfov;
-		}
-
-		CAM::SET_CAM_COORD(cameraHandle, camNewPos.x, camNewPos.y, camNewPos.z);
-		CAM::SET_CAM_FOV(cameraHandle, fov);
-	}
-	
-	// rotation
-	// float rightAxisX = CONTROLS::GET_DISABLED_CONTROL_NORMAL(0, 220);
-	// float rightAxisY = CONTROLS::GET_DISABLED_CONTROL_NORMAL(0, 221);
-
-	// if (rightAxisX != 0.0 || rightAxisY != 0.0) {
-	// 	//Rotate camera - Multiply by sensitivity settings
-	// 	Vector3 currentRotation = CAM::GET_CAM_ROT(cameraHandle, 2);
-	// 	currentRotation.x += rightAxisY * -5.0f;
-	// 	currentRotation.z += rightAxisX * -10.0f;
-	// 	CAM::SET_CAM_ROT(cameraHandle, currentRotation.x, currentRotation.y, currentRotation.z, 2);
-	// }
+void rotateCameraDelta(float rx, float ry, float rz)
+{
+    Vector3 currentRotation = CAM::GET_CAM_ROT(cameraHandle, 2);
+    currentRotation.x += rx;
+    currentRotation.y += ry;
+    currentRotation.z += rz;
+    CAM::SET_CAM_ROT(cameraHandle, currentRotation.x, currentRotation.y, currentRotation.z, 2);
 }
 
 void setCameraFov(float fov)
