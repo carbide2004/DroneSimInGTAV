@@ -1,5 +1,8 @@
 import socket
 import struct
+import sys
+import time
+
 
 MAGIC = b"DSV2"
 VERSION = 1
@@ -78,12 +81,46 @@ def capture(host="127.0.0.1", port=23456):
     return w, h, rgb, depth
 
 if __name__ == "__main__":
+    print("5s后开始执行测试")
+    time.sleep(5.0)
+
     cam = create_camera()
     set_fov(60.0)
     move(5.0, 0.0, 0.0)
     rotate(0.0, 0.0, 45.0)
     w, h, rgb, depth = capture()
-    with open("rgb.bin", "wb") as f:
-        f.write(rgb)
-    with open("depth.bin", "wb") as f:
-        f.write(depth)
+
+    try:
+        import numpy as np
+        import matplotlib.pyplot as plt
+    except ImportError as e:
+        print("Missing numpy/matplotlib for visualization:", e)
+        print("RGB/Depth saved to rgb.bin/depth.bin")
+        with open("rgb.bin", "wb") as f:
+            f.write(rgb)
+        with open("depth.bin", "wb") as f:
+            f.write(depth)
+        sys.exit(0)
+
+    rgb_arr = np.frombuffer(rgb, dtype=np.uint8)
+    rgb_arr = rgb_arr.reshape((h, w, 4))[:, :, :3]  # RGBA -> RGB
+
+    depth_arr = np.frombuffer(depth, dtype=np.float32).reshape((h, w))
+    # Robust visualization: clip extremes to percentiles
+    vmin = np.percentile(depth_arr, 5)
+    vmax = np.percentile(depth_arr, 95)
+    if vmin == vmax:
+        vmin, vmax = depth_arr.min(), depth_arr.max()
+
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.title("RGB")
+    plt.imshow(rgb_arr)
+    plt.axis('off')
+
+    plt.subplot(1, 2, 2)
+    plt.title("Depth")
+    im = plt.imshow(depth_arr, cmap='magma', vmin=vmin, vmax=vmax)
+    plt.colorbar(im, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    plt.show()
