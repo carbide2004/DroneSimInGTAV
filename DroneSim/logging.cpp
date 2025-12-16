@@ -12,11 +12,24 @@ LogLevel Logger::cur_level = LOG_INFO;
 void Logger::init(const char* dir, size_t max_bytes) {
     std::lock_guard<std::mutex> lk(mtx);
     max_size = max_bytes;
+    auto now = std::chrono::system_clock::now();
+    auto t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    tm = *std::localtime(&t);
+#endif
+    char tbuf[32];
+    std::snprintf(tbuf, sizeof(tbuf), "%04d%02d%02d_%02d%02d%02d",
+        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+        tm.tm_hour, tm.tm_min, tm.tm_sec);
+    std::string fname = std::string("DroneSim_") + tbuf + std::string(".log");
     try {
         std::filesystem::create_directories(dir);
-        path = std::string(dir) + std::string("\\DroneSim.log");
+        path = std::string(dir) + std::string("\\") + fname;
     } catch (...) {
-        path = std::string("DroneSim.log");
+        path = fname;
     }
     ofs.open(path, std::ios::out | std::ios::app);
 }
