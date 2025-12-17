@@ -86,5 +86,4 @@ void StopCamera(int foldNo)
         CAM::DESTROY_CAM(cam, 0);
     }
     cameraHandle = 0;
-    CameraMode = false;
 }
