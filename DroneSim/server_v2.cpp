@@ -3,6 +3,7 @@
 #include "camera.h"
 #include "export.h"
 #include "logging.h"
+#include "command_queue.h"
 #include <thread>
 #include <cstring>
 
@@ -13,8 +14,8 @@ static asio::io_context g_io_v2;
 static std::unique_ptr<std::thread> g_thread_v2;
 static bool g_ws_inited_v2 = false;
 
-extern std::queue<std::string> g_cmdQueue;
 extern volatile catchState cmdToCatch;
+
 extern volatile bool g_poseReady;
 extern float g_pose[6];
 
@@ -64,7 +65,7 @@ void ServerV2::handle_client() {
     std::vector<unsigned char> resp;
     switch (hdr.type) {
         case MSG_CREATE_CAMERA: {
-            g_cmdQueue.push("CREATE_CAMERA");
+            enqueue_command("CREATE_CAMERA");
             uint64_t cam_id = 1;
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_CAMERA; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = sizeof(cam_id);
             resp.resize(sizeof(rh) + sizeof(cam_id));
@@ -85,7 +86,7 @@ void ServerV2::handle_client() {
                 float dy = *reinterpret_cast<float*>(&payload[4]);
                 float dz = *reinterpret_cast<float*>(&payload[8]);
                 std::string s = std::string("MOVE ") + std::to_string(dx) + " " + std::to_string(dy) + " " + std::to_string(dz);
-                g_cmdQueue.push(s);
+                enqueue_command(s);
                 LOGD("server_v2", std::string("Enqueue ") + s);
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_MOVE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
@@ -106,7 +107,7 @@ void ServerV2::handle_client() {
                 float ry = *reinterpret_cast<float*>(&payload[4]);
                 float rz = *reinterpret_cast<float*>(&payload[8]);
                 std::string s = std::string("ROTATE ") + std::to_string(rx) + " " + std::to_string(ry) + " " + std::to_string(rz);
-                g_cmdQueue.push(s);
+                enqueue_command(s);
                 LOGD("server_v2", std::string("Enqueue ") + s);
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_ROTATE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
@@ -125,7 +126,7 @@ void ServerV2::handle_client() {
             if (hdr.length >= sizeof(float)) {
                 float fov = *reinterpret_cast<float*>(&payload[0]);
                 std::string s = std::string("SETFOV:") + std::to_string(fov);
-                g_cmdQueue.push(s);
+                enqueue_command(s);
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_FOV; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
@@ -141,7 +142,7 @@ void ServerV2::handle_client() {
         }
         case MSG_GET_POSE: {
             g_poseReady = false;
-            g_cmdQueue.push("GET_POSE");
+            enqueue_command("GET_POSE");
             LOGD("server_v2", std::string("GET_POSE enqueued"));
             int tries = 0;
             while (!g_poseReady && tries < 300) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
@@ -179,7 +180,7 @@ void ServerV2::handle_client() {
                 int m = *reinterpret_cast<int*>(&payload[4]);
                 int s = *reinterpret_cast<int*>(&payload[8]);
                 std::string sCmd = std::string("SET_TIME ") + std::to_string(h) + " " + std::to_string(m) + " " + std::to_string(s);
-                g_cmdQueue.push(sCmd);
+                enqueue_command(sCmd);
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_TIME; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
@@ -199,7 +200,7 @@ void ServerV2::handle_client() {
                 name.assign(reinterpret_cast<char*>(payload.data()), hdr.length);
             }
             std::string sCmd = std::string("SET_WEATHER ") + name;
-            g_cmdQueue.push(sCmd);
+            enqueue_command(sCmd);
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_WEATHER; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
             std::memcpy(resp.data(), &rh.magic[0], 4);
@@ -213,7 +214,7 @@ void ServerV2::handle_client() {
             return;
         }
         case MSG_STOP_CAMERA: {
-            g_cmdQueue.push("STOP_CAMERA");
+            enqueue_command("STOP_CAMERA");
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_STOP_CAMERA; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
             std::memcpy(resp.data(), &rh.magic[0], 4);
@@ -227,7 +228,7 @@ void ServerV2::handle_client() {
             return;
         }
         case MSG_CAPTURE: {
-            g_cmdQueue.push("REQUEST");
+            enqueue_command("REQUEST");
             int tries = 0;
             while (cmdToCatch != catchStop && tries < 3000) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));

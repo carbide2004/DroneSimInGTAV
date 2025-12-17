@@ -76,7 +76,7 @@ std::string g_rgbCapturedFilePath;
 std::string g_depthCapturedFilePath;
 std::string g_stencilCapturedFilePath;
 std::string g_matrixCapturedFilePath = matrixPath;
-std::queue<std::string> g_cmdQueue;
+ 
 
 
 inline void makeCmdStart()
