@@ -149,33 +149,52 @@ void hook_function(T* inst, void* hook, bool unhook = false)
             if(res != MH_OK) LOGE("main", std::string("error ") + std::to_string(res) + " disabling hook at offset " + std::to_string(offset));
 		orig<offset, T> = nullptr;
 	}
-	else {
-		if(targets<offset, T> != nullptr && targets<offset, T> != *vtbl)
-		{
-            LOGW("main", "detected target change, someone else is screwing with our functions");
-			res = MH_DisableHook(targets<offset, T>);
-            if (res != MH_OK) LOGE("main", std::string("error ") + std::to_string(res) + " disabling hook at offset " + std::to_string(offset));
-			res = MH_RemoveHook(targets<offset, T>);
-            if (res != MH_OK) LOGE("main", std::string("error ") + std::to_string(res) + " removing hook at offset " + std::to_string(offset));
-			targets<offset, T> = nullptr;
-			orig<offset, T> = nullptr;
-		}
-		if (orig<offset, T> == nullptr && targets<offset, T> != *vtbl) {
-			std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
-				std::chrono::system_clock::now().time_since_epoch()
-				);
-			//fprintf(f, "[%I64d] :  create hook\n", ms.count());
-			res = MH_CreateHook(*vtbl, hook, &(orig<offset, T>));
-            if(res != MH_OK) LOGE("main", std::string("error ") + std::to_string(res) + " creating hook at offset " + std::to_string(offset));
-			
-		}
-		if (targets<offset, T> != *vtbl) {
-			res = MH_EnableHook(*vtbl);
-            if (res != MH_OK) LOGE("main", std::string("error ") + std::to_string(res) + " enabling hook at offset " + std::to_string(offset));
-			targets<offset, T> = *vtbl;
-		}
-		//*vtbl = reinterpret_cast<long long>(hook);
-	}
+	else { // 执行 Hook 操作
+        // 1. 检查是否检测到目标改变，并清除旧状态
+        if (targets<offset, T> != nullptr && targets<offset, T> != *vtbl)
+        {
+            LOGW("main", "detected target change, someone else is screwing with our functions. Re-hooking.");
+            
+            // 尝试禁用和移除 (如果失败，就忽略，MinHook 状态优先)
+            MH_DisableHook(targets<offset, T>);
+            MH_RemoveHook(targets<offset, T>);
+            
+            // 无论 MinHook 操作结果如何，都清除本地状态，强制进入创建流程
+            targets<offset, T> = nullptr;
+            orig<offset, T> = nullptr;
+        }
+
+        // 2. 检查是否需要创建挂钩
+        // 只有当 orig<offset, T> 为 nullptr 时才创建
+        if (orig<offset, T> == nullptr) {
+            // MH_CreateHook 会检查 *vtbl 是否已经被挂钩 (如果被挂钩，会返回 error 3)
+            res = MH_CreateHook(*vtbl, hook, &(orig<offset, T>));
+            if (res != MH_OK && res != MH_ERROR_ALREADY_CREATED) {
+                 LOGE("main", std::string("error ") + std::to_string(res) + " creating hook at offset " + std::to_string(offset));
+                 // 如果创建失败，则重置 orig，避免下次再次尝试创建
+                 orig<offset, T> = nullptr; 
+                 targets<offset, T> = nullptr; // 同时清除 targets
+                 return; // 挂钩失败，提前返回
+            }
+        }
+        
+        // 3. 检查是否需要启用挂钩
+        // 只有当 targets<offset, T> 与当前 *vtbl 不一致时，才尝试启用并更新 targets
+        if (targets<offset, T> != *vtbl) {
+            // MH_EnableHook 会检查是否已经被启用 (如果已启用，会返回 error 5)
+            res = MH_EnableHook(*vtbl);
+            if (res != MH_OK && res != MH_ERROR_ENABLED) {
+                LOGE("main", std::string("error ") + std::to_string(res) + " enabling hook at offset " + std::to_string(offset));
+                // 如果启用失败，清除本地状态
+                targets<offset, T> = nullptr; 
+                orig<offset, T> = nullptr; 
+                return; // 启用失败，提前返回
+            }
+            
+            // 如果成功 (或已经是启用状态 MH_ERROR_ENABLED)，则更新本地状态
+            targets<offset, T> = *vtbl;
+        }
+    }
 	//VirtualProtect(vtbl, 8, oldProt, nullptr);
 	//fprintf(f, "clear_hook: %p\n", hook);
 	//fprintf(f, "clearFn: %p\n", (void*)(*(*reinterpret_cast<long long**>(inst) + 50)));

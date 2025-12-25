@@ -14,3 +14,4 @@ __pycache__/
 .trae/
 *.bin
 *.raw
+data/

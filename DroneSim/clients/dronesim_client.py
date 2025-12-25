@@ -82,7 +82,7 @@ class DroneSimClient:
         rgb_size, depth_size, w, h = struct.unpack("IIII", p[:16])
         rgb = p[16:16+rgb_size]
         depth = p[16+rgb_size:16+rgb_size+depth_size]
-        time.sleep(0.5)
+        time.sleep(2.0)
         return w, h, rgb, depth
 
     def get_pose(self):

@@ -41,14 +41,14 @@ void scriptMain()
         {
             startNewCamera();
             scriptStatus = cameraMode;
-            setStatusText("Camera mode enabled.");
+            // setStatusText("Camera mode enabled.");
             LOGI("script", "Camera created and mode enabled");
         }
         else if (cmd == "STOP_CAMERA")
         {
             StopCamera();
             scriptStatus = scriptStop;
-            setStatusText("Camera mode disabled.");
+            // setStatusText("Camera mode disabled.");
             LOGI("script", "Camera stopped and returned to player view");
         }
         else if (scriptStatus == cameraMode) {
@@ -103,6 +103,7 @@ void scriptMain()
             else if (cmd.rfind("SET_WEATHER ", 0) == 0)
             {
                 std::string name = cmd.substr(12);
+                GAMEPLAY::CLEAR_WEATHER_TYPE_PERSIST();
                 GAMEPLAY::SET_WEATHER_TYPE_NOW_PERSIST((char*)name.c_str());
                 LOGI("script", std::string("Set weather to ")+name);
             }
