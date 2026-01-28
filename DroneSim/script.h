@@ -20,4 +20,6 @@ enum scriptStatusEnum {
 	scriptEndReady
 };
 extern scriptStatusEnum scriptStatus;
+extern volatile bool g_accidentReady;
+extern float g_accidentPos[3];
 void scriptMain();

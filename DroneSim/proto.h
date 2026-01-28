@@ -11,7 +11,8 @@ enum MsgType : uint8_t {
     MSG_GET_POSE = 7,
     MSG_SET_TIME = 8,
     MSG_SET_WEATHER = 9,
-    MSG_STOP_CAMERA = 10
+    MSG_STOP_CAMERA = 10,
+    MSG_CREATE_ACCIDENT = 11
 };
 
 struct MsgHeader {

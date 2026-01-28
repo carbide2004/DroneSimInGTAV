@@ -15,6 +15,7 @@ TYPE_GET_POSE = 7
 TYPE_SET_TIME = 8
 TYPE_SET_WEATHER = 9
 TYPE_STOP_CAMERA = 10
+TYPE_CREATE_ACCIDENT = 11
 
 def _pack_header(t, req_id, length):
     return struct.pack("4sBBBBQI", MAGIC, VERSION, t, 0, 0, req_id, length)
@@ -110,6 +111,14 @@ class DroneSimClient:
         s = self._send(TYPE_STOP_CAMERA, 9)
         self._recv(s)
         time.sleep(0.5)
+
+    def create_accident(self):
+        s = self._send(TYPE_CREATE_ACCIDENT, 11)
+        t, rid, p = self._recv(s)
+        if not p or len(p) < 12:
+            return None
+        x, y, z = struct.unpack("fff", p[:12])
+        return x, y, z
 
 def visualize(rgb_bytes, depth_bytes, w, h):
     try:

@@ -19,6 +19,9 @@ extern volatile catchState cmdToCatch;
 extern volatile bool g_poseReady;
 extern float g_pose[6];
 
+extern volatile bool g_accidentReady;
+extern float g_accidentPos[3];
+
 
 ServerV2::ServerV2(boost::asio::io_context& io, unsigned short port)
     : acceptor_(io, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)), socket_(io) {
@@ -224,6 +227,43 @@ void ServerV2::handle_client() {
             std::memcpy(resp.data() + 7, &rh.reserved, 1);
             std::memcpy(resp.data() + 8, &rh.request_id, 8);
             std::memcpy(resp.data() + 16, &rh.length, 4);
+            write_response(resp);
+            return;
+        }
+        case MSG_CREATE_ACCIDENT: {
+            g_accidentReady = false;
+            enqueue_command("CREATE_ACCIDENT");
+            LOGD("server_v2", std::string("CREATE_ACCIDENT enqueued"));
+            int tries = 0;
+            // Wait for up to 20 seconds for the accident to be set up and collision detected
+            while (!g_accidentReady && tries < 4000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
+            
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_ACCIDENT; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
+            
+            if (!g_accidentReady) {
+                rh.length = 0;
+                resp.resize(sizeof(rh));
+                std::memcpy(resp.data(), &rh.magic[0], 4);
+                std::memcpy(resp.data() + 4, &rh.version, 1);
+                std::memcpy(resp.data() + 5, &rh.type, 1);
+                std::memcpy(resp.data() + 6, &rh.flags, 1);
+                std::memcpy(resp.data() + 7, &rh.reserved, 1);
+                std::memcpy(resp.data() + 8, &rh.request_id, 8);
+                std::memcpy(resp.data() + 16, &rh.length, 4);
+                LOGW("server_v2", "CREATE_ACCIDENT timeout");
+            } else {
+                rh.length = sizeof(float) * 3;
+                resp.resize(sizeof(rh) + sizeof(float) * 3);
+                std::memcpy(resp.data(), &rh.magic[0], 4);
+                std::memcpy(resp.data() + 4, &rh.version, 1);
+                std::memcpy(resp.data() + 5, &rh.type, 1);
+                std::memcpy(resp.data() + 6, &rh.flags, 1);
+                std::memcpy(resp.data() + 7, &rh.reserved, 1);
+                std::memcpy(resp.data() + 8, &rh.request_id, 8);
+                std::memcpy(resp.data() + 16, &rh.length, 4);
+                std::memcpy(resp.data() + 20, &g_accidentPos[0], sizeof(float) * 3);
+                LOGD("server_v2", std::string("CREATE_ACCIDENT ready: ") + std::to_string(g_accidentPos[0]) + "," + std::to_string(g_accidentPos[1]) + "," + std::to_string(g_accidentPos[2]));
+            }
             write_response(resp);
             return;
         }
