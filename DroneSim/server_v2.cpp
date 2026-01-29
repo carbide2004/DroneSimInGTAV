@@ -6,6 +6,7 @@
 #include "command_queue.h"
 #include <thread>
 #include <cstring>
+#include <algorithm>
 
 using namespace boost;
 
@@ -21,6 +22,14 @@ extern float g_pose[6];
 
 extern volatile bool g_accidentReady;
 extern float g_accidentPos[3];
+
+extern volatile bool g_suggestedStartPoseReady;
+extern float g_suggestedStartPose[6];
+
+extern volatile bool g_recordingEnabled;
+extern volatile int g_recordingStep;
+extern char g_recordingSessionDir[260];
+extern char g_recordingRequestedSession[128];
 
 
 ServerV2::ServerV2(boost::asio::io_context& io, unsigned short port)
@@ -264,6 +273,79 @@ void ServerV2::handle_client() {
                 std::memcpy(resp.data() + 20, &g_accidentPos[0], sizeof(float) * 3);
                 LOGD("server_v2", std::string("CREATE_ACCIDENT ready: ") + std::to_string(g_accidentPos[0]) + "," + std::to_string(g_accidentPos[1]) + "," + std::to_string(g_accidentPos[2]));
             }
+            write_response(resp);
+            return;
+        }
+        case MSG_GET_SUGGESTED_START_POSE: {
+            g_suggestedStartPoseReady = false;
+            enqueue_command("GET_SUGGESTED_START_POSE");
+            int tries = 0;
+            while (!g_suggestedStartPoseReady && tries < 2000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_GET_SUGGESTED_START_POSE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
+            if (!g_suggestedStartPoseReady) {
+                rh.length = 0;
+                resp.resize(sizeof(rh));
+                std::memcpy(resp.data(), &rh.magic[0], 4);
+                std::memcpy(resp.data() + 4, &rh.version, 1);
+                std::memcpy(resp.data() + 5, &rh.type, 1);
+                std::memcpy(resp.data() + 6, &rh.flags, 1);
+                std::memcpy(resp.data() + 7, &rh.reserved, 1);
+                std::memcpy(resp.data() + 8, &rh.request_id, 8);
+                std::memcpy(resp.data() + 16, &rh.length, 4);
+                LOGW("server_v2", "GET_SUGGESTED_START_POSE timeout");
+            } else {
+                rh.length = sizeof(float) * 6;
+                resp.resize(sizeof(rh) + sizeof(float) * 6);
+                std::memcpy(resp.data(), &rh.magic[0], 4);
+                std::memcpy(resp.data() + 4, &rh.version, 1);
+                std::memcpy(resp.data() + 5, &rh.type, 1);
+                std::memcpy(resp.data() + 6, &rh.flags, 1);
+                std::memcpy(resp.data() + 7, &rh.reserved, 1);
+                std::memcpy(resp.data() + 8, &rh.request_id, 8);
+                std::memcpy(resp.data() + 16, &rh.length, 4);
+                std::memcpy(resp.data() + 20, &g_suggestedStartPose[0], sizeof(float) * 6);
+            }
+            write_response(resp);
+            return;
+        }
+        case MSG_GET_RECORDING_INFO: {
+            uint8_t enabled = g_recordingEnabled ? 1 : 0;
+            int32_t step = static_cast<int32_t>(g_recordingStep);
+            uint16_t path_len = static_cast<uint16_t>(std::min<size_t>(std::strlen(g_recordingSessionDir), 65535));
+            uint32_t payload_len = 1 + 4 + 2 + path_len;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_GET_RECORDING_INFO; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = payload_len;
+            resp.resize(sizeof(rh) + payload_len);
+            std::memcpy(resp.data(), &rh.magic[0], 4);
+            std::memcpy(resp.data() + 4, &rh.version, 1);
+            std::memcpy(resp.data() + 5, &rh.type, 1);
+            std::memcpy(resp.data() + 6, &rh.flags, 1);
+            std::memcpy(resp.data() + 7, &rh.reserved, 1);
+            std::memcpy(resp.data() + 8, &rh.request_id, 8);
+            std::memcpy(resp.data() + 16, &rh.length, 4);
+            unsigned char* p = resp.data() + 20;
+            std::memcpy(p, &enabled, 1); p += 1;
+            std::memcpy(p, &step, 4); p += 4;
+            std::memcpy(p, &path_len, 2); p += 2;
+            if (path_len) std::memcpy(p, g_recordingSessionDir, path_len);
+            write_response(resp);
+            return;
+        }
+        case MSG_SET_RECORDING_SESSION: {
+            std::memset(g_recordingRequestedSession, 0, sizeof(g_recordingRequestedSession));
+            if (hdr.length > 0) {
+                size_t n = std::min<size_t>(hdr.length, sizeof(g_recordingRequestedSession) - 1);
+                std::memcpy(g_recordingRequestedSession, payload.data(), n);
+                g_recordingRequestedSession[n] = '\0';
+            }
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_RECORDING_SESSION; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            resp.resize(sizeof(rh));
+            std::memcpy(resp.data(), &rh.magic[0], 4);
+            std::memcpy(resp.data() + 4, &rh.version, 1);
+            std::memcpy(resp.data() + 5, &rh.type, 1);
+            std::memcpy(resp.data() + 6, &rh.flags, 1);
+            std::memcpy(resp.data() + 7, &rh.reserved, 1);
+            std::memcpy(resp.data() + 8, &rh.request_id, 8);
+            std::memcpy(resp.data() + 16, &rh.length, 4);
             write_response(resp);
             return;
         }

@@ -10,6 +10,8 @@
 #include <string>
 #include <fstream>
 #include <algorithm>
+#include <cstring>
+#include <cstdio>
 #include <set>
 #include <atlimage.h>
 #include <time.h>
@@ -23,7 +25,108 @@ float g_pose[6] = {0};
 volatile bool g_accidentReady = false;
 float g_accidentPos[3] = {0};
 
+volatile bool g_suggestedStartPoseReady = false;
+float g_suggestedStartPose[6] = {0};
+
+volatile bool g_recordingEnabled = false;
+volatile int g_recordingStep = 0;
+char g_recordingSessionDir[260] = {0};
+char g_recordingRequestedSession[128] = {0};
+
 scriptStatusEnum scriptStatus = scriptStop;
+
+extern volatile catchState cmdToCatch;
+
+static std::ofstream g_recordingStepsFile;
+
+static bool ensure_dir(const std::string& path) {
+    if (path.empty()) return false;
+    if (CreateDirectoryA(path.c_str(), nullptr)) return true;
+    DWORD e = GetLastError();
+    return e == ERROR_ALREADY_EXISTS;
+}
+
+static std::string make_timestamp_session() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t tt = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+    localtime_s(&tm, &tt);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm);
+    return std::string(buf);
+}
+
+static void start_recording_session() {
+    if (g_recordingEnabled) return;
+    ensure_dir("data");
+    ensure_dir("data\\manual");
+    std::string name = (g_recordingRequestedSession[0] != '\0') ? std::string(g_recordingRequestedSession) : make_timestamp_session();
+    std::string base = std::string("data\\manual\\") + name;
+    ensure_dir(base);
+    ensure_dir(base + "\\RGB");
+    ensure_dir(base + "\\Depth");
+    std::memset(g_recordingSessionDir, 0, sizeof(g_recordingSessionDir));
+    size_t n = std::min<size_t>(base.size(), sizeof(g_recordingSessionDir) - 1);
+    std::memcpy(g_recordingSessionDir, base.data(), n);
+    g_recordingStep = 0;
+    if (g_recordingStepsFile.is_open()) g_recordingStepsFile.close();
+    g_recordingStepsFile.open(base + "\\steps.jsonl", std::ios::out | std::ios::binary);
+    g_recordingEnabled = g_recordingStepsFile.is_open();
+    if (g_recordingEnabled) LOGI("script", std::string("Recording started: ") + g_recordingSessionDir);
+    else LOGE("script", "Recording start failed");
+}
+
+static void stop_recording_session() {
+    if (!g_recordingEnabled) return;
+    g_recordingEnabled = false;
+    if (g_recordingStepsFile.is_open()) {
+        g_recordingStepsFile.flush();
+        g_recordingStepsFile.close();
+    }
+    LOGI("script", "Recording stopped");
+}
+
+static void record_step(const char* action, float dx, float dy, float dz, float drx, float dry, float drz) {
+    if (!g_recordingEnabled) return;
+    if (g_recordingSessionDir[0] == '\0') return;
+    if (!g_recordingStepsFile.is_open()) return;
+    Any cam = CAM::GET_RENDERING_CAM();
+    Vector3 pos = CAM::GET_CAM_COORD(cam);
+    Vector3 rot = CAM::GET_CAM_ROT(cam, 2);
+    makeCmdStart();
+    int tries = 0;
+    while (cmdToCatch != catchStop && tries < 6000) { WAIT(0); tries++; }
+    void* rgb_ptr = nullptr; int rgb_size = export_get_color_buffer(&rgb_ptr);
+    void* depth_ptr = nullptr; int depth_size = export_get_depth_buffer(&depth_ptr);
+    int w = export_get_last_color_width();
+    int h = export_get_last_color_height();
+    int step = g_recordingStep;
+    char namebuf[64];
+    sprintf_s(namebuf, "step_%06d.bin", step);
+    std::string rgb_rel = std::string("RGB/") + namebuf;
+    std::string depth_rel = std::string("Depth/") + namebuf;
+    std::string rgb_path = std::string(g_recordingSessionDir) + "\\RGB\\" + namebuf;
+    std::string depth_path = std::string(g_recordingSessionDir) + "\\Depth\\" + namebuf;
+    {
+        std::ofstream f(rgb_path, std::ios::binary);
+        if (rgb_size > 0 && rgb_ptr) f.write(reinterpret_cast<const char*>(rgb_ptr), rgb_size);
+    }
+    {
+        std::ofstream f(depth_path, std::ios::binary);
+        if (depth_size > 0 && depth_ptr) f.write(reinterpret_cast<const char*>(depth_ptr), depth_size);
+    }
+    g_recordingStepsFile
+        << "{\"step\":" << step
+        << ",\"action\":{\"name\":\"" << action << "\",\"dx\":" << dx << ",\"dy\":" << dy << ",\"dz\":" << dz
+        << ",\"drx\":" << drx << ",\"dry\":" << dry << ",\"drz\":" << drz << "}"
+        << ",\"pose\":{\"x\":" << pos.x << ",\"y\":" << pos.y << ",\"z\":" << pos.z
+        << ",\"rx\":" << rot.x << ",\"ry\":" << rot.y << ",\"rz\":" << rot.z << "}"
+        << ",\"rgb\":{\"path\":\"" << rgb_rel << "\",\"width\":" << w << ",\"height\":" << h << ",\"bytes\":" << rgb_size << "}"
+        << ",\"depth\":{\"path\":\"" << depth_rel << "\",\"width\":" << export_get_last_depth_width() << ",\"height\":" << export_get_last_depth_height() << ",\"bytes\":" << depth_size << "}"
+        << "}\n";
+    g_recordingStepsFile.flush();
+    g_recordingStep = step + 1;
+}
 
     void scriptMain()
 {
@@ -43,35 +146,51 @@ scriptStatusEnum scriptStatus = scriptStop;
         {
             if (W.isKeyDown())
             {
+                record_step("W", 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(1.0f, 0.0f, 0.0f);
             }
             if (S.isKeyDown())
             {
+                record_step("S", -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(-1.0f, 0.0f, 0.0f);
             }
             if (A.isKeyDown())
             {
+                record_step("A", 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(0.0f, -1.0f, 0.0f);
             }
             if (D.isKeyDown())
             {
+                record_step("D", 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(0.0f, 1.0f, 0.0f);
             }
             if (shift.isKeyDown())
             {
+                record_step("SHIFT", 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(0.0f, 0.0f, 1.0f);
             }
             if (ctrl.isKeyDown())
             {
+                record_step("CTRL", 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(0.0f, 0.0f, -1.0f);
             }
             if (Q.isKeyDown())
             {
+                record_step("Q", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 45.0f);
                 rotateCameraDelta(0.0f, 0.0f, 45.0f);
             }
             if (E.isKeyDown())
             {
+                record_step("E", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -45.0f);
                 rotateCameraDelta(0.0f, 0.0f, -45.0f);
+            }
+            if (J.isKeyDown())
+            {
+                start_recording_session();
+            }
+            if (K.isKeyDown())
+            {
+                stop_recording_session();
             }
         }
         if (F10.isKeyDown()) {
@@ -83,6 +202,7 @@ scriptStatusEnum scriptStatus = scriptStop;
         if (F11.isKeyDown()) {
             StopCamera();
             scriptStatus = scriptStop;
+            stop_recording_session();
             LOGI("script", "Camera stopped and returned to player view");
         }
 
@@ -99,8 +219,40 @@ scriptStatusEnum scriptStatus = scriptStop;
         {
             StopCamera();
             scriptStatus = scriptStop;
+            stop_recording_session();
             // setStatusText("Camera mode disabled.");
             LOGI("script", "Camera stopped and returned to player view");
+        }
+        else if (cmd == "GET_SUGGESTED_START_POSE")
+        {
+            float ax = g_accidentPos[0], ay = g_accidentPos[1], az = g_accidentPos[2];
+            Vector3 nodePos; float nodeHeading = 0.0f;
+            bool ok = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(ax, ay, az, &nodePos, &nodeHeading, 1, 3.0, 0);
+            if (!ok) {
+                Any cam = CAM::GET_RENDERING_CAM();
+                Vector3 pos = CAM::GET_CAM_COORD(cam);
+                Vector3 rot = CAM::GET_CAM_ROT(cam, 2);
+                g_suggestedStartPose[0] = pos.x; g_suggestedStartPose[1] = pos.y; g_suggestedStartPose[2] = pos.z;
+                g_suggestedStartPose[3] = rot.x; g_suggestedStartPose[4] = rot.y; g_suggestedStartPose[5] = rot.z;
+                g_suggestedStartPoseReady = true;
+                LOGW("script", "GET_SUGGESTED_START_POSE fallback to current camera");
+            } else {
+                float gz = nodePos.z;
+                GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(ax, ay, az, &gz, false);
+                float rad = nodeHeading * 3.14159f / 180.0f;
+                float dirx = -sinf(rad);
+                float diry = cosf(rad);
+                float dist = 40.0f;
+                float alt = 20.0f;
+                g_suggestedStartPose[0] = ax - dirx * dist;
+                g_suggestedStartPose[1] = ay - diry * dist;
+                g_suggestedStartPose[2] = gz + alt;
+                g_suggestedStartPose[3] = -60.0f;
+                g_suggestedStartPose[4] = 0.0f;
+                g_suggestedStartPose[5] = nodeHeading;
+                g_suggestedStartPoseReady = true;
+                LOGI("script", "GET_SUGGESTED_START_POSE ready");
+            }
         }
         else if (cmd == "CREATE_ACCIDENT")
         {

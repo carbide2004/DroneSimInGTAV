@@ -16,6 +16,9 @@ TYPE_SET_TIME = 8
 TYPE_SET_WEATHER = 9
 TYPE_STOP_CAMERA = 10
 TYPE_CREATE_ACCIDENT = 11
+TYPE_GET_SUGGESTED_START_POSE = 12
+TYPE_GET_RECORDING_INFO = 13
+TYPE_SET_RECORDING_SESSION = 14
 
 def _pack_header(t, req_id, length):
     return struct.pack("4sBBBBQI", MAGIC, VERSION, t, 0, 0, req_id, length)
@@ -119,6 +122,31 @@ class DroneSimClient:
             return None
         x, y, z = struct.unpack("fff", p[:12])
         return x, y, z
+
+    def get_suggested_start_pose(self):
+        s = self._send(TYPE_GET_SUGGESTED_START_POSE, 12)
+        t, rid, p = self._recv(s)
+        if not p or len(p) < 24:
+            return None
+        x, y, z, rx, ry, rz = struct.unpack("ffffff", p[:24])
+        return x, y, z, rx, ry, rz
+
+    def get_recording_info(self):
+        s = self._send(TYPE_GET_RECORDING_INFO, 13)
+        t, rid, p = self._recv(s)
+        if not p or len(p) < 7:
+            return None
+        enabled = struct.unpack("B", p[:1])[0]
+        step = struct.unpack("i", p[1:5])[0]
+        path_len = struct.unpack("H", p[5:7])[0]
+        path = p[7:7+path_len].decode("utf-8", errors="replace") if path_len else ""
+        return {"enabled": bool(enabled), "step": int(step), "session_dir": path}
+
+    def set_recording_session(self, session_name):
+        payload = str(session_name).encode("utf-8")
+        s = self._send(TYPE_SET_RECORDING_SESSION, 14, payload)
+        self._recv(s)
+        time.sleep(0.1)
 
 def visualize(rgb_bytes, depth_bytes, w, h):
     try:
