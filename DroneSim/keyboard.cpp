@@ -11,12 +11,16 @@ const int keyInfo::MAX_DOWN = 500; //ms
 
 keyInfo::keyInfo() {
 	time = 0;
+	isConsumed = TRUE;
 }
 bool keyInfo::isKeyDown() {
+	if (isConsumed) return false;
+	isConsumed = TRUE;
 	return ((GetTickCount() < time + MAX_DOWN) && !isUpNow);
 }
 void keyInfo::pushDown(BOOL _isUpNow, BOOL _isWithAlt, BOOL _wasDownBefore) {
 	time = GetTickCount();
+	isConsumed = FALSE;
 	isWithAlt = _isWithAlt;
 	wasDownBefore = _wasDownBefore;
 	isUpNow = _isUpNow;

@@ -8,6 +8,7 @@ struct keyInfo {
 	BOOL isWithAlt;
 	BOOL wasDownBefore;
 	BOOL isUpNow;
+	BOOL isConsumed;
 
 	keyInfo();
 	bool isKeyDown();
