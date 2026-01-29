@@ -112,7 +112,7 @@ case DLL_PROCESS_ATTACH:
 		res = MH_Initialize();
         if (res != MH_OK) LOGE("main", "Could not init Minihook");
 		presentCallbackRegister(presentCallback);
-		//keyboardHandlerRegister(OnKeyboardMessage);
+		keyboardHandlerRegister(OnKeyboardMessage);
 		scriptRegister(hinstance, scriptMain);
 		break;
 case DLL_PROCESS_DETACH:
@@ -120,7 +120,7 @@ case DLL_PROCESS_DETACH:
 		res = MH_Uninitialize();
         if (res != MH_OK) LOGE("main", "Could not deinit MiniHook");
 		presentCallbackUnregister(presentCallback);
-		//keyboardHandlerUnregister(OnKeyboardMessage);
+		keyboardHandlerUnregister(OnKeyboardMessage);
 		//scriptUnregister(hinstance);
 
 		break;

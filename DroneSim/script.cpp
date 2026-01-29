@@ -6,6 +6,7 @@
 #include "server.h"
 #include "server_v2.h"
 #include "logging.h"
+#include "keyboard.h"
 #include <string>
 #include <fstream>
 #include <algorithm>
@@ -28,16 +29,63 @@ scriptStatusEnum scriptStatus = scriptStop;
 {
 
 	int sleepTime = 0;
-	setStatusText("DroneSim start fine!!!");
+	//setStatusText("DroneSim start fine!!!");
     
     InitializeServerV2();
     LOGI("script", "DroneSim script started");
 
-    setStatusText("Awaiting client commands.");
+    //setStatusText("Awaiting client commands.");
     LOGI("script", "Awaiting client commands");
 
 	while (true)
 	{
+        if (scriptStatus == cameraMode)
+        {
+            if (W.isKeyDown())
+            {
+                moveCameraDelta(1.0f, 0.0f, 0.0f);
+            }
+            if (S.isKeyDown())
+            {
+                moveCameraDelta(-1.0f, 0.0f, 0.0f);
+            }
+            if (A.isKeyDown())
+            {
+                moveCameraDelta(0.0f, -1.0f, 0.0f);
+            }
+            if (D.isKeyDown())
+            {
+                moveCameraDelta(0.0f, 1.0f, 0.0f);
+            }
+            if (shift.isKeyDown())
+            {
+                moveCameraDelta(0.0f, 0.0f, 1.0f);
+            }
+            if (ctrl.isKeyDown())
+            {
+                moveCameraDelta(0.0f, 0.0f, -1.0f);
+            }
+            if (Q.isKeyDown())
+            {
+                rotateCameraDelta(0.0f, 0.0f, 45.0f);
+            }
+            if (E.isKeyDown())
+            {
+                rotateCameraDelta(0.0f, 0.0f, -45.0f);
+            }
+        }
+        if (F10.isKeyDown()) {
+            startNewCamera();
+            scriptStatus = cameraMode;
+            // setStatusText("Camera mode enabled.");
+            LOGI("script", "Camera created and mode enabled");
+        }
+        if (F11.isKeyDown()) {
+            StopCamera();
+            scriptStatus = scriptStop;
+            LOGI("script", "Camera stopped and returned to player view");
+        }
+
         std::string cmd;
         if (!try_dequeue_command(cmd)) { WAIT(0); continue; }
         if (cmd == "CREATE_CAMERA")
