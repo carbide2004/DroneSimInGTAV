@@ -25,7 +25,7 @@ void keyInfo::pushDown(BOOL _isUpNow, BOOL _isWithAlt, BOOL _wasDownBefore) {
 	wasDownBefore = _wasDownBefore;
 	isUpNow = _isUpNow;
 }
-keyInfo W, A, S, D, Q, E, J, K, V, shift, ctrl, tab, oemPlus, oemMinus, F10, I, F11, numKey[10];
+keyInfo W, A, S, D, Q, E, J, K, V, shift, ctrl, tab, oemPlus, oemMinus, F5, F10, I, F11, numKey[10];
 
 void OnKeyboardMessage(DWORD key, WORD repeats, BYTE scanCode, BOOL isExtended, BOOL isWithAlt, BOOL wasDownBefore, BOOL isUpNow)
 {
@@ -50,6 +50,7 @@ void OnKeyboardMessage(DWORD key, WORD repeats, BYTE scanCode, BOOL isExtended, 
 
 		if (key == VK_SHIFT) shift.pushDown(isUpNow, isWithAlt, wasDownBefore);
 		if (key == VK_CONTROL) ctrl.pushDown(isUpNow, isWithAlt, wasDownBefore);
+		if (push(VK_F5)) F5.pushDown(isUpNow, isWithAlt, wasDownBefore);
 		if (push(VK_F11)) F11.pushDown(isUpNow, isWithAlt, wasDownBefore);
 		if (key == VK_TAB) tab.pushDown(isUpNow, isWithAlt, wasDownBefore);
 	}

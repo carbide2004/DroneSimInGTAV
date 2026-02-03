@@ -129,6 +129,172 @@ static void record_step(const char* action, float dx, float dy, float dz, float 
     g_recordingStep = step + 1;
 }
 
+static void create_fire_near_pos(float ox, float oy, float oz) {
+    g_fireReady = false;
+    Vector3 nodePos; float nodeHeading = 0.0f;
+    bool ok = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(ox, oy, oz, &nodePos, &nodeHeading, 1, 3.0, 0);
+    float px = ok ? nodePos.x : ox;
+    float py = ok ? nodePos.y : oy;
+    float pz = ok ? nodePos.z : oz;
+    float gz = pz;
+    bool hasGround = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(px, py, pz, &gz, false);
+    if (!hasGround) gz = pz;
+    g_firePos[0] = px;
+    g_firePos[1] = py;
+    g_firePos[2] = gz;
+
+    Hash vh = GAMEPLAY::GET_HASH_KEY("blista");
+    bool v_ok = STREAMING::IS_MODEL_VALID(vh) && STREAMING::IS_MODEL_A_VEHICLE(vh);
+    if (v_ok && !STREAMING::HAS_MODEL_LOADED(vh)) {
+        STREAMING::REQUEST_MODEL(vh);
+        int tries = 0;
+        while (!STREAMING::HAS_MODEL_LOADED(vh) && tries < 200) { WAIT(0); tries++; }
+    }
+
+    if (v_ok && STREAMING::HAS_MODEL_LOADED(vh)) {
+        float heading = ok ? nodeHeading : 0.0f;
+        Vehicle v = VEHICLE::CREATE_VEHICLE(vh, g_firePos[0], g_firePos[1], g_firePos[2], heading, true, false);
+        STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(vh);
+        ENTITY::SET_ENTITY_AS_MISSION_ENTITY(v, true, true);
+        VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v);
+        VEHICLE::SET_VEHICLE_HANDBRAKE(v, true);
+        VEHICLE::SET_VEHICLE_ENGINE_ON(v, false, true, false);
+        Vector3 vpos = ENTITY::GET_ENTITY_COORDS(v, true);
+        g_firePos[0] = vpos.x;
+        g_firePos[1] = vpos.y;
+        g_firePos[2] = vpos.z;
+        VEHICLE::SET_VEHICLE_PETROL_TANK_HEALTH(v, -1000.0f);
+        VEHICLE::SET_VEHICLE_ENGINE_HEALTH(v, -1000.0f);
+        VEHICLE::SET_VEHICLE_DAMAGE(v, 0.0f, 0.0f, 0.0f, 2000.0f, 5.0f, true);
+        g_fireId = static_cast<int>(FIRE::START_ENTITY_FIRE(v));
+        FIRE::ADD_EXPLOSION(g_firePos[0], g_firePos[1], g_firePos[2] + 0.5f, 2, 10.0f, true, false, 1.0f);
+        int burn_tries = 0;
+        while (!FIRE::IS_ENTITY_ON_FIRE(v) && burn_tries < 60) { WAIT(0); burn_tries++; }
+    } else {
+        g_fireId = static_cast<int>(FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1], g_firePos[2], 25, true));
+        LOGW("script", "CREATE_FIRE vehicle model unavailable, using script fire");
+    }
+    g_fireReady = true;
+    LOGI("script", std::string("CREATE_FIRE script fire at ") + std::to_string(g_firePos[0]) + "," + std::to_string(g_firePos[1]) + "," + std::to_string(g_firePos[2]));
+}
+
+static void create_fire_near_camera() {
+    Any cam = CAM::GET_RENDERING_CAM();
+    Vector3 camPos = CAM::GET_CAM_COORD(cam);
+    create_fire_near_pos(camPos.x, camPos.y, camPos.z);
+}
+
+static float wrap_angle_deg(float a) {
+    while (a > 180.0f) a -= 360.0f;
+    while (a < -180.0f) a += 360.0f;
+    return a;
+}
+
+static float quantize_deg(float a, float step) {
+    if (step <= 0.0f) return a;
+    return roundf(a / step) * step;
+}
+
+static float yaw_to_target_deg(const Vector3& from, const Vector3& to) {
+    float dx = to.x - from.x;
+    float dy = to.y - from.y;
+    float yaw = atan2f(-dx, dy) * (180.0f / 3.14159f);
+    return yaw;
+}
+
+static void run_auto_collect() {
+    static bool active = false;
+    if (active) return;
+    active = true;
+
+    if (!g_recordingEnabled) start_recording_session();
+
+    create_fire_near_camera();
+
+    Vector3 fire{};
+    fire.x = g_firePos[0];
+    fire.y = g_firePos[1];
+    fire.z = g_firePos[2];
+    Vector3 target{};
+    target.x = fire.x;
+    target.y = fire.y;
+    target.z = fire.z + 5.0f;
+
+    Vector3 fireNode{}; float fireHeading = 0.0f;
+    bool okFireNode = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(fire.x, fire.y, fire.z, &fireNode, &fireHeading, 1, 3.0, 0);
+    float rad = (okFireNode ? fireHeading : 0.0f) * (3.14159f / 180.0f);
+    float dirx = -sinf(rad);
+    float diry = cosf(rad);
+    float startDist = 100.0f;
+    float candx = fire.x - dirx * startDist;
+    float candy = fire.y - diry * startDist;
+    float candz = fire.z;
+
+    Vector3 startNode{}; float startHeading = 0.0f;
+    bool okStartNode = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(candx, candy, candz, &startNode, &startHeading, 1, 3.0, 0);
+    float sx = okStartNode ? startNode.x : candx;
+    float sy = okStartNode ? startNode.y : candy;
+    float sz0 = okStartNode ? startNode.z : candz;
+    float gz = sz0;
+    bool hasGround = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(sx, sy, sz0, &gz, false);
+    if (!hasGround) gz = sz0;
+    float sz = gz + 10.0f;
+
+    Any cam = CAM::GET_RENDERING_CAM();
+    CAM::SET_CAM_COORD(cam, sx, sy, sz);
+    Vector3 startPos{}; startPos.x = sx; startPos.y = sy; startPos.z = sz;
+    float yaw = quantize_deg(yaw_to_target_deg(startPos, target), 15.0f);
+    CAM::SET_CAM_ROT(cam, 0.0f, 0.0f, yaw, 2);
+    WAIT(0);
+
+    int maxSteps = 500;
+    bool reached = false;
+    for (int step = 0; step < maxSteps; step++) {
+        cam = CAM::GET_RENDERING_CAM();
+        Vector3 pos = CAM::GET_CAM_COORD(cam);
+        Vector3 rot = CAM::GET_CAM_ROT(cam, 2);
+        float dx = target.x - pos.x;
+        float dy = target.y - pos.y;
+        float dz = target.z - pos.z;
+        float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (dist <= 10.0f) { reached = true; break; }
+
+        if (fabsf(dz) > 1.0f) {
+            if (dz > 0.0f) {
+                record_step("AUTO_UP", 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+                moveCameraDelta(0.0f, 0.0f, 1.0f);
+            } 
+            else {
+                record_step("AUTO_DOWN", 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f);
+                moveCameraDelta(0.0f, 0.0f, -1.0f);
+            }
+        } 
+        else {
+            float desiredYaw = quantize_deg(yaw_to_target_deg(pos, target), 15.0f);
+            float delta = wrap_angle_deg(desiredYaw - rot.z);
+            if (fabsf(delta) >= 15.0f) {
+                if (delta > 0.0f) {
+                    record_step("AUTO_YAW_LEFT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 15.0f);
+                    rotateCameraDelta(0.0f, 0.0f, 15.0f);
+                } 
+                else {
+                    record_step("AUTO_YAW_RIGHT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -15.0f);
+                    rotateCameraDelta(0.0f, 0.0f, -15.0f);
+                }
+            } 
+            else {
+                record_step("AUTO_FORWARD", 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+                moveCameraDelta(1.0f, 0.0f, 0.0f);
+            }
+        }
+        WAIT(0);
+    }
+
+    record_step(reached ? "AUTO_STOP_REACHED" : "AUTO_STOP_MAXSTEPS", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+    stop_recording_session();
+    active = false;
+}
+
     void scriptMain()
 {
 
@@ -193,6 +359,10 @@ static void record_step(const char* action, float dx, float dy, float dz, float 
             {
                 stop_recording_session();
             }
+            if (F5.isKeyDown())
+            {
+                run_auto_collect();
+            }
         }
         if (F10.isKeyDown()) {
             startNewCamera();
@@ -226,82 +396,7 @@ static void record_step(const char* action, float dx, float dy, float dz, float 
         }
         else if (cmd == "CREATE_FIRE")
         {
-            g_fireReady = false;
-            Any cam = CAM::GET_RENDERING_CAM();
-            Vector3 camPos = CAM::GET_CAM_COORD(cam);
-            Vector3 nodePos; float nodeHeading = 0.0f;
-            bool ok = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(camPos.x, camPos.y, camPos.z, &nodePos, &nodeHeading, 1, 3.0, 0);
-            float px = ok ? nodePos.x : camPos.x;
-            float py = ok ? nodePos.y : camPos.y;
-            float pz = ok ? nodePos.z : camPos.z;
-            float gz = pz;
-            bool hasGround = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(px, py, pz, &gz, false);
-            if (!hasGround) {
-                gz = pz;
-            }
-            g_firePos[0] = px;
-            g_firePos[1] = py;
-            g_firePos[2] = gz;
-
-            float ground = g_firePos[2];
-            for (int ring = 0; ring < 3; ring++) {
-                float r = 4.0f + 4.0f * ring;
-                int n = 12 + ring * 6;
-                for (int i = 0; i < n; i++) {
-                    float a = (2.0f * 3.14159f) * (static_cast<float>(i) / static_cast<float>(n));
-                    float x = g_firePos[0] + cosf(a) * r;
-                    float y = g_firePos[1] + sinf(a) * r;
-                    float z = ground + 0.05f;
-                    GRAPHICS::ADD_PETROL_DECAL(x, y, z, ground, 6.0f, 1.0f);
-                }
-            }
-            GRAPHICS::ADD_PETROL_DECAL(g_firePos[0], g_firePos[1], ground + 0.05f, ground, 10.0f, 1.0f);
-
-            int main_fire = static_cast<int>(FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1], g_firePos[2], 25, true));
-            FIRE::START_SCRIPT_FIRE(g_firePos[0] + 3.0f, g_firePos[1], g_firePos[2], 20, true);
-            FIRE::START_SCRIPT_FIRE(g_firePos[0] - 3.0f, g_firePos[1], g_firePos[2], 20, true);
-            FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1] + 3.0f, g_firePos[2], 20, true);
-            FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1] - 3.0f, g_firePos[2], 20, true);
-            g_fireId = main_fire;
-
-            Hash vh = GAMEPLAY::GET_HASH_KEY("blista");
-            bool v_ok = STREAMING::IS_MODEL_VALID(vh) && STREAMING::IS_MODEL_A_VEHICLE(vh);
-            if (v_ok && !STREAMING::HAS_MODEL_LOADED(vh)) {
-                STREAMING::REQUEST_MODEL(vh);
-                int tries = 0;
-                while (!STREAMING::HAS_MODEL_LOADED(vh) && tries < 200) { WAIT(0); tries++; }
-            }
-            if (v_ok && STREAMING::HAS_MODEL_LOADED(vh)) {
-                int car_count = 6;
-                for (int i = 0; i < car_count; i++) {
-                    float a = (2.0f * 3.14159f) * (static_cast<float>(i) / static_cast<float>(car_count));
-                    float r = 6.0f + 3.0f * (i % 3);
-                    float x = g_firePos[0] + cosf(a) * r;
-                    float y = g_firePos[1] + sinf(a) * r;
-                    float z = g_firePos[2];
-                    float gz2 = z;
-                    bool hasGround2 = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(x, y, z, &gz2, false);
-                    if (hasGround2) z = gz2;
-                    Vehicle v = VEHICLE::CREATE_VEHICLE(vh, x, y, z, 0.0f, true, false);
-                    ENTITY::SET_ENTITY_AS_MISSION_ENTITY(v, true, true);
-                    VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v);
-                    VEHICLE::SET_VEHICLE_HANDBRAKE(v, true);
-                    VEHICLE::SET_VEHICLE_ENGINE_ON(v, false, true, false);
-                    VEHICLE::SET_VEHICLE_PETROL_TANK_HEALTH(v, -1000.0f);
-                    VEHICLE::SET_VEHICLE_ENGINE_HEALTH(v, -1000.0f);
-                    VEHICLE::SET_VEHICLE_DAMAGE(v, 0.0f, 0.0f, 0.0f, 2000.0f, 5.0f, true);
-                    int burn_tries = 0;
-                    while (!FIRE::IS_ENTITY_ON_FIRE(v) && burn_tries < 60) { WAIT(0); burn_tries++; }
-                    if (!FIRE::IS_ENTITY_ON_FIRE(v)) {
-                        FIRE::START_ENTITY_FIRE(v);
-                    }
-                }
-                STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(vh);
-            } else {
-                LOGW("script", "CREATE_FIRE could not load vehicle model for burning cars");
-            }
-            g_fireReady = true;
-            LOGI("script", std::string("CREATE_FIRE script fire at ") + std::to_string(g_firePos[0]) + "," + std::to_string(g_firePos[1]) + "," + std::to_string(g_firePos[2]));
+            create_fire_near_camera();
         }
         else if (cmd == "CREATE_ACCIDENT")
         {

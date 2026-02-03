@@ -87,8 +87,8 @@ def _overlay_text(img, step_idx, total, next_action_text):
 
 
 def main():
-    session_dir = r"D:\SteamLibrary\steamapps\common\Grand Theft Auto V\data\manual\20260129_203926"
-    fps = 1.0
+    session_dir = r"D:\SteamLibrary\steamapps\common\Grand Theft Auto V\data\manual\20260203_232456"
+    fps = 15.0
     target_w = 1920
     target_h = 1080
     session_dir = os.path.abspath(session_dir)
