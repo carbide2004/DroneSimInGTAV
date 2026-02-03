@@ -23,13 +23,14 @@ extern float g_pose[6];
 extern volatile bool g_accidentReady;
 extern float g_accidentPos[3];
 
-extern volatile bool g_suggestedStartPoseReady;
-extern float g_suggestedStartPose[6];
-
 extern volatile bool g_recordingEnabled;
 extern volatile int g_recordingStep;
 extern char g_recordingSessionDir[260];
 extern char g_recordingRequestedSession[128];
+
+extern volatile bool g_fireReady;
+extern float g_firePos[3];
+extern int g_fireId;
 
 
 ServerV2::ServerV2(boost::asio::io_context& io, unsigned short port)
@@ -276,38 +277,6 @@ void ServerV2::handle_client() {
             write_response(resp);
             return;
         }
-        case MSG_GET_SUGGESTED_START_POSE: {
-            g_suggestedStartPoseReady = false;
-            enqueue_command("GET_SUGGESTED_START_POSE");
-            int tries = 0;
-            while (!g_suggestedStartPoseReady && tries < 2000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_GET_SUGGESTED_START_POSE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
-            if (!g_suggestedStartPoseReady) {
-                rh.length = 0;
-                resp.resize(sizeof(rh));
-                std::memcpy(resp.data(), &rh.magic[0], 4);
-                std::memcpy(resp.data() + 4, &rh.version, 1);
-                std::memcpy(resp.data() + 5, &rh.type, 1);
-                std::memcpy(resp.data() + 6, &rh.flags, 1);
-                std::memcpy(resp.data() + 7, &rh.reserved, 1);
-                std::memcpy(resp.data() + 8, &rh.request_id, 8);
-                std::memcpy(resp.data() + 16, &rh.length, 4);
-                LOGW("server_v2", "GET_SUGGESTED_START_POSE timeout");
-            } else {
-                rh.length = sizeof(float) * 6;
-                resp.resize(sizeof(rh) + sizeof(float) * 6);
-                std::memcpy(resp.data(), &rh.magic[0], 4);
-                std::memcpy(resp.data() + 4, &rh.version, 1);
-                std::memcpy(resp.data() + 5, &rh.type, 1);
-                std::memcpy(resp.data() + 6, &rh.flags, 1);
-                std::memcpy(resp.data() + 7, &rh.reserved, 1);
-                std::memcpy(resp.data() + 8, &rh.request_id, 8);
-                std::memcpy(resp.data() + 16, &rh.length, 4);
-                std::memcpy(resp.data() + 20, &g_suggestedStartPose[0], sizeof(float) * 6);
-            }
-            write_response(resp);
-            return;
-        }
         case MSG_GET_RECORDING_INFO: {
             uint8_t enabled = g_recordingEnabled ? 1 : 0;
             int32_t step = static_cast<int32_t>(g_recordingStep);
@@ -346,6 +315,41 @@ void ServerV2::handle_client() {
             std::memcpy(resp.data() + 7, &rh.reserved, 1);
             std::memcpy(resp.data() + 8, &rh.request_id, 8);
             std::memcpy(resp.data() + 16, &rh.length, 4);
+            write_response(resp);
+            return;
+        }
+        case MSG_CREATE_FIRE: {
+            g_fireReady = false;
+            enqueue_command("CREATE_FIRE");
+            int tries = 0;
+            while (!g_fireReady && tries < 2000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
+
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_FIRE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
+            if (!g_fireReady) {
+                rh.length = 0;
+                resp.resize(sizeof(rh));
+                std::memcpy(resp.data(), &rh.magic[0], 4);
+                std::memcpy(resp.data() + 4, &rh.version, 1);
+                std::memcpy(resp.data() + 5, &rh.type, 1);
+                std::memcpy(resp.data() + 6, &rh.flags, 1);
+                std::memcpy(resp.data() + 7, &rh.reserved, 1);
+                std::memcpy(resp.data() + 8, &rh.request_id, 8);
+                std::memcpy(resp.data() + 16, &rh.length, 4);
+                LOGW("server_v2", "CREATE_FIRE timeout");
+            } else {
+                rh.length = sizeof(float) * 3 + sizeof(int32_t);
+                resp.resize(sizeof(rh) + rh.length);
+                std::memcpy(resp.data(), &rh.magic[0], 4);
+                std::memcpy(resp.data() + 4, &rh.version, 1);
+                std::memcpy(resp.data() + 5, &rh.type, 1);
+                std::memcpy(resp.data() + 6, &rh.flags, 1);
+                std::memcpy(resp.data() + 7, &rh.reserved, 1);
+                std::memcpy(resp.data() + 8, &rh.request_id, 8);
+                std::memcpy(resp.data() + 16, &rh.length, 4);
+                std::memcpy(resp.data() + 20, &g_firePos[0], sizeof(float) * 3);
+                int32_t fid = static_cast<int32_t>(g_fireId);
+                std::memcpy(resp.data() + 20 + sizeof(float) * 3, &fid, sizeof(int32_t));
+            }
             write_response(resp);
             return;
         }

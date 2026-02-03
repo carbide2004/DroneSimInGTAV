@@ -25,13 +25,14 @@ float g_pose[6] = {0};
 volatile bool g_accidentReady = false;
 float g_accidentPos[3] = {0};
 
-volatile bool g_suggestedStartPoseReady = false;
-float g_suggestedStartPose[6] = {0};
-
 volatile bool g_recordingEnabled = false;
 volatile int g_recordingStep = 0;
 char g_recordingSessionDir[260] = {0};
 char g_recordingRequestedSession[128] = {0};
+
+volatile bool g_fireReady = false;
+float g_firePos[3] = {0};
+int g_fireId = -1;
 
 scriptStatusEnum scriptStatus = scriptStop;
 
@@ -223,36 +224,84 @@ static void record_step(const char* action, float dx, float dy, float dz, float 
             // setStatusText("Camera mode disabled.");
             LOGI("script", "Camera stopped and returned to player view");
         }
-        else if (cmd == "GET_SUGGESTED_START_POSE")
+        else if (cmd == "CREATE_FIRE")
         {
-            float ax = g_accidentPos[0], ay = g_accidentPos[1], az = g_accidentPos[2];
+            g_fireReady = false;
+            Any cam = CAM::GET_RENDERING_CAM();
+            Vector3 camPos = CAM::GET_CAM_COORD(cam);
             Vector3 nodePos; float nodeHeading = 0.0f;
-            bool ok = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(ax, ay, az, &nodePos, &nodeHeading, 1, 3.0, 0);
-            if (!ok) {
-                Any cam = CAM::GET_RENDERING_CAM();
-                Vector3 pos = CAM::GET_CAM_COORD(cam);
-                Vector3 rot = CAM::GET_CAM_ROT(cam, 2);
-                g_suggestedStartPose[0] = pos.x; g_suggestedStartPose[1] = pos.y; g_suggestedStartPose[2] = pos.z;
-                g_suggestedStartPose[3] = rot.x; g_suggestedStartPose[4] = rot.y; g_suggestedStartPose[5] = rot.z;
-                g_suggestedStartPoseReady = true;
-                LOGW("script", "GET_SUGGESTED_START_POSE fallback to current camera");
-            } else {
-                float gz = nodePos.z;
-                GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(ax, ay, az, &gz, false);
-                float rad = nodeHeading * 3.14159f / 180.0f;
-                float dirx = -sinf(rad);
-                float diry = cosf(rad);
-                float dist = 40.0f;
-                float alt = 20.0f;
-                g_suggestedStartPose[0] = ax - dirx * dist;
-                g_suggestedStartPose[1] = ay - diry * dist;
-                g_suggestedStartPose[2] = gz + alt;
-                g_suggestedStartPose[3] = -60.0f;
-                g_suggestedStartPose[4] = 0.0f;
-                g_suggestedStartPose[5] = nodeHeading;
-                g_suggestedStartPoseReady = true;
-                LOGI("script", "GET_SUGGESTED_START_POSE ready");
+            bool ok = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(camPos.x, camPos.y, camPos.z, &nodePos, &nodeHeading, 1, 3.0, 0);
+            float px = ok ? nodePos.x : camPos.x;
+            float py = ok ? nodePos.y : camPos.y;
+            float pz = ok ? nodePos.z : camPos.z;
+            float gz = pz;
+            bool hasGround = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(px, py, pz, &gz, false);
+            if (!hasGround) {
+                gz = pz;
             }
+            g_firePos[0] = px;
+            g_firePos[1] = py;
+            g_firePos[2] = gz;
+
+            float ground = g_firePos[2];
+            for (int ring = 0; ring < 3; ring++) {
+                float r = 4.0f + 4.0f * ring;
+                int n = 12 + ring * 6;
+                for (int i = 0; i < n; i++) {
+                    float a = (2.0f * 3.14159f) * (static_cast<float>(i) / static_cast<float>(n));
+                    float x = g_firePos[0] + cosf(a) * r;
+                    float y = g_firePos[1] + sinf(a) * r;
+                    float z = ground + 0.05f;
+                    GRAPHICS::ADD_PETROL_DECAL(x, y, z, ground, 6.0f, 1.0f);
+                }
+            }
+            GRAPHICS::ADD_PETROL_DECAL(g_firePos[0], g_firePos[1], ground + 0.05f, ground, 10.0f, 1.0f);
+
+            int main_fire = static_cast<int>(FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1], g_firePos[2], 25, true));
+            FIRE::START_SCRIPT_FIRE(g_firePos[0] + 3.0f, g_firePos[1], g_firePos[2], 20, true);
+            FIRE::START_SCRIPT_FIRE(g_firePos[0] - 3.0f, g_firePos[1], g_firePos[2], 20, true);
+            FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1] + 3.0f, g_firePos[2], 20, true);
+            FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1] - 3.0f, g_firePos[2], 20, true);
+            g_fireId = main_fire;
+
+            Hash vh = GAMEPLAY::GET_HASH_KEY("blista");
+            bool v_ok = STREAMING::IS_MODEL_VALID(vh) && STREAMING::IS_MODEL_A_VEHICLE(vh);
+            if (v_ok && !STREAMING::HAS_MODEL_LOADED(vh)) {
+                STREAMING::REQUEST_MODEL(vh);
+                int tries = 0;
+                while (!STREAMING::HAS_MODEL_LOADED(vh) && tries < 200) { WAIT(0); tries++; }
+            }
+            if (v_ok && STREAMING::HAS_MODEL_LOADED(vh)) {
+                int car_count = 6;
+                for (int i = 0; i < car_count; i++) {
+                    float a = (2.0f * 3.14159f) * (static_cast<float>(i) / static_cast<float>(car_count));
+                    float r = 6.0f + 3.0f * (i % 3);
+                    float x = g_firePos[0] + cosf(a) * r;
+                    float y = g_firePos[1] + sinf(a) * r;
+                    float z = g_firePos[2];
+                    float gz2 = z;
+                    bool hasGround2 = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(x, y, z, &gz2, false);
+                    if (hasGround2) z = gz2;
+                    Vehicle v = VEHICLE::CREATE_VEHICLE(vh, x, y, z, 0.0f, true, false);
+                    ENTITY::SET_ENTITY_AS_MISSION_ENTITY(v, true, true);
+                    VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v);
+                    VEHICLE::SET_VEHICLE_HANDBRAKE(v, true);
+                    VEHICLE::SET_VEHICLE_ENGINE_ON(v, false, true, false);
+                    VEHICLE::SET_VEHICLE_PETROL_TANK_HEALTH(v, -1000.0f);
+                    VEHICLE::SET_VEHICLE_ENGINE_HEALTH(v, -1000.0f);
+                    VEHICLE::SET_VEHICLE_DAMAGE(v, 0.0f, 0.0f, 0.0f, 2000.0f, 5.0f, true);
+                    int burn_tries = 0;
+                    while (!FIRE::IS_ENTITY_ON_FIRE(v) && burn_tries < 60) { WAIT(0); burn_tries++; }
+                    if (!FIRE::IS_ENTITY_ON_FIRE(v)) {
+                        FIRE::START_ENTITY_FIRE(v);
+                    }
+                }
+                STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(vh);
+            } else {
+                LOGW("script", "CREATE_FIRE could not load vehicle model for burning cars");
+            }
+            g_fireReady = true;
+            LOGI("script", std::string("CREATE_FIRE script fire at ") + std::to_string(g_firePos[0]) + "," + std::to_string(g_firePos[1]) + "," + std::to_string(g_firePos[2]));
         }
         else if (cmd == "CREATE_ACCIDENT")
         {
