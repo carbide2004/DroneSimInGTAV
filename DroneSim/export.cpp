@@ -18,6 +18,7 @@
 #include <fstream>
 #include <ScreenGrab.h>
 #include <wincodec.h>
+#include <cmath>
 
 using Microsoft::WRL::ComPtr;
 using std::unique_ptr;
@@ -56,6 +57,8 @@ static time_point<high_resolution_clock> last_constant_time;
 static time_point<high_resolution_clock> last_screen_time;
 static std::chrono::milliseconds capScreen;
 
+float g_rgbdDownsampleFactor = 0.3f;
+
 void writeLog(std::string msg)
 {
     LOGI("export", msg);
@@ -72,21 +75,29 @@ static void unpack_depth(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Reso
 	D3D11_TEXTURE2D_DESC src_desc;
 
     src_tex->GetDesc(&src_desc);
-    lastDepthWidth = (int)src_desc.Width;
-    lastDepthHeight = (int)src_desc.Height;
+    int inW = (int)src_desc.Width;
+    int inH = (int)src_desc.Height;
+    float s = g_rgbdDownsampleFactor;
+    if (s <= 0.0f || s > 1.0f) s = 1.0f;
+    int outW = (std::max)(1, (int)lroundf(inW * s));
+    int outH = (std::max)(1, (int)lroundf(inH * s));
+    lastDepthWidth = outW;
+    lastDepthHeight = outH;
 	// assert(src_desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS);
 	D3D11_MAPPED_SUBRESOURCE src_map = { 0 };
 	hr = ctx->Map(src, 0, D3D11_MAP_READ, 0, &src_map);
 	if (hr != S_OK) throw std::system_error(hr, std::system_category());
-	if (dst.size() != src_desc.Height * src_desc.Width * 4) dst = vector<unsigned char>(src_desc.Height * src_desc.Width * 4);
-	if (stencil.size() != src_desc.Height * src_desc.Width) stencil = vector<unsigned char>(src_desc.Height * src_desc.Width);
-	for (int x = 0; x < src_desc.Width; ++x)
+	if (dst.size() != (size_t)outH * (size_t)outW * 4) dst = vector<unsigned char>((size_t)outH * (size_t)outW * 4);
+	if (stencil.size() != (size_t)outH * (size_t)outW) stencil = vector<unsigned char>((size_t)outH * (size_t)outW);
+	for (int y = 0; y < outH; ++y)
 	{
-		for (int y = 0; y < src_desc.Height; ++y)
+		int sy = (std::min)((int)floorf(y / s), inH - 1);
+		for (int x = 0; x < outW; ++x)
 		{
-			const float* src_f = (const float*)((const char*)src_map.pData + src_map.RowPitch*y + (x * 8));
-			unsigned char* dst_p = &dst[src_desc.Width * 4 * y + (x * 4)];
-			unsigned char* stencil_p = &stencil[src_desc.Width * y + x];
+			int sx = (std::min)((int)floorf(x / s), inW - 1);
+			const float* src_f = (const float*)((const char*)src_map.pData + src_map.RowPitch * sy + (sx * 8));
+			unsigned char* dst_p = &dst[outW * 4 * y + (x * 4)];
+			unsigned char* stencil_p = &stencil[outW * y + x];
 			memmove(dst_p, src_f, 4);
 			memmove(stencil_p, src_f + 1, 1);
 		}
@@ -163,8 +174,14 @@ void copyTexToVector(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resource
 	D3D11_TEXTURE2D_DESC desc;
 	if (hr != S_OK) throw std::system_error(hr, std::system_category());
     tex->GetDesc(&desc);
-    lastColorWidth = (int)desc.Width;
-    lastColorHeight = (int)desc.Height;
+    int inW = (int)desc.Width;
+    int inH = (int)desc.Height;
+    float s = g_rgbdDownsampleFactor;
+    if (s <= 0.0f || s > 1.0f) s = 1.0f;
+    int outW = (std::max)(1, (int)lroundf(inW * s));
+    int outH = (std::max)(1, (int)lroundf(inH * s));
+    lastColorWidth = outW;
+    lastColorHeight = outH;
 	ComPtr<ID3D11Texture2D> tex_copy;
 	CreateTextureIfNeeded(dev, tex.Get(), &tex_copy);
 	ctx->CopyResource(tex_copy.Get(), tex.Get());
@@ -173,12 +190,14 @@ void copyTexToVector(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resource
 	if (bpp == -1) throw std::invalid_argument("unsupported resource type");
 	hr = ctx->Map(tex_copy.Get(), 0, D3D11_MAP_READ, 0, &map);
 	if (hr != S_OK) throw std::system_error(hr, std::system_category());
-	if (buffer.size() != desc.Height * desc.Width * bpp) buffer = vector<unsigned char>(desc.Height * desc.Width * bpp);
-	for(int y = 0; y < desc.Height; ++y)
+	if (buffer.size() != (size_t)outH * (size_t)outW * bpp) buffer = vector<unsigned char>((size_t)outH * (size_t)outW * bpp);
+	for(int y = 0; y < outH; ++y)
 	{
-		for (int x = 0; x < desc.Width; ++x) {
-			unsigned char* p = &buffer[y * desc.Width * bpp + (x*4)];
-			unsigned char* b = (unsigned char*)map.pData + map.RowPitch*y + (x*4);
+		int sy = (std::min)((int)floorf(y / s), inH - 1);
+		for (int x = 0; x < outW; ++x) {
+			int sx = (std::min)((int)floorf(x / s), inW - 1);
+			unsigned char* p = &buffer[y * outW * bpp + (x * 4)];
+			unsigned char* b = (unsigned char*)map.pData + map.RowPitch * sy + (sx * 4);
 			p[0] = b[2];
 			p[1] = b[1];
 			p[2] = b[0];

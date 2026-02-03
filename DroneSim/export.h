@@ -12,6 +12,8 @@ void ExtractScreenBuffer(ID3D11DeviceContext* ctx, ID3D11Texture2D* back, HRESUL
 void CopyIfRequested();
 void writeLog(std::string);
 
+extern float g_rgbdDownsampleFactor;
+
 struct rage_matrices {
 	Eigen::Matrix4f M;
 	Eigen::Matrix4f MV;

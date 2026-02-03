@@ -59,15 +59,17 @@ def _format_action(action_obj):
 
 def _overlay_text(img, step_idx, total, next_action_text):
     draw = ImageDraw.Draw(img)
+    base = max(1, min(img.size))
+    font_px = int(max(12, min(48, round(base * 0.04))))
     try:
-        font = ImageFont.truetype("arial.ttf", 36)
+        font = ImageFont.truetype("arial.ttf", font_px)
     except Exception:
         font = ImageFont.load_default()
     lines = [
         f"step: {step_idx}/{max(total - 1, 0)}",
         f"next: {next_action_text}",
     ]
-    pad = 16
+    pad = max(4, int(round(font_px * 0.5)))
     x0, y0 = pad, pad
     box_w = 0
     box_h = 0
@@ -87,7 +89,7 @@ def _overlay_text(img, step_idx, total, next_action_text):
 
 
 def main():
-    session_dir = r"D:\SteamLibrary\steamapps\common\Grand Theft Auto V\data\manual\20260203_232456"
+    session_dir = r"D:\SteamLibrary\steamapps\common\Grand Theft Auto V\data\manual\20260203_234615"
     fps = 15.0
     target_w = 1920
     target_h = 1080
@@ -125,9 +127,9 @@ def main():
             print(f"[step {i}] _load_rgb_image returned None, skipping", flush=True)
             continue
         img = img.convert("RGBA")
-        img = _overlay_text(img, int(cur.get("step", i)), len(steps), next_action_text)
         if img.size != (target_w, target_h):
             img = img.resize((target_w, target_h), resample=Image.BILINEAR)
+        img = _overlay_text(img, int(cur.get("step", i)), len(steps), next_action_text)
         frame = np.asarray(img.convert("RGB"))
 
         if im_artist is None:
