@@ -177,12 +177,12 @@ static void record_step(const char* action, float dx, float dy, float dz, float 
             }
             if (Q.isKeyDown())
             {
-                record_step("Q", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 45.0f);
+                record_step("Q", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 15.0f);
                 rotateCameraDelta(0.0f, 0.0f, 45.0f);
             }
             if (E.isKeyDown())
             {
-                record_step("E", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -45.0f);
+                record_step("E", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -15.0f);
                 rotateCameraDelta(0.0f, 0.0f, -45.0f);
             }
             if (J.isKeyDown())
