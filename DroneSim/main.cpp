@@ -25,6 +25,7 @@
 #include <fstream>
 #include <ScreenGrab.h>
 #include "keyboard.h"
+#include <cstring>
 using Microsoft::WRL::ComPtr;
 using namespace std::experimental::filesystem;
 using namespace std::string_literals;
@@ -77,6 +78,8 @@ std::string g_depthCapturedFilePath;
 std::string g_stencilCapturedFilePath;
 std::string g_matrixCapturedFilePath = matrixPath;
  
+static std::vector<unsigned char> g_lastRgbBytes;
+static std::vector<unsigned char> g_lastDepthBytes;
 
 
 inline void makeCmdStart()
@@ -299,25 +302,54 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 			last_capture_depth = system_clock::now();
 
 			if (cmdToCatch == catchStart) {
-				void *stencil_buf;
-				void *depth_buf;
-				int sizeStencil = export_get_stencil_buffer(&stencil_buf);
+				void* rgb_buf = nullptr;
+				void* depth_buf = nullptr;
+				void* stencil_buf = nullptr;
+				int sizeRgb = export_get_color_buffer(&rgb_buf);
 				int sizeDepth = export_get_depth_buffer(&depth_buf);
-                screenShot();
+				int sizeStencil = export_get_stencil_buffer(&stencil_buf);
 
-				auto raw = fopen(rawPath, "wb");
-				fwrite(stencil_buf, 1, sizeStencil, raw);
-				fclose(raw);
-                LOGI("main", std::string("write stencil into file: ") + rawPath);
-				g_stencilCapturedFilePath = rawPath;
+				bool same_rgb = false;
+				bool same_depth = false;
+				if (sizeRgb > 0 && rgb_buf && !g_lastRgbBytes.empty() && g_lastRgbBytes.size() == static_cast<size_t>(sizeRgb)) {
+					same_rgb = std::memcmp(rgb_buf, g_lastRgbBytes.data(), sizeRgb) == 0;
+				}
+				if (sizeDepth > 0 && depth_buf && !g_lastDepthBytes.empty() && g_lastDepthBytes.size() == static_cast<size_t>(sizeDepth)) {
+					same_depth = std::memcmp(depth_buf, g_lastDepthBytes.data(), sizeDepth) == 0;
+				}
 
-				auto depth_raw = fopen(depthPath, "wb");
-				fwrite(depth_buf, 1, sizeDepth, depth_raw);
-				fclose(depth_raw);
-                LOGI("main", std::string("write depth into file: ") + depthPath);
-				g_depthCapturedFilePath = depthPath;
+				if (same_rgb || same_depth) {
+					LOGW("main", std::string("capture skipped because ") +
+						(same_rgb ? "RGB " : "") +
+						(same_depth ? "DEPTH " : "") +
+						"unchanged from last frame");
+				} 
+				else {
+					if (sizeRgb > 0 && rgb_buf) {
+						g_lastRgbBytes.assign(reinterpret_cast<unsigned char*>(rgb_buf),
+							reinterpret_cast<unsigned char*>(rgb_buf) + sizeRgb);
+					}
+					if (sizeDepth > 0 && depth_buf) {
+						g_lastDepthBytes.assign(reinterpret_cast<unsigned char*>(depth_buf),
+							reinterpret_cast<unsigned char*>(depth_buf) + sizeDepth);
+					}
 
-				makeCmdStop();
+					screenShot();
+
+					auto raw = fopen(rawPath, "wb");
+					fwrite(stencil_buf, 1, sizeStencil, raw);
+					fclose(raw);
+					LOGI("main", std::string("write stencil into file: ") + rawPath);
+					g_stencilCapturedFilePath = rawPath;
+
+					auto depth_raw = fopen(depthPath, "wb");
+					fwrite(depth_buf, 1, sizeDepth, depth_raw);
+					fclose(depth_raw);
+					LOGI("main", std::string("write depth into file: ") + depthPath);
+					g_depthCapturedFilePath = depthPath;
+
+					makeCmdStop();
+				}
 			}
             
 		}
