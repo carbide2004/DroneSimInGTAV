@@ -344,12 +344,12 @@ static void run_auto_collect() {
             if (Q.isKeyDown())
             {
                 record_step("Q", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 15.0f);
-                rotateCameraDelta(0.0f, 0.0f, 45.0f);
+                rotateCameraDelta(0.0f, 0.0f, 15.0f);
             }
             if (E.isKeyDown())
             {
                 record_step("E", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -15.0f);
-                rotateCameraDelta(0.0f, 0.0f, -45.0f);
+                rotateCameraDelta(0.0f, 0.0f, -15.0f);
             }
             if (J.isKeyDown())
             {
