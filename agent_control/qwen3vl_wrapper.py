@@ -66,6 +66,25 @@ class Qwen3VLWrapper:
         except Exception:
             self._base_generation_config = None
 
+        try:
+            eos = None
+            if hasattr(self._model, "generation_config") and getattr(
+                self._model.generation_config, "eos_token_id", None
+            ):
+                eos = self._model.generation_config.eos_token_id
+            if isinstance(eos, (list, tuple)):
+                eos = eos[0] if eos else None
+            if eos is None and hasattr(self._processor, "tokenizer"):
+                eos = getattr(self._processor.tokenizer, "eos_token_id", None)
+            if (
+                hasattr(self._model, "generation_config")
+                and getattr(self._model.generation_config, "pad_token_id", None) is None
+                and eos is not None
+            ):
+                self._model.generation_config.pad_token_id = int(eos)
+        except Exception:
+            pass
+
         return self
 
     @property
@@ -166,23 +185,7 @@ class Qwen3VLWrapper:
             gen_kwargs["top_k"] = int(top_k)
 
         with torch.inference_mode():
-            generation_config = None
-            if self._base_generation_config is not None:
-                try:
-                    from transformers import GenerationConfig
-
-                    generation_config = GenerationConfig.from_dict(
-                        self._base_generation_config.to_dict()
-                    )
-                except Exception:
-                    generation_config = self._base_generation_config
-
-            if generation_config is not None:
-                out_ids = self.model.generate(
-                    **inputs, generation_config=generation_config, **gen_kwargs
-                )
-            else:
-                out_ids = self.model.generate(**inputs, **gen_kwargs)
+            out_ids = self.model.generate(**inputs, **gen_kwargs)
 
         prompt_len = None
         if isinstance(inputs, dict) and "input_ids" in inputs:
@@ -194,7 +197,25 @@ class Qwen3VLWrapper:
         text = self.processor.batch_decode(out_ids, skip_special_tokens=True)
         if not text:
             return ""
-        return str(text[0]).strip()
+        return _extract_assistant_text(str(text[0]).strip())
+
+
+def _extract_assistant_text(decoded_text):
+    if decoded_text is None:
+        return ""
+    s = str(decoded_text).strip()
+    if not s:
+        return ""
+
+    lower = s.lower()
+    cut = -1
+    for marker in ("\nassistant\n", "\nassistant:", "assistant\n", "assistant:"):
+        i = lower.rfind(marker)
+        if i != -1:
+            cut = max(cut, i + len(marker))
+    if cut != -1:
+        s = s[cut:].strip()
+    return s
 
 
 def _load_explicit_qwen3vl(model_dir, torch_dtype, device_map, trust_remote_code):

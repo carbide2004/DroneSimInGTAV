@@ -19,6 +19,12 @@ def main():
     args = parser.parse_args()
 
     model = Qwen3VLWrapper(args.model_dir).load()
+    try:
+        dev = next(model.model.parameters()).device
+    except Exception:
+        dev = None
+    print(f"model_dir={args.model_dir}")
+    print(f"device={dev}")
 
     messages = []
     print("输入 /exit 退出，/reset 清空上下文。")
@@ -58,6 +64,12 @@ def main():
 
         print(f"assistant> {out}")
         print(f"time_s> {dt:.3f}")
+        try:
+            tok = model.processor.tokenizer.encode(out)
+            tok_s = len(tok) / max(dt, 1e-6)
+            print(f"tok_s> {tok_s:.2f}")
+        except Exception:
+            pass
 
         messages.append({"role": "assistant", "content": out})
 
@@ -66,4 +78,3 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
