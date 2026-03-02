@@ -91,11 +91,6 @@ class Qwen3VLWrapper:
         top_p=None,
         top_k=None,
     ):
-        try:
-            import torch
-        except Exception as e:
-            raise RuntimeError("无法导入 torch，请确认已安装 PyTorch。") from e
-
         messages = [
             {
                 "role": "user",
@@ -106,19 +101,46 @@ class Qwen3VLWrapper:
                 ],
             }
         ]
+        return self.generate_chat(
+            messages=messages,
+            images=[rgb_pil, depth_pil],
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+        )
+
+    def generate_chat(
+        self,
+        messages,
+        images=None,
+        max_new_tokens=256,
+        do_sample=False,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+    ):
+        try:
+            import torch
+        except Exception as e:
+            raise RuntimeError("无法导入 torch，请确认已安装 PyTorch。") from e
 
         try:
             chat_text = self.processor.apply_chat_template(
                 messages, add_generation_prompt=True
             )
         except Exception:
-            chat_text = str(prompt_text)
+            chat_text = str(messages[-1].get("content", "")) if messages else ""
 
-        inputs = self.processor(
-            text=[chat_text],
-            images=[[rgb_pil, depth_pil]],
-            return_tensors="pt",
-        )
+        if images is None:
+            inputs = self.processor(text=[chat_text], return_tensors="pt")
+        else:
+            inputs = self.processor(
+                text=[chat_text],
+                images=[list(images)],
+                return_tensors="pt",
+            )
 
         target_device = None
         try:

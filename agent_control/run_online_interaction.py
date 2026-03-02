@@ -30,7 +30,7 @@ def main():
     parser.add_argument("--port", type=int, default=23456)
     parser.add_argument(
         "--model_dir",
-        default=str(Path(__file__).resolve().parent / "qwen3_vl_sft_merged"),
+        default=str(Path(__file__).resolve().parent / "models" / "qwen3_vl_sft_merged"),
     )
     parser.add_argument("--max_steps", type=int, default=3000)
     parser.add_argument("--sleep_s", type=float, default=5.0)
