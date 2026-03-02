@@ -35,8 +35,8 @@ def main():
     parser.add_argument("--max_steps", type=int, default=3000)
     parser.add_argument("--sleep_s", type=float, default=5.0)
     parser.add_argument("--fov", type=float, default=None)
-    parser.add_argument("--forward_step", type=float, default=5.0)
-    parser.add_argument("--down_step", type=float, default=5.0)
+    parser.add_argument("--forward_step", type=float, default=1.0)
+    parser.add_argument("--down_step", type=float, default=1.0)
     parser.add_argument("--yaw_step", type=float, default=15.0)
     parser.add_argument("--log_jsonl", default=None)
     args = parser.parse_args()
@@ -146,6 +146,7 @@ def main():
                 cli,
                 action,
                 forward_step=float(args.forward_step),
+                up_step=float(args.down_step),
                 down_step=float(args.down_step),
                 yaw_step=float(args.yaw_step),
             )

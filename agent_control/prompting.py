@@ -1,4 +1,4 @@
-ACTION_SET_TEXT = "[AUTO_DOWN, AUTO_FORWARD, AUTO_YAW_LEFT, AUTO_YAW_RIGHT, AUTO_STOP_REACHED]"
+ACTION_SET_TEXT = "[AUTO_DOWN, AUTO_UP, AUTO_FORWARD, AUTO_YAW_LEFT, AUTO_YAW_RIGHT, AUTO_STOP_REACHED]"
 
 
 def build_prompt(x, y, z, rz):
@@ -10,4 +10,3 @@ def build_prompt(x, y, z, rz):
         "Requirement: You must output only one string from the action set.\n"
         "Decision:"
     )
-

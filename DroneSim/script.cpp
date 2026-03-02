@@ -295,7 +295,7 @@ static void run_auto_collect() {
     active = false;
 }
 
-    void scriptMain()
+void scriptMain()
 {
 
 	int sleepTime = 0;
