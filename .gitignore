@@ -16,3 +16,6 @@ __pycache__/
 *.raw
 data/
 reference/
+imgs/
+dataset/
+agent_control/models/
