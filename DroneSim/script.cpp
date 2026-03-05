@@ -307,6 +307,8 @@ void scriptMain()
     //setStatusText("Awaiting client commands.");
     LOGI("script", "Awaiting client commands");
 
+    ensure_dir("data");
+
 	while (true)
 	{
         if (scriptStatus == cameraMode)
