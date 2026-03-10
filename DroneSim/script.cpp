@@ -34,6 +34,9 @@ volatile bool g_fireReady = false;
 float g_firePos[3] = {0};
 int g_fireId = -1;
 
+volatile bool g_fightReady = false;
+float g_fightPos[3] = {0};
+
 scriptStatusEnum scriptStatus = scriptStop;
 
 extern volatile catchState cmdToCatch;
@@ -184,6 +187,185 @@ static void create_fire_near_camera() {
     create_fire_near_pos(camPos.x, camPos.y, camPos.z);
 }
 
+static void create_fight_near_pos(float ox, float oy, float oz) {
+    g_fightReady = false;
+    Vector3 nodePos; float nodeHeading = 0.0f;
+    bool ok = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(ox, oy, oz, &nodePos, &nodeHeading, 1, 3.0, 0);
+    float px = ok ? nodePos.x : ox;
+    float py = ok ? nodePos.y : oy;
+    float pz = ok ? nodePos.z : oz;
+    float gz = pz;
+    bool hasGround = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(px, py, pz, &gz, false);
+    if (!hasGround) gz = pz;
+    g_fightPos[0] = px;
+    g_fightPos[1] = py;
+    g_fightPos[2] = gz;
+
+    Hash model = GAMEPLAY::GET_HASH_KEY("g_m_y_lost_01");
+    if (!STREAMING::IS_MODEL_VALID(model)) model = GAMEPLAY::GET_HASH_KEY("a_m_m_business_01");
+    if (!STREAMING::IS_MODEL_VALID(model)) model = GAMEPLAY::GET_HASH_KEY("a_m_m_skater_01");
+    if (STREAMING::IS_MODEL_VALID(model) && !STREAMING::HAS_MODEL_LOADED(model)) {
+        STREAMING::REQUEST_MODEL(model);
+        int tries = 0;
+        while (!STREAMING::HAS_MODEL_LOADED(model) && tries < 200) { WAIT(0); tries++; }
+    }
+    if (!STREAMING::IS_MODEL_VALID(model) || !STREAMING::HAS_MODEL_LOADED(model)) {
+        LOGW("script", "CREATE_FIGHT could not load ped model");
+        g_fightReady = true;
+        return;
+    }
+
+    Hash groupA = 0, groupB = 0;
+    char nameA[] = "FIGHT_A";
+    char nameB[] = "FIGHT_B";
+    PED::ADD_RELATIONSHIP_GROUP(nameA, &groupA);
+    PED::ADD_RELATIONSHIP_GROUP(nameB, &groupB);
+    PED::SET_RELATIONSHIP_BETWEEN_GROUPS(5, groupA, groupB);
+    PED::SET_RELATIONSHIP_BETWEEN_GROUPS(5, groupB, groupA);
+
+    const int n = 6;
+    Ped peds[n]{};
+    for (int i = 0; i < n; i++) {
+        float a = (2.0f * 3.14159f) * (static_cast<float>(i) / static_cast<float>(n));
+        float r = 2.0f;
+        float x = g_fightPos[0] + cosf(a) * r;
+        float y = g_fightPos[1] + sinf(a) * r;
+        float z = g_fightPos[2];
+        peds[i] = PED::CREATE_PED(26, model, x, y, z, nodeHeading, true, true);
+        ENTITY::SET_ENTITY_AS_MISSION_ENTITY(peds[i], true, true);
+        PED::SET_PED_RELATIONSHIP_GROUP_HASH(peds[i], (i < n / 2) ? groupA : groupB);
+    }
+    STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(model);
+
+    for (int i = 0; i < n / 2; i++) {
+        AI::TASK_COMBAT_PED(peds[i], peds[n / 2 + (i % (n / 2))], 0, 16);
+    }
+    for (int i = n / 2; i < n; i++) {
+        AI::TASK_COMBAT_PED(peds[i], peds[i - n / 2], 0, 16);
+    }
+
+    g_fightReady = true;
+    LOGI("script", std::string("CREATE_FIGHT at ") + std::to_string(g_fightPos[0]) + "," + std::to_string(g_fightPos[1]) + "," + std::to_string(g_fightPos[2]));
+}
+
+static void create_fight_near_camera() {
+    Any cam = CAM::GET_RENDERING_CAM();
+    Vector3 camPos = CAM::GET_CAM_COORD(cam);
+    create_fight_near_pos(camPos.x, camPos.y, camPos.z);
+}
+
+static void create_accident_near_pos(float ox, float oy, float oz) {
+    g_accidentReady = false;
+    Vector3 nodePos{}; float nodeHeading = 0.0f;
+    if (!PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(ox, oy, oz, &nodePos, &nodeHeading, 1, 3.0, 0)) {
+        g_accidentPos[0] = ox; g_accidentPos[1] = oy; g_accidentPos[2] = oz;
+        g_accidentReady = true;
+        LOGE("script", "CREATE_ACCIDENT could not find closest vehicle node");
+        return;
+    }
+
+    Hash h1 = GAMEPLAY::GET_HASH_KEY("adder");
+    Hash h2 = GAMEPLAY::GET_HASH_KEY("zentorno");
+    bool ok1 = STREAMING::IS_MODEL_VALID(h1) && STREAMING::IS_MODEL_A_VEHICLE(h1);
+    bool ok2 = STREAMING::IS_MODEL_VALID(h2) && STREAMING::IS_MODEL_A_VEHICLE(h2);
+    Vehicle v1 = 0, v2 = 0;
+    bool proceed = ok1 && ok2;
+    if (proceed && !STREAMING::HAS_MODEL_LOADED(h1)) {
+        STREAMING::REQUEST_MODEL(h1);
+        int tries = 0;
+        while (!STREAMING::HAS_MODEL_LOADED(h1) && tries < 200) { WAIT(0); tries++; }
+    }
+    if (proceed && !STREAMING::HAS_MODEL_LOADED(h1)) {
+        proceed = false;
+        LOGW("script", "CREATE_ACCIDENT model h1 not loaded");
+    }
+    if (proceed && !STREAMING::HAS_MODEL_LOADED(h2)) {
+        STREAMING::REQUEST_MODEL(h2);
+        int tries2 = 0;
+        while (!STREAMING::HAS_MODEL_LOADED(h2) && tries2 < 200) { WAIT(0); tries2++; }
+    }
+    if (proceed && !STREAMING::HAS_MODEL_LOADED(h2)) {
+        proceed = false;
+        LOGW("script", "CREATE_ACCIDENT model h2 not loaded");
+    }
+
+    if (!proceed) {
+        g_accidentPos[0] = nodePos.x; g_accidentPos[1] = nodePos.y; g_accidentPos[2] = nodePos.z;
+        g_accidentReady = true;
+        LOGW("script", "CREATE_ACCIDENT model invalid or not loaded, reporting node position");
+        return;
+    }
+
+    float gz = nodePos.z;
+    GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(nodePos.x, nodePos.y, nodePos.z, &gz, false);
+    float offset = 80.0f;
+    v1 = VEHICLE::CREATE_VEHICLE(h1, nodePos.x, nodePos.y, gz, nodeHeading, true, false);
+    STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(h1);
+    VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v1);
+    VEHICLE::SET_VEHICLE_HANDBRAKE(v1, true);
+
+    float xr = nodePos.x - sin(nodeHeading * 3.14159f / 180.0f) * offset;
+    float yr = nodePos.y + cos(nodeHeading * 3.14159f / 180.0f) * offset;
+    v2 = VEHICLE::CREATE_VEHICLE(h2, xr, yr, gz, nodeHeading + 180.0f, true, false);
+    STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(h2);
+    VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v2);
+
+    Hash ph = GAMEPLAY::GET_HASH_KEY("a_m_m_skidrow_01");
+    bool pok = STREAMING::IS_MODEL_VALID(ph);
+    if (pok && !STREAMING::HAS_MODEL_LOADED(ph)) {
+        STREAMING::REQUEST_MODEL(ph);
+        int ptries = 0;
+        while (!STREAMING::HAS_MODEL_LOADED(ph) && ptries < 200) { WAIT(0); ptries++; }
+    }
+    if (STREAMING::HAS_MODEL_LOADED(ph)) {
+        Ped d = PED::CREATE_PED(26, ph, xr, yr, gz, nodeHeading + 180.0f, true, true);
+        STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(ph);
+        PED::SET_PED_INTO_VEHICLE(d, v2, -1);
+        VEHICLE::SET_VEHICLE_ENGINE_ON(v2, true, true, false);
+        AI::TASK_VEHICLE_DRIVE_TO_COORD(d, v2, nodePos.x, nodePos.y, gz, 90.0f, 0, h2, 787004, 1.0f, true);
+    } else {
+        VEHICLE::SET_VEHICLE_FORWARD_SPEED(v2, 70.0f);
+    }
+
+    int frames = 0;
+    bool collided = false;
+    while (frames < 300) {
+        if (ENTITY::IS_ENTITY_TOUCHING_ENTITY(v1, v2) || ENTITY::GET_ENTITY_HEALTH(v1) < 900 || ENTITY::GET_ENTITY_HEALTH(v2) < 900) {
+            collided = true;
+            break;
+        }
+        Vector3 p1 = ENTITY::GET_ENTITY_COORDS(v1, true);
+        Vector3 p2 = ENTITY::GET_ENTITY_COORDS(v2, true);
+        float dist = sqrt(pow(p1.x - p2.x, 2) + pow(p1.y - p2.y, 2) + pow(p1.z - p2.z, 2));
+        if (dist < 4.0f) {
+            collided = true;
+            break;
+        }
+        WAIT(0);
+        frames++;
+    }
+
+    if (collided) {
+        Vector3 p1 = ENTITY::GET_ENTITY_COORDS(v1, true);
+        Vector3 p2 = ENTITY::GET_ENTITY_COORDS(v2, true);
+        g_accidentPos[0] = (p1.x + p2.x) / 2.0f;
+        g_accidentPos[1] = (p1.y + p2.y) / 2.0f;
+        g_accidentPos[2] = (p1.z + p2.z) / 2.0f;
+        g_accidentReady = true;
+        LOGI("script", "CREATE_ACCIDENT detected and reported");
+    } else {
+        g_accidentPos[0] = nodePos.x; g_accidentPos[1] = nodePos.y; g_accidentPos[2] = nodePos.z;
+        g_accidentReady = true;
+        LOGW("script", "CREATE_ACCIDENT setup but collision not detected");
+    }
+}
+
+static void create_accident_near_camera() {
+    Any cam = CAM::GET_RENDERING_CAM();
+    Vector3 camPos = CAM::GET_CAM_COORD(cam);
+    create_accident_near_pos(camPos.x, camPos.y, camPos.z);
+}
+
 static float wrap_angle_deg(float a) {
     while (a > 180.0f) a -= 360.0f;
     while (a < -180.0f) a += 360.0f;
@@ -202,33 +384,44 @@ static float yaw_to_target_deg(const Vector3& from, const Vector3& to) {
     return yaw;
 }
 
-static void run_auto_collect() {
+enum AutoCollectEvent {
+    AUTO_EVENT_ACCIDENT = 1,
+    AUTO_EVENT_FIRE = 2,
+    AUTO_EVENT_FIGHT = 3
+};
+
+static void run_auto_collect(AutoCollectEvent event_type) {
     static bool active = false;
     if (active) return;
     active = true;
 
     if (!g_recordingEnabled) start_recording_session();
 
-    create_fire_near_camera();
-
-    Vector3 fire{};
-    fire.x = g_firePos[0];
-    fire.y = g_firePos[1];
-    fire.z = g_firePos[2];
+    Vector3 center{};
+    if (event_type == AUTO_EVENT_FIRE) {
+        create_fire_near_camera();
+        center.x = g_firePos[0]; center.y = g_firePos[1]; center.z = g_firePos[2];
+    } else if (event_type == AUTO_EVENT_FIGHT) {
+        create_fight_near_camera();
+        center.x = g_fightPos[0]; center.y = g_fightPos[1]; center.z = g_fightPos[2];
+    } else {
+        create_accident_near_camera();
+        center.x = g_accidentPos[0]; center.y = g_accidentPos[1]; center.z = g_accidentPos[2];
+    }
     Vector3 target{};
-    target.x = fire.x;
-    target.y = fire.y;
-    target.z = fire.z + 5.0f;
+    target.x = center.x;
+    target.y = center.y;
+    target.z = center.z + 5.0f;
 
-    Vector3 fireNode{}; float fireHeading = 0.0f;
-    bool okFireNode = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(fire.x, fire.y, fire.z, &fireNode, &fireHeading, 1, 3.0, 0);
-    float rad = (okFireNode ? fireHeading : 0.0f) * (3.14159f / 180.0f);
+    Vector3 centerNode{}; float centerHeading = 0.0f;
+    bool okCenterNode = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(center.x, center.y, center.z, &centerNode, &centerHeading, 1, 3.0, 0);
+    float rad = (okCenterNode ? centerHeading : 0.0f) * (3.14159f / 180.0f);
     float dirx = -sinf(rad);
     float diry = cosf(rad);
     float startDist = 100.0f;
-    float candx = fire.x - dirx * startDist;
-    float candy = fire.y - diry * startDist;
-    float candz = fire.z;
+    float candx = center.x - dirx * startDist;
+    float candy = center.y - diry * startDist;
+    float candz = center.z;
 
     Vector3 startNode{}; float startHeading = 0.0f;
     bool okStartNode = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(candx, candy, candz, &startNode, &startHeading, 1, 3.0, 0);
@@ -363,7 +556,7 @@ void scriptMain()
             }
             if (F5.isKeyDown())
             {
-                run_auto_collect();
+                run_auto_collect(AUTO_EVENT_FIGHT);
             }
         }
         if (F10.isKeyDown()) {
@@ -400,120 +593,13 @@ void scriptMain()
         {
             create_fire_near_camera();
         }
+        else if (cmd == "CREATE_FIGHT")
+        {
+            create_fight_near_camera();
+        }
         else if (cmd == "CREATE_ACCIDENT")
         {
-            LOGI("script", "Creating accident... (outside check)");
-            if (scriptStatus != cameraMode) {
-                 LOGW("script", "CREATE_ACCIDENT received but not in camera mode");
-            }
-            Any cam = CAM::GET_RENDERING_CAM();
-            Vector3 camPos = CAM::GET_CAM_COORD(cam);
-            Vector3 nodePos; float nodeHeading;
-            if (PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(camPos.x, camPos.y, camPos.z, &nodePos, &nodeHeading, 1, 3.0, 0)) {
-                Hash h1 = GAMEPLAY::GET_HASH_KEY("adder");
-                Hash h2 = GAMEPLAY::GET_HASH_KEY("zentorno");
-                bool ok1 = STREAMING::IS_MODEL_VALID(h1) && STREAMING::IS_MODEL_A_VEHICLE(h1);
-                bool ok2 = STREAMING::IS_MODEL_VALID(h2) && STREAMING::IS_MODEL_A_VEHICLE(h2);
-                Vehicle v1, v2;
-                bool proceed = ok1 && ok2;
-                if (proceed && !STREAMING::HAS_MODEL_LOADED(h1)) {
-                    STREAMING::REQUEST_MODEL(h1);
-                    int tries = 0;
-                    while (!STREAMING::HAS_MODEL_LOADED(h1) && tries < 200) { WAIT(0); tries++; }
-                }
-                if (proceed && !STREAMING::HAS_MODEL_LOADED(h1)) {
-                    proceed = false;
-                    LOGW("script", "Model h1 not loaded");
-                }
-                if (proceed && !STREAMING::HAS_MODEL_LOADED(h2)) {
-                    STREAMING::REQUEST_MODEL(h2);
-                    int tries2 = 0;
-                    while (!STREAMING::HAS_MODEL_LOADED(h2) && tries2 < 200) { WAIT(0); tries2++; }
-                }
-                if (proceed && !STREAMING::HAS_MODEL_LOADED(h2)) {
-                    proceed = false;
-                    LOGW("script", "Model h2 not loaded");
-                }
-                
-                if (!proceed) {
-                    g_accidentPos[0] = nodePos.x; g_accidentPos[1] = nodePos.y; g_accidentPos[2] = nodePos.z;
-                    g_accidentReady = true;
-                    LOGW("script", "Model invalid or not loaded, reporting node position");
-                } else {
-                    float gz = nodePos.z;
-                    GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(nodePos.x, nodePos.y, nodePos.z, &gz, false);
-                    float offset = 80.0f;
-                    v1 = VEHICLE::CREATE_VEHICLE(h1, nodePos.x, nodePos.y, gz, nodeHeading, true, false);
-                    STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(h1);
-                    VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v1);
-                    VEHICLE::SET_VEHICLE_HANDBRAKE(v1, true);
-                    LOGI("script", "Target vehicle created and braked");
-                    float xr = nodePos.x - sin(nodeHeading * 3.14159f/180.0f) * offset;
-                    float yr = nodePos.y + cos(nodeHeading * 3.14159f/180.0f) * offset;
-                    v2 = VEHICLE::CREATE_VEHICLE(h2, xr, yr, gz, nodeHeading + 180.0f, true, false);
-                    STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(h2);
-                    VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v2);
-                    LOGI("script", "Runner vehicle created");
-                    Hash ph = GAMEPLAY::GET_HASH_KEY("a_m_m_skidrow_01");
-                    bool pok = STREAMING::IS_MODEL_VALID(ph);
-                    if (pok && !STREAMING::HAS_MODEL_LOADED(ph)) {
-                        STREAMING::REQUEST_MODEL(ph);
-                        int ptries = 0;
-                        while (!STREAMING::HAS_MODEL_LOADED(ph) && ptries < 200) { WAIT(0); ptries++; }
-                    }
-                    if (STREAMING::HAS_MODEL_LOADED(ph)) {
-                        Ped d = PED::CREATE_PED(26, ph, xr, yr, gz, nodeHeading + 180.0f, true, true);
-                        STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(ph);
-                        PED::SET_PED_INTO_VEHICLE(d, v2, -1);
-                        VEHICLE::SET_VEHICLE_ENGINE_ON(v2, true, true, false);
-                        AI::TASK_VEHICLE_DRIVE_TO_COORD(d, v2, nodePos.x, nodePos.y, gz, 90.0f, 0, h2, 787004, 1.0f, true);
-                        LOGI("script", "Runner tasked to drive to target");
-                    } else {
-                        VEHICLE::SET_VEHICLE_FORWARD_SPEED(v2, 70.0f);
-                        LOGI("script", "Ped model unavailable, runner forced forward");
-                    }
-                }
-                
-                // Collision detection loop
-                int frames = 0;
-                bool collided = false;
-                while (frames < 300) {
-                    if (ENTITY::IS_ENTITY_TOUCHING_ENTITY(v1, v2) || ENTITY::GET_ENTITY_HEALTH(v1) < 900 || ENTITY::GET_ENTITY_HEALTH(v2) < 900) {
-                        collided = true;
-                        break;
-                    }
-                    // Also check distance
-                    Vector3 p1 = ENTITY::GET_ENTITY_COORDS(v1, true);
-                    Vector3 p2 = ENTITY::GET_ENTITY_COORDS(v2, true);
-                    float dist = sqrt(pow(p1.x-p2.x,2) + pow(p1.y-p2.y,2) + pow(p1.z-p2.z,2));
-                    if (dist < 4.0f) {
-                        collided = true;
-                        break;
-                    }
-                    WAIT(0);
-                    frames++;
-                }
-                
-                if (collided) {
-                    Vector3 p1 = ENTITY::GET_ENTITY_COORDS(v1, true);
-                    Vector3 p2 = ENTITY::GET_ENTITY_COORDS(v2, true);
-                    g_accidentPos[0] = (p1.x + p2.x) / 2.0f;
-                    g_accidentPos[1] = (p1.y + p2.y) / 2.0f;
-                    g_accidentPos[2] = (p1.z + p2.z) / 2.0f;
-                    g_accidentReady = true;
-                    LOGI("script", "Accident detected and reported");
-                } else {
-                    LOGW("script", "Accident setup but collision not detected");
-                    // Fallback: report node pos
-                    g_accidentPos[0] = nodePos.x; g_accidentPos[1] = nodePos.y; g_accidentPos[2] = nodePos.z;
-                    g_accidentReady = true;
-                }
-            } else {
-                LOGE("script", "Could not find closest vehicle node");
-                // Fallback to camera pos
-                    g_accidentPos[0] = camPos.x; g_accidentPos[1] = camPos.y; g_accidentPos[2] = camPos.z;
-                    g_accidentReady = true;
-            }
+            create_accident_near_camera();
         }
         else if (scriptStatus == cameraMode) {
             if (cmd == "REQUEST")

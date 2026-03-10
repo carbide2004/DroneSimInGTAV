@@ -32,6 +32,9 @@ extern volatile bool g_fireReady;
 extern float g_firePos[3];
 extern int g_fireId;
 
+extern volatile bool g_fightReady;
+extern float g_fightPos[3];
+
 
 ServerV2::ServerV2(boost::asio::io_context& io, unsigned short port)
     : acceptor_(io, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)), socket_(io) {
@@ -349,6 +352,39 @@ void ServerV2::handle_client() {
                 std::memcpy(resp.data() + 20, &g_firePos[0], sizeof(float) * 3);
                 int32_t fid = static_cast<int32_t>(g_fireId);
                 std::memcpy(resp.data() + 20 + sizeof(float) * 3, &fid, sizeof(int32_t));
+            }
+            write_response(resp);
+            return;
+        }
+        case MSG_CREATE_FIGHT: {
+            g_fightReady = false;
+            enqueue_command("CREATE_FIGHT");
+            int tries = 0;
+            while (!g_fightReady && tries < 2000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
+
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_FIGHT; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
+            if (!g_fightReady) {
+                rh.length = 0;
+                resp.resize(sizeof(rh));
+                std::memcpy(resp.data(), &rh.magic[0], 4);
+                std::memcpy(resp.data() + 4, &rh.version, 1);
+                std::memcpy(resp.data() + 5, &rh.type, 1);
+                std::memcpy(resp.data() + 6, &rh.flags, 1);
+                std::memcpy(resp.data() + 7, &rh.reserved, 1);
+                std::memcpy(resp.data() + 8, &rh.request_id, 8);
+                std::memcpy(resp.data() + 16, &rh.length, 4);
+                LOGW("server_v2", "CREATE_FIGHT timeout");
+            } else {
+                rh.length = sizeof(float) * 3;
+                resp.resize(sizeof(rh) + rh.length);
+                std::memcpy(resp.data(), &rh.magic[0], 4);
+                std::memcpy(resp.data() + 4, &rh.version, 1);
+                std::memcpy(resp.data() + 5, &rh.type, 1);
+                std::memcpy(resp.data() + 6, &rh.flags, 1);
+                std::memcpy(resp.data() + 7, &rh.reserved, 1);
+                std::memcpy(resp.data() + 8, &rh.request_id, 8);
+                std::memcpy(resp.data() + 16, &rh.length, 4);
+                std::memcpy(resp.data() + 20, &g_fightPos[0], sizeof(float) * 3);
             }
             write_response(resp);
             return;

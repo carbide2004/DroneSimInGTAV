@@ -31,4 +31,7 @@ extern char g_recordingRequestedSession[128];
 extern volatile bool g_fireReady;
 extern float g_firePos[3];
 extern int g_fireId;
+
+extern volatile bool g_fightReady;
+extern float g_fightPos[3];
 void scriptMain();
