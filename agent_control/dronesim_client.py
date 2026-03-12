@@ -134,8 +134,11 @@ class DroneSimClient:
         path = p[7:7+path_len].decode("utf-8", errors="replace") if path_len else ""
         return {"enabled": bool(enabled), "step": int(step), "session_dir": path}
 
-    def set_recording_session(self, session_name):
-        payload = str(session_name).encode("utf-8")
+    def set_recording_session(self, session_name, task=None):
+        if task is None:
+            payload = str(session_name).encode("utf-8")
+        else:
+            payload = (str(session_name) + "\n" + str(task)).encode("utf-8")
         s = self._send(TYPE_SET_RECORDING_SESSION, 13, payload)
         self._recv(s)
         time.sleep(0.1)

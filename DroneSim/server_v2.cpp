@@ -27,6 +27,7 @@ extern volatile bool g_recordingEnabled;
 extern volatile int g_recordingStep;
 extern char g_recordingSessionDir[260];
 extern char g_recordingRequestedSession[128];
+extern char g_recordingRequestedTask[256];
 
 extern volatile bool g_fireReady;
 extern float g_firePos[3];
@@ -304,10 +305,23 @@ void ServerV2::handle_client() {
         }
         case MSG_SET_RECORDING_SESSION: {
             std::memset(g_recordingRequestedSession, 0, sizeof(g_recordingRequestedSession));
+            std::memset(g_recordingRequestedTask, 0, sizeof(g_recordingRequestedTask));
             if (hdr.length > 0) {
-                size_t n = std::min<size_t>(hdr.length, sizeof(g_recordingRequestedSession) - 1);
-                std::memcpy(g_recordingRequestedSession, payload.data(), n);
+                std::string s(reinterpret_cast<char*>(payload.data()), hdr.length);
+                size_t p = s.find('\n');
+                std::string session = (p == std::string::npos) ? s : s.substr(0, p);
+                std::string task = (p == std::string::npos) ? std::string() : s.substr(p + 1);
+                while (!task.empty() && (task.back() == '\n' || task.back() == '\r')) task.pop_back();
+                if (!task.empty() && (task.rfind("task=", 0) == 0 || task.rfind("TASK=", 0) == 0)) task = task.substr(5);
+                if (!task.empty() && (task.rfind("task:", 0) == 0 || task.rfind("TASK:", 0) == 0)) task = task.substr(5);
+
+                size_t n = std::min<size_t>(session.size(), sizeof(g_recordingRequestedSession) - 1);
+                std::memcpy(g_recordingRequestedSession, session.data(), n);
                 g_recordingRequestedSession[n] = '\0';
+
+                size_t tn = std::min<size_t>(task.size(), sizeof(g_recordingRequestedTask) - 1);
+                std::memcpy(g_recordingRequestedTask, task.data(), tn);
+                g_recordingRequestedTask[tn] = '\0';
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_RECORDING_SESSION; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));

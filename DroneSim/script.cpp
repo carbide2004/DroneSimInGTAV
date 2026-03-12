@@ -29,6 +29,7 @@ volatile bool g_recordingEnabled = false;
 volatile int g_recordingStep = 0;
 char g_recordingSessionDir[260] = {0};
 char g_recordingRequestedSession[128] = {0};
+char g_recordingRequestedTask[256] = {0};
 
 volatile bool g_fireReady = false;
 float g_firePos[3] = {0};
@@ -60,7 +61,36 @@ static std::string make_timestamp_session() {
     return std::string(buf);
 }
 
-static void start_recording_session() {
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 16);
+    for (char c : s) {
+        if (c == '\\' || c == '"') {
+            out.push_back('\\');
+            out.push_back(c);
+        } else if (c == '\n') {
+            out += "\\n";
+        } else if (c == '\r') {
+            out += "\\r";
+        } else if (c == '\t') {
+            out += "\\t";
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+static void write_metadata(const std::string& base, const std::string& task) {
+    if (base.empty()) return;
+    std::ofstream f(base + "\\metadata.jsonl", std::ios::out | std::ios::binary);
+    if (!f.is_open()) return;
+    std::string t = task;
+    f << "{\"task\":\"" << json_escape(t) << "\"}\n";
+    f.flush();
+}
+
+static void start_recording_session(const char* task) {
     if (g_recordingEnabled) return;
     ensure_dir("data");
     ensure_dir("data\\manual");
@@ -76,6 +106,12 @@ static void start_recording_session() {
     if (g_recordingStepsFile.is_open()) g_recordingStepsFile.close();
     g_recordingStepsFile.open(base + "\\steps.jsonl", std::ios::out | std::ios::binary);
     g_recordingEnabled = g_recordingStepsFile.is_open();
+    if (g_recordingEnabled) {
+        std::string task_str;
+        if (task && task[0] != '\0') task_str = std::string(task);
+        else if (g_recordingRequestedTask[0] != '\0') task_str = std::string(g_recordingRequestedTask);
+        write_metadata(base, task_str);
+    }
     if (g_recordingEnabled) LOGI("script", std::string("Recording started: ") + g_recordingSessionDir);
     else LOGE("script", "Recording start failed");
 }
@@ -390,12 +426,27 @@ enum AutoCollectEvent {
     AUTO_EVENT_FIGHT = 3
 };
 
+static void run_manual_collect(AutoCollectEvent event_type) {
+    if (g_recordingEnabled) return;
+    if (event_type == AUTO_EVENT_FIRE) start_recording_session("find the exploded car");
+    else if (event_type == AUTO_EVENT_FIGHT) start_recording_session("find the street fight");
+    else start_recording_session("find crashed cars");
+
+    if (event_type == AUTO_EVENT_FIRE) create_fire_near_camera();
+    else if (event_type == AUTO_EVENT_FIGHT) create_fight_near_camera();
+    else create_accident_near_camera();
+}
+
 static void run_auto_collect(AutoCollectEvent event_type) {
     static bool active = false;
     if (active) return;
     active = true;
 
-    if (!g_recordingEnabled) start_recording_session();
+    const char* task = nullptr;
+    if (event_type == AUTO_EVENT_FIRE) task = "find the exploded car";
+    else if (event_type == AUTO_EVENT_ACCIDENT) task = "find crashed cars";
+    else if (event_type == AUTO_EVENT_FIGHT) task = "find the street fight";
+    if (!g_recordingEnabled) start_recording_session(task);
 
     Vector3 center{};
     if (event_type == AUTO_EVENT_FIRE) {
@@ -508,7 +559,7 @@ void scriptMain()
         {
             if (W.isKeyDown())
             {
-                record_step("W", 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+                record_step("AUTO_FORWARD", 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(1.0f, 0.0f, 0.0f);
             }
             if (S.isKeyDown())
@@ -528,35 +579,36 @@ void scriptMain()
             }
             if (shift.isKeyDown())
             {
-                record_step("SHIFT", 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+                record_step("AUTO_UP", 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(0.0f, 0.0f, 1.0f);
             }
             if (ctrl.isKeyDown())
             {
-                record_step("CTRL", 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f);
+                record_step("AUTO_DOWN", 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(0.0f, 0.0f, -1.0f);
             }
             if (Q.isKeyDown())
             {
-                record_step("Q", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 15.0f);
+                record_step("AUTO_YAW_LEFT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 15.0f);
                 rotateCameraDelta(0.0f, 0.0f, 15.0f);
             }
             if (E.isKeyDown())
             {
-                record_step("E", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -15.0f);
+                record_step("AUTO_YAW_RIGHT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -15.0f);
                 rotateCameraDelta(0.0f, 0.0f, -15.0f);
-            }
-            if (J.isKeyDown())
-            {
-                start_recording_session();
-            }
-            if (K.isKeyDown())
-            {
-                stop_recording_session();
             }
             if (F5.isKeyDown())
             {
-                run_auto_collect(AUTO_EVENT_FIGHT);
+                run_auto_collect(AUTO_EVENT_FIRE);
+            }
+            if (F6.isKeyDown())
+            {
+                run_manual_collect(AUTO_EVENT_FIRE);
+            }
+            if (F7.isKeyDown())
+            {
+                record_step("MANUAL_STOP", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+                stop_recording_session();
             }
         }
         if (F10.isKeyDown()) {

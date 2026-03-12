@@ -65,6 +65,19 @@ def process_all_datasets(base_dir):
         
         jsonl_path = dt_dir / "steps.jsonl"
         if not jsonl_path.exists(): continue
+
+        task_desc = "find the closest burning car"
+        meta_path = dt_dir / "metadata.jsonl"
+        if meta_path.exists():
+            try:
+                first = meta_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                if first:
+                    meta = json.loads(first[0])
+                    t = meta.get("task")
+                    if isinstance(t, str) and t.strip():
+                        task_desc = t.strip().rstrip(".")
+            except Exception:
+                pass
         
         print(f"正在处理目录: {dt_dir.name}")
         
@@ -95,7 +108,7 @@ def process_all_datasets(base_dir):
                 p = item["pose"]
 
                 prompt = (
-                    f"Task: You are an outdoor exploration drone. Analyze the RGB and Depth observations to decide the next best move. Your current task is to find the closest burning car.\n"
+                    f"Task: You are an outdoor exploration drone. Analyze the RGB and Depth observations to decide the next best move. Your current task is to {task_desc}.\n"
                     f"Observations: <image><image>\n"
                     f"Current Pose: x={p['x']:.2f}, y={p['y']:.2f}, z={p['z']:.2f}, rz={p['rz']}°.\n"
                     f"Action Set: [AUTO_DOWN, AUTO_UP, AUTO_FORWARD, AUTO_YAW_LEFT, AUTO_YAW_RIGHT, AUTO_STOP_REACHED].\n"
@@ -104,6 +117,7 @@ def process_all_datasets(base_dir):
                 )
 
                 entry = {
+                    "task": task_desc,
                     "messages": [
                         {
                             "role": "user",

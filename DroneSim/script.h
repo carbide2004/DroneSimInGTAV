@@ -27,6 +27,7 @@ extern volatile bool g_recordingEnabled;
 extern volatile int g_recordingStep;
 extern char g_recordingSessionDir[260];
 extern char g_recordingRequestedSession[128];
+extern char g_recordingRequestedTask[256];
 
 extern volatile bool g_fireReady;
 extern float g_firePos[3];
