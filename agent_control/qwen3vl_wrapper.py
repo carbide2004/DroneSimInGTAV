@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 
 class Qwen3VLWrapper:
@@ -25,8 +26,15 @@ class Qwen3VLWrapper:
                 "无法导入 transformers。请确认已安装与 Qwen3VL 兼容的 transformers 版本。"
             ) from e
 
+        p = Path(self.model_dir).expanduser()
+        if not p.exists():
+            raise RuntimeError(f"模型目录不存在：{self.model_dir}")
+        self.model_dir = p.resolve().as_posix()
+
         self._processor = AutoProcessor.from_pretrained(
-            self.model_dir, trust_remote_code=self.trust_remote_code
+            self.model_dir,
+            trust_remote_code=self.trust_remote_code,
+            local_files_only=True,
         )
 
         last_err = None
@@ -37,6 +45,7 @@ class Qwen3VLWrapper:
                     torch_dtype=self.torch_dtype,
                     device_map=self.device_map,
                     trust_remote_code=self.trust_remote_code,
+                    local_files_only=True,
                 )
                 break
             except Exception as e:
@@ -218,10 +227,13 @@ def _extract_assistant_text(decoded_text):
     return s
 
 
-def _load_explicit_qwen3vl(model_dir, torch_dtype, device_map, trust_remote_code):
+def _load_explicit_qwen3vl(
+    model_dir, torch_dtype, device_map, trust_remote_code, local_files_only
+):
     from transformers import Qwen3VLForConditionalGeneration
 
     kwargs = {"trust_remote_code": trust_remote_code}
+    kwargs["local_files_only"] = bool(local_files_only)
     if device_map is not None:
         kwargs["device_map"] = device_map
     if torch_dtype is not None:
@@ -229,10 +241,13 @@ def _load_explicit_qwen3vl(model_dir, torch_dtype, device_map, trust_remote_code
     return Qwen3VLForConditionalGeneration.from_pretrained(model_dir, **kwargs)
 
 
-def _load_auto_vision2seq(model_dir, torch_dtype, device_map, trust_remote_code):
+def _load_auto_vision2seq(
+    model_dir, torch_dtype, device_map, trust_remote_code, local_files_only
+):
     from transformers import AutoModelForVision2Seq
 
     kwargs = {"trust_remote_code": trust_remote_code}
+    kwargs["local_files_only"] = bool(local_files_only)
     if device_map is not None:
         kwargs["device_map"] = device_map
     if torch_dtype is not None:
@@ -240,10 +255,11 @@ def _load_auto_vision2seq(model_dir, torch_dtype, device_map, trust_remote_code)
     return AutoModelForVision2Seq.from_pretrained(model_dir, **kwargs)
 
 
-def _load_auto_model(model_dir, torch_dtype, device_map, trust_remote_code):
+def _load_auto_model(model_dir, torch_dtype, device_map, trust_remote_code, local_files_only):
     from transformers import AutoModel
 
     kwargs = {"trust_remote_code": trust_remote_code}
+    kwargs["local_files_only"] = bool(local_files_only)
     if device_map is not None:
         kwargs["device_map"] = device_map
     if torch_dtype is not None:

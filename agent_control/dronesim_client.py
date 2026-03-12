@@ -19,6 +19,7 @@ TYPE_CREATE_ACCIDENT = 11
 TYPE_GET_RECORDING_INFO = 12
 TYPE_SET_RECORDING_SESSION = 13
 TYPE_CREATE_FIRE = 14
+TYPE_CREATE_FIGHT = 15
 
 def _pack_header(t, req_id, length):
     return struct.pack("4sBBBBQI", MAGIC, VERSION, t, 0, 0, req_id, length)
@@ -151,6 +152,14 @@ class DroneSimClient:
         x, y, z = struct.unpack("fff", p[:12])
         fire_id = struct.unpack("i", p[12:16])[0]
         return x, y, z, fire_id
+
+    def create_fight(self):
+        s = self._send(TYPE_CREATE_FIGHT, 15)
+        t, rid, p = self._recv(s)
+        if not p or len(p) < 12:
+            return None
+        x, y, z = struct.unpack("fff", p[:12])
+        return x, y, z
 
 def visualize(rgb_bytes, depth_bytes, w, h):
     try:
