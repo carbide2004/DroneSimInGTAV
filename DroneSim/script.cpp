@@ -483,8 +483,8 @@ static void start_verification_mode() {
         // Create fire
         create_fire_near_camera();
         g_anomalyType = "fire";
-        // Wait a bit for fire to be created and position to be set
-        WAIT(100);
+        // Wait for fire to be created and position to be set
+        WAIT(500);  // Increased wait time
         if (g_fireReady) {
             anomalyPos.x = g_firePos[0];
             anomalyPos.y = g_firePos[1];
@@ -497,8 +497,8 @@ static void start_verification_mode() {
         // Create fight
         create_fight_near_camera();
         g_anomalyType = "fight";
-        // Wait a bit for fight to be created and position to be set
-        WAIT(100);
+        // Wait for fight to be created and position to be set
+        WAIT(500);  // Increased wait time
         if (g_fightReady) {
             anomalyPos.x = g_fightPos[0];
             anomalyPos.y = g_fightPos[1];
@@ -511,19 +511,38 @@ static void start_verification_mode() {
     
     g_anomalyPos = anomalyPos;
     
-    // Move camera to 2m above the anomaly
+    // Get ground height for the anomaly position
+    float groundZ = anomalyPos.z;
+    bool hasGround = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(anomalyPos.x, anomalyPos.y, anomalyPos.z, &groundZ, false);
+    if (hasGround) {
+        anomalyPos.z = groundZ;
+        g_anomalyPos.z = groundZ;  // Update stored position
+    }
+    
+    // Move camera to 2m above the anomaly (using ground level)
     Any cam = CAM::GET_RENDERING_CAM();
     if (cam) {
         Vector3 targetPos = {anomalyPos.x, anomalyPos.y, anomalyPos.z + 2.0f};
         CAM::SET_CAM_COORD(cam, targetPos.x, targetPos.y, targetPos.z);
+        
+        // Set camera to look down at the anomaly
+        CAM::SET_CAM_ROT(cam, -30.0f, 0.0f, 0.0f, 2);
+        
         LOGI("script", std::string("Verification mode started: ") + g_anomalyType + 
              " at (" + std::to_string(anomalyPos.x) + ", " + 
-             std::to_string(anomalyPos.y) + ", " + std::to_string(anomalyPos.z) + ")");
+             std::to_string(anomalyPos.y) + ", " + std::to_string(anomalyPos.z) + 
+             ") camera at (" + std::to_string(targetPos.x) + ", " + 
+             std::to_string(targetPos.y) + ", " + std::to_string(targetPos.z) + ")");
+    } else {
+        LOGE("script", "Failed to get camera handle");
+        return;
     }
     
     // Initialize verification mode
     g_verificationMode = true;
     g_verificationSteps = 0;
+    
+    WAIT(0);  // Allow one frame for camera to update
 }
 
 static float wrap_angle_deg(float a) {
