@@ -139,6 +139,107 @@ class Qwen3VLWrapper:
             top_k=top_k,
         )
 
+    def generate_chat_with_representation(
+        self,
+        messages,
+        images=None,
+        max_new_tokens=256,
+        do_sample=False,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        normalize_vector=True,
+    ):
+        """
+        Generate chat response and extract representation vector.
+        
+        Returns:
+            tuple: (generated_text, representation_vector)
+                - generated_text: str, the generated response
+                - representation_vector: list, the representation vector as a list of floats
+        """
+        try:
+            import torch
+            import torch.nn.functional as F
+        except Exception as e:
+            raise RuntimeError("无法导入 torch，请确认已安装 PyTorch。") from e
+
+        try:
+            chat_text = self.processor.apply_chat_template(
+                messages, add_generation_prompt=True
+            )
+        except Exception:
+            chat_text = str(messages[-1].get("content", "")) if messages else ""
+
+        if images is None:
+            inputs = self.processor(text=[chat_text], return_tensors="pt")
+        else:
+            inputs = self.processor(
+                text=[chat_text],
+                images=[list(images)],
+                return_tensors="pt",
+            )
+
+        target_device = None
+        try:
+            target_device = next(self.model.parameters()).device
+        except Exception:
+            target_device = None
+
+        if target_device is not None:
+            try:
+                inputs = inputs.to(target_device)
+            except Exception:
+                pass
+
+        # Extract representation vector before generation
+        with torch.inference_mode():
+            # Forward pass to get hidden states
+            outputs = self.model(**inputs, output_hidden_states=True, use_cache=False)
+            
+            # Get the last layer's hidden states
+            last_hidden_states = outputs.hidden_states[-1]  # [batch, seq_len, hidden_dim]
+            
+            # Get the representation vector (last token of input sequence)
+            representation_vector = last_hidden_states[0, -1, :].cpu().float()  # [hidden_dim]
+            
+            # Normalize if requested
+            if normalize_vector:
+                representation_vector = F.normalize(representation_vector, p=2, dim=0)
+            
+            # Convert to list for JSON serialization
+            representation_vector = representation_vector.tolist()
+
+        # Generate text as usual
+        gen_kwargs = {
+            "max_new_tokens": int(max_new_tokens),
+            "do_sample": bool(do_sample),
+        }
+        if temperature is not None:
+            gen_kwargs["temperature"] = float(temperature)
+        if top_p is not None:
+            gen_kwargs["top_p"] = float(top_p)
+        if top_k is not None:
+            gen_kwargs["top_k"] = int(top_k)
+
+        with torch.inference_mode():
+            out_ids = self.model.generate(**inputs, **gen_kwargs)
+
+        prompt_len = None
+        if isinstance(inputs, dict) and "input_ids" in inputs:
+            prompt_len = int(inputs["input_ids"].shape[1])
+
+        if prompt_len is not None:
+            out_ids = out_ids[:, prompt_len:]
+
+        text = self.processor.batch_decode(out_ids, skip_special_tokens=True)
+        if not text:
+            generated_text = ""
+        else:
+            generated_text = _extract_assistant_text(str(text[0]).strip())
+
+        return generated_text, representation_vector
+
     def generate_chat(
         self,
         messages,

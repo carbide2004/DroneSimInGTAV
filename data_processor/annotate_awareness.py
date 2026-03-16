@@ -184,9 +184,16 @@ def main():
     parser.add_argument("--history_k", type=int, default=12, help="Number of recent actions to include in context")
     parser.add_argument("--max_new_tokens", type=int, default=160, help="Maximum new tokens for generation")
     parser.add_argument("--sleep_s", type=float, default=0.0, help="Sleep time before starting")
-    parser.add_argument("--skip_existing", action="store_true", help="Skip entries that already have awareness field")
+    parser.add_argument("--no_skip_existing", action="store_true", help="Process entries that already have awareness field (default: skip existing)")
+    parser.add_argument("--no_extract_vectors", action="store_true", help="Disable extraction of representation vectors (default: extract vectors)")
+    parser.add_argument("--no_skip_vector_existing", action="store_true", help="Process vector extraction for entries that already have representation_vector field (default: skip existing vectors)")
     
     args = parser.parse_args()
+    
+    # Set default values to True, but allow override with --no_* flags
+    args.skip_existing = not args.no_skip_existing
+    args.extract_vectors = not args.no_extract_vectors
+    args.skip_vector_existing = not args.no_skip_vector_existing
 
     if float(args.sleep_s) > 0:
         time.sleep(float(args.sleep_s))
@@ -250,6 +257,11 @@ def main():
                 if args.skip_existing and "awareness" in entry:
                     pbar.update(1)
                     continue
+                
+                # Skip if already has vector and skip_vector_existing is True
+                if args.skip_vector_existing and "representation_vector" in entry:
+                    pbar.update(1)
+                    continue
 
                 images = entry.get("images") or []
                 if len(images) < 2:
@@ -275,7 +287,7 @@ def main():
                 context = _build_context_for_step(traj_entries, local_idx, int(args.history_k))
                 prompt = _awareness_prompt(task_line, context, current_action)
 
-                # Generate awareness
+                # Generate awareness with or without representation vector
                 messages = [
                     {
                         "role": "user",
@@ -287,16 +299,31 @@ def main():
                     }
                 ]
 
-                awareness = model.generate_chat(
-                    messages=messages,
-                    images=[rgb_img, depth_img],
-                    max_new_tokens=int(args.max_new_tokens),
-                    do_sample=False,
-                )
-                awareness = _coerce_awareness(task_line, awareness, current_action)
+                if args.extract_vectors:
+                    awareness, representation_vector = model.generate_chat_with_representation(
+                        messages=messages,
+                        images=[rgb_img, depth_img],
+                        max_new_tokens=int(args.max_new_tokens),
+                        do_sample=False,
+                        normalize_vector=True,
+                    )
+                    awareness = _coerce_awareness(task_line, awareness, current_action)
 
-                # Add awareness to entry
-                entry["awareness"] = awareness
+                    # Add awareness and representation vector to entry
+                    entry["awareness"] = awareness
+                    entry["representation_vector"] = representation_vector
+                    entry["vector_dim"] = len(representation_vector)
+                else:
+                    awareness = model.generate_chat(
+                        messages=messages,
+                        images=[rgb_img, depth_img],
+                        max_new_tokens=int(args.max_new_tokens),
+                        do_sample=False,
+                    )
+                    awareness = _coerce_awareness(task_line, awareness, current_action)
+
+                    # Add only awareness to entry
+                    entry["awareness"] = awareness
                 pbar.update(1)
 
     # Write output
