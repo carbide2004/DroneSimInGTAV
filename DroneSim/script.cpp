@@ -562,21 +562,6 @@ void scriptMain()
                 record_step("AUTO_FORWARD", 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(1.0f, 0.0f, 0.0f);
             }
-            if (S.isKeyDown())
-            {
-                record_step("S", -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-                moveCameraDelta(-1.0f, 0.0f, 0.0f);
-            }
-            if (A.isKeyDown())
-            {
-                record_step("A", 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-                moveCameraDelta(0.0f, -1.0f, 0.0f);
-            }
-            if (D.isKeyDown())
-            {
-                record_step("D", 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-                moveCameraDelta(0.0f, 1.0f, 0.0f);
-            }
             if (shift.isKeyDown())
             {
                 record_step("AUTO_UP", 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f);
