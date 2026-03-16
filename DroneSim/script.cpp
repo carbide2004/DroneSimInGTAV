@@ -607,7 +607,7 @@ void scriptMain()
             }
             if (F7.isKeyDown())
             {
-                record_step("MANUAL_STOP", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+                record_step("AUTO_STOP_REACHED", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
                 stop_recording_session();
             }
         }
