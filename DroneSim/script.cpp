@@ -17,6 +17,7 @@
 #include <time.h>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include "command_queue.h"
  
 volatile bool g_poseReady = false;
@@ -37,6 +38,12 @@ int g_fireId = -1;
 
 volatile bool g_fightReady = false;
 float g_fightPos[3] = {0};
+
+// Verification mode variables
+static bool g_verificationMode = false;
+static int g_verificationSteps = 0;
+static Vector3 g_anomalyPos;
+static std::string g_anomalyType;
 
 scriptStatusEnum scriptStatus = scriptStop;
 
@@ -402,6 +409,123 @@ static void create_accident_near_camera() {
     create_accident_near_pos(camPos.x, camPos.y, camPos.z);
 }
 
+static void save_verification_sample() {
+    if (!g_verificationMode) return;
+    
+    // Get current camera pose
+    Any cam = CAM::GET_RENDERING_CAM();
+    Vector3 pos = CAM::GET_CAM_COORD(cam);
+    Vector3 rot = CAM::GET_CAM_ROT(cam, 2);
+    
+    // Create timestamp
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    struct tm tm_info;
+    localtime_s(&tm_info, &time_t);
+    char timestamp[32];
+    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", &tm_info);
+    
+    // Determine task description
+    std::string task_desc;
+    if (g_anomalyType == "fire") {
+        task_desc = "find the exploded car";
+    } else if (g_anomalyType == "fight") {
+        task_desc = "find the street fight";
+    }
+    
+    // Create verification directory
+    ensure_dir("data");
+    ensure_dir("data\\verification");
+    
+    // Create JSON entry
+    std::string json_entry = "{\n";
+    json_entry += "  \"scenario_id\": \"verification_" + std::string(timestamp) + "\",\n";
+    json_entry += "  \"anomaly_type\": \"" + g_anomalyType + "\",\n";
+    json_entry += "  \"anomaly_position\": {\"x\": " + std::to_string(g_anomalyPos.x) + 
+                  ", \"y\": " + std::to_string(g_anomalyPos.y) + 
+                  ", \"z\": " + std::to_string(g_anomalyPos.z) + "},\n";
+    json_entry += "  \"start_pose\": {\"x\": " + std::to_string(pos.x) + 
+                  ", \"y\": " + std::to_string(pos.y) + 
+                  ", \"z\": " + std::to_string(pos.z) + 
+                  ", \"rx\": " + std::to_string(rot.x) + 
+                  ", \"ry\": " + std::to_string(rot.y) + 
+                  ", \"rz\": " + std::to_string(rot.z) + "},\n";
+    json_entry += "  \"expected_steps\": " + std::to_string(g_verificationSteps) + ",\n";
+    json_entry += "  \"task_description\": \"" + task_desc + "\",\n";
+    json_entry += "  \"created_time\": \"" + std::string(timestamp) + "\"\n";
+    json_entry += "}\n";
+    
+    // Append to verification file
+    std::ofstream file("data\\verification\\samples.jsonl", std::ios::app);
+    if (file.is_open()) {
+        file << json_entry;
+        file.close();
+        LOGI("script", std::string("Verification sample saved: ") + std::to_string(g_verificationSteps) + " steps");
+    } else {
+        LOGE("script", "Failed to save verification sample");
+    }
+    
+    // Reset verification mode
+    g_verificationMode = false;
+    g_verificationSteps = 0;
+}
+
+static void start_verification_mode() {
+    if (g_verificationMode) return;  // Already in verification mode
+    
+    // Randomly choose between fire and fight (0 or 1)
+    srand(static_cast<unsigned int>(time(nullptr)));
+    int choice = rand() % 2;
+    
+    Vector3 anomalyPos;
+    
+    if (choice == 0) {
+        // Create fire
+        create_fire_near_camera();
+        g_anomalyType = "fire";
+        // Wait a bit for fire to be created and position to be set
+        WAIT(100);
+        if (g_fireReady) {
+            anomalyPos.x = g_firePos[0];
+            anomalyPos.y = g_firePos[1];
+            anomalyPos.z = g_firePos[2];
+        } else {
+            LOGE("script", "Fire creation failed");
+            return;
+        }
+    } else {
+        // Create fight
+        create_fight_near_camera();
+        g_anomalyType = "fight";
+        // Wait a bit for fight to be created and position to be set
+        WAIT(100);
+        if (g_fightReady) {
+            anomalyPos.x = g_fightPos[0];
+            anomalyPos.y = g_fightPos[1];
+            anomalyPos.z = g_fightPos[2];
+        } else {
+            LOGE("script", "Fight creation failed");
+            return;
+        }
+    }
+    
+    g_anomalyPos = anomalyPos;
+    
+    // Move camera to 2m above the anomaly
+    Any cam = CAM::GET_RENDERING_CAM();
+    if (cam) {
+        Vector3 targetPos = {anomalyPos.x, anomalyPos.y, anomalyPos.z + 2.0f};
+        CAM::SET_CAM_COORD(cam, targetPos.x, targetPos.y, targetPos.z);
+        LOGI("script", std::string("Verification mode started: ") + g_anomalyType + 
+             " at (" + std::to_string(anomalyPos.x) + ", " + 
+             std::to_string(anomalyPos.y) + ", " + std::to_string(anomalyPos.z) + ")");
+    }
+    
+    // Initialize verification mode
+    g_verificationMode = true;
+    g_verificationSteps = 0;
+}
+
 static float wrap_angle_deg(float a) {
     while (a > 180.0f) a -= 360.0f;
     while (a < -180.0f) a += 360.0f;
@@ -561,26 +685,31 @@ void scriptMain()
             {
                 record_step("AUTO_FORWARD", 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(1.0f, 0.0f, 0.0f);
+                if (g_verificationMode) g_verificationSteps++;
             }
             if (shift.isKeyDown())
             {
                 record_step("AUTO_UP", 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(0.0f, 0.0f, 1.0f);
+                if (g_verificationMode) g_verificationSteps++;
             }
             if (ctrl.isKeyDown())
             {
                 record_step("AUTO_DOWN", 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(0.0f, 0.0f, -1.0f);
+                if (g_verificationMode) g_verificationSteps++;
             }
             if (Q.isKeyDown())
             {
                 record_step("AUTO_YAW_LEFT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 15.0f);
                 rotateCameraDelta(0.0f, 0.0f, 15.0f);
+                if (g_verificationMode) g_verificationSteps++;
             }
             if (E.isKeyDown())
             {
                 record_step("AUTO_YAW_RIGHT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -15.0f);
                 rotateCameraDelta(0.0f, 0.0f, -15.0f);
+                if (g_verificationMode) g_verificationSteps++;
             }
             if (F5.isKeyDown())
             {
@@ -595,6 +724,14 @@ void scriptMain()
                 record_step("AUTO_STOP_REACHED", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
                 stop_recording_session();
             }
+            if (F8.isKeyDown())
+            {
+                start_verification_mode();
+            }
+            if (F9.isKeyDown())
+            {
+                save_verification_sample();
+            }
         }
         if (F10.isKeyDown()) {
             startNewCamera();
@@ -606,6 +743,9 @@ void scriptMain()
             StopCamera();
             scriptStatus = scriptStop;
             stop_recording_session();
+            // Reset verification mode when exiting camera mode
+            g_verificationMode = false;
+            g_verificationSteps = 0;
             LOGI("script", "Camera stopped and returned to player view");
         }
 
