@@ -515,24 +515,32 @@ static void start_verification_mode() {
     float groundZ = anomalyPos.z;
     bool hasGround = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(anomalyPos.x, anomalyPos.y, anomalyPos.z, &groundZ, false);
     if (hasGround) {
-        anomalyPos.z = groundZ;
+        anomalyPos.z = groundZ;  // Update local variable
         g_anomalyPos.z = groundZ;  // Update stored position
     }
     
     // Move camera to 2m above the anomaly (using ground level)
     Any cam = CAM::GET_RENDERING_CAM();
     if (cam) {
-        Vector3 targetPos = {anomalyPos.x, anomalyPos.y, anomalyPos.z + 2.0f};
-        CAM::SET_CAM_COORD(cam, targetPos.x, targetPos.y, targetPos.z);
+        float targetX = anomalyPos.x;
+        float targetY = anomalyPos.y;
+        float targetZ = anomalyPos.z + 2.0f;
         
-        // Set camera to look down at the anomaly
-        CAM::SET_CAM_ROT(cam, -30.0f, 0.0f, 0.0f, 2);
+        LOGI("script", std::string("Setting camera position to: (") + 
+             std::to_string(targetX) + ", " + std::to_string(targetY) + ", " + std::to_string(targetZ) + ")");
+        
+        CAM::SET_CAM_COORD(cam, targetX, targetY, targetZ);
+        
+        // Verify the camera position was set correctly
+        Vector3 actualPos = CAM::GET_CAM_COORD(cam);
         
         LOGI("script", std::string("Verification mode started: ") + g_anomalyType + 
              " at (" + std::to_string(anomalyPos.x) + ", " + 
              std::to_string(anomalyPos.y) + ", " + std::to_string(anomalyPos.z) + 
-             ") camera at (" + std::to_string(targetPos.x) + ", " + 
-             std::to_string(targetPos.y) + ", " + std::to_string(targetPos.z) + ")");
+             ") camera set to (" + std::to_string(targetX) + ", " + 
+             std::to_string(targetY) + ", " + std::to_string(targetZ) + 
+             ") actual (" + std::to_string(actualPos.x) + ", " + 
+             std::to_string(actualPos.y) + ", " + std::to_string(actualPos.z) + ")");
     } else {
         LOGE("script", "Failed to get camera handle");
         return;
