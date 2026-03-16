@@ -526,21 +526,16 @@ static void start_verification_mode() {
         float targetY = anomalyPos.y;
         float targetZ = anomalyPos.z + 2.0f;
         
-        LOGI("script", std::string("Setting camera position to: (") + 
-             std::to_string(targetX) + ", " + std::to_string(targetY) + ", " + std::to_string(targetZ) + ")");
-        
         CAM::SET_CAM_COORD(cam, targetX, targetY, targetZ);
         
-        // Verify the camera position was set correctly
-        Vector3 actualPos = CAM::GET_CAM_COORD(cam);
+        // Set camera to look down at the anomaly
+        CAM::SET_CAM_ROT(cam, -30.0f, 0.0f, 0.0f, 2);
         
         LOGI("script", std::string("Verification mode started: ") + g_anomalyType + 
              " at (" + std::to_string(anomalyPos.x) + ", " + 
              std::to_string(anomalyPos.y) + ", " + std::to_string(anomalyPos.z) + 
-             ") camera set to (" + std::to_string(targetX) + ", " + 
-             std::to_string(targetY) + ", " + std::to_string(targetZ) + 
-             ") actual (" + std::to_string(actualPos.x) + ", " + 
-             std::to_string(actualPos.y) + ", " + std::to_string(actualPos.z) + ")");
+             ") camera at (" + std::to_string(targetX) + ", " + 
+             std::to_string(targetY) + ", " + std::to_string(targetZ) + ")");
     } else {
         LOGE("script", "Failed to get camera handle");
         return;
