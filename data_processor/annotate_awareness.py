@@ -1,12 +1,12 @@
 import argparse
 import json
-import os
 import re
 import sys
 import time
 from pathlib import Path
 
 from PIL import Image
+from tqdm import tqdm
 
 
 _IMG_RE = re.compile(r"^(?P<traj>.+?)_step_(?P<step>\d+)_rgb\.(jpg|jpeg|png)$", re.I)
@@ -14,12 +14,6 @@ _IMG_RE = re.compile(r"^(?P<traj>.+?)_step_(?P<step>\d+)_rgb\.(jpg|jpeg|png)$", 
 
 def _repo_root():
     return Path(__file__).resolve().parent.parent
-
-
-def _ensure_parent(p):
-    p = Path(p)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
 
 
 def _read_json(path):
@@ -30,31 +24,6 @@ def _read_json(path):
 def _write_json(path, obj):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
-
-
-def _append_jsonl(path, obj):
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-
-
-def _load_done_keys(jsonl_path):
-    done = set()
-    p = Path(jsonl_path)
-    if not p.exists():
-        return done
-    with open(p, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            key = obj.get("key")
-            if isinstance(key, str) and key:
-                done.add(key)
-    return done
 
 
 def _parse_traj_step(entry):
@@ -145,11 +114,13 @@ def _extract_task_desc(entry):
     return "find the closest burning car"
 
 
-def _awareness_prompt(task_line, context_text):
+def _awareness_prompt(task_line, context_text, current_action):
     return (
         "You are an autonomous exploration drone operating in a city environment.\n"
         "You will be given the current RGB image and a depth visualization, plus a short trajectory context.\n"
         "Write an awareness note that reflects your internal state and reasoning, taking the whole exploration trajectory into account.\n"
+        "\n"
+        f"Current Action: You are executing '{current_action}' in this frame.\n"
         "\n"
         "Output must be in English and exactly four lines, each starting with the given prefix:\n"
         f"{task_line}\n"
@@ -162,28 +133,10 @@ def _awareness_prompt(task_line, context_text):
         "- Do not include bullet points, numbering, or extra lines.\n"
         "- Do not mention model, prompt, or formatting instructions.\n"
         "- The Task line must be exactly the one provided.\n"
+        "- The Plan should be consistent with or explain the current action being executed.\n"
         "\n"
         f"{context_text}"
     )
-
-
-def _parse_awareness_struct(text):
-    s = str(text or "").strip()
-    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
-    if len(lines) < 4:
-        return None
-    out = {}
-    for ln in lines:
-        if ":" not in ln:
-            continue
-        k, v = ln.split(":", 1)
-        k = k.strip().lower()
-        v = v.strip()
-        if k in ("task", "history", "observation & inference", "plan"):
-            out[k] = v
-    if len(out) != 4:
-        return None
-    return out
 
 
 def _extract_prefixed_line(text, prefix):
@@ -198,139 +151,162 @@ def _extract_prefixed_line(text, prefix):
     return None
 
 
-def _coerce_awareness(task_line, model_text):
+def _coerce_awareness(task_line, model_text, current_action):
     history = _extract_prefixed_line(model_text, "History:")
     obs = _extract_prefixed_line(model_text, "Observation & Inference:")
     plan = _extract_prefixed_line(model_text, "Plan:")
     if history is None:
-        history = "History: I have been exploring and have not found the target yet (History)."
+        history = "History: I have been exploring and have not found the target yet."
     if obs is None:
-        obs = "Observation & Inference: I see urban structures and road-like regions; the target is likely near roads (Observation & Inference)."
+        obs = "Observation & Inference: I see urban structures and road-like regions; the target is likely near roads."
     if plan is None:
-        plan = "Plan: Continue exploring along roads and scan intersections for cues (Plan)."
+        plan = f"Plan: Executing {current_action} to continue systematic exploration of the area."
     return "\n".join([task_line, history, obs, plan])
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Add awareness annotations to train_data_all.json")
     parser.add_argument(
         "--input_json",
         default=str(_repo_root() / "dataset" / "train_data_all.json"),
+        help="Input JSON file path"
     )
     parser.add_argument(
         "--output_json",
         default=str(_repo_root() / "dataset" / "train_data_all_with_awareness.json"),
-    )
-    parser.add_argument(
-        "--output_jsonl",
-        default=str(_repo_root() / "dataset" / "awareness_labels.jsonl"),
+        help="Output JSON file path"
     )
     parser.add_argument(
         "--model_dir",
-        default=str(_repo_root() / "agent_control" / "qwen3_vl_sft_merged"),
+        default=str(_repo_root() / "agent_control" / "models" / "qwen3_vl_sft_merged"),
+        help="Model directory path"
     )
-    parser.add_argument("--history_k", type=int, default=12)
-    parser.add_argument("--max_new_tokens", type=int, default=160)
-    parser.add_argument("--sleep_s", type=float, default=0.0)
+    parser.add_argument("--history_k", type=int, default=12, help="Number of recent actions to include in context")
+    parser.add_argument("--max_new_tokens", type=int, default=160, help="Maximum new tokens for generation")
+    parser.add_argument("--sleep_s", type=float, default=0.0, help="Sleep time before starting")
+    parser.add_argument("--skip_existing", action="store_true", help="Skip entries that already have awareness field")
+    
     args = parser.parse_args()
 
     if float(args.sleep_s) > 0:
         time.sleep(float(args.sleep_s))
 
+    # Import model wrapper
     root = _repo_root()
     agent_control_dir = root / "agent_control"
     sys.path.insert(0, str(agent_control_dir))
     from qwen3vl_wrapper import Qwen3VLWrapper
 
+    # Load model
+    print("Loading model...")
     model = Qwen3VLWrapper(args.model_dir).load()
 
-    input_json = Path(args.input_json)
-    output_json = _ensure_parent(args.output_json)
-    output_jsonl = _ensure_parent(args.output_jsonl)
-
-    data = _read_json(input_json)
+    # Read input data
+    input_path = Path(args.input_json)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+    
+    print(f"Reading data from: {input_path}")
+    data = _read_json(input_path)
     if not isinstance(data, list):
-        raise RuntimeError("input_json 不是 list")
+        raise RuntimeError("Input JSON must be a list")
 
-    done = _load_done_keys(output_jsonl)
-
+    # Group entries by trajectory
     groups = {}
     for i, entry in enumerate(data):
         traj, step = _parse_traj_step(entry)
         if traj is None:
-            traj = "__unknown__"
-            step = i
+            traj = f"__unknown_{i}__"
+            step = 0
         groups.setdefault(traj, []).append((step, i))
 
+    # Sort trajectories and steps
     traj_order = sorted(groups.items(), key=lambda kv: kv[0])
+    
+    # Count total entries and already processed
+    total_entries = len(data)
+    if args.skip_existing:
+        already_processed = sum(1 for entry in data if "awareness" in entry)
+        print(f"Found {already_processed} entries already processed")
+    else:
+        already_processed = 0
 
-    for traj, step_pairs in traj_order:
-        step_pairs.sort(key=lambda x: x[0])
-        ordered_indices = [idx for _, idx in step_pairs]
-        traj_entries = [data[idx] for idx in ordered_indices]
-        task_desc = _extract_task_desc(traj_entries[0]) if traj_entries else "find the closest burning car"
-        task_line = f"Task: I need to {task_desc} (Task)."
+    print(f"Processing {total_entries} entries...")
+    
+    with tqdm(total=total_entries, initial=already_processed, desc="Processing entries", unit="entry") as pbar:
+        for traj, step_pairs in traj_order:
+            step_pairs.sort(key=lambda x: x[0])
+            ordered_indices = [idx for _, idx in step_pairs]
+            traj_entries = [data[idx] for idx in ordered_indices]
+            
+            # Extract task description from first entry
+            task_desc = _extract_task_desc(traj_entries[0]) if traj_entries else "find the closest burning car"
+            task_line = f"Task: I need to {task_desc} (Task)."
 
-        for local_idx, global_idx in enumerate(ordered_indices):
-            entry = data[global_idx]
-            key = f"{traj}::{local_idx}"
-            if key in done:
-                continue
+            for local_idx, global_idx in enumerate(ordered_indices):
+                entry = data[global_idx]
+                
+                # Skip if already has awareness and skip_existing is True
+                if args.skip_existing and "awareness" in entry:
+                    pbar.update(1)
+                    continue
 
-            images = entry.get("images") or []
-            if len(images) < 2:
-                continue
+                images = entry.get("images") or []
+                if len(images) < 2:
+                    pbar.update(1)
+                    continue
 
-            rgb_path = root / "dataset" / str(images[0])
-            depth_path = root / "dataset" / str(images[1])
-            if not rgb_path.exists() or not depth_path.exists():
-                continue
+                rgb_path = root / "dataset" / str(images[0])
+                depth_path = root / "dataset" / str(images[1])
+                if not rgb_path.exists() or not depth_path.exists():
+                    pbar.update(1)
+                    continue
 
-            rgb_img = Image.open(rgb_path).convert("RGB")
-            depth_img = Image.open(depth_path).convert("RGB")
+                # Load images
+                rgb_img = Image.open(rgb_path).convert("RGB")
+                depth_img = Image.open(depth_path).convert("RGB")
 
-            context = _build_context_for_step(traj_entries, local_idx, int(args.history_k))
-            prompt = _awareness_prompt(task_line, context)
+                # Get current action
+                current_action = _get_action(entry)
+                if not current_action:
+                    current_action = "Unknown action"
 
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image"},
-                        {"type": "image"},
-                    ],
-                }
-            ]
+                # Build context
+                context = _build_context_for_step(traj_entries, local_idx, int(args.history_k))
+                prompt = _awareness_prompt(task_line, context, current_action)
 
-            awareness = model.generate_chat(
-                messages=messages,
-                images=[rgb_img, depth_img],
-                max_new_tokens=int(args.max_new_tokens),
-                do_sample=False,
-            )
-            awareness = _coerce_awareness(task_line, awareness)
+                # Generate awareness
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image"},
+                            {"type": "image"},
+                        ],
+                    }
+                ]
 
-            entry["awareness"] = awareness
-            aw_struct = _parse_awareness_struct(awareness)
-            if aw_struct is not None:
-                entry["awareness_struct"] = aw_struct
+                awareness = model.generate_chat(
+                    messages=messages,
+                    images=[rgb_img, depth_img],
+                    max_new_tokens=int(args.max_new_tokens),
+                    do_sample=False,
+                )
+                awareness = _coerce_awareness(task_line, awareness, current_action)
 
-            _append_jsonl(
-                output_jsonl,
-                {
-                    "key": key,
-                    "traj": traj,
-                    "task": task_desc,
-                    "local_step": int(local_idx),
-                    "global_index": int(global_idx),
-                    "images": [str(images[0]), str(images[1])],
-                    "awareness": awareness,
-                },
-            )
-            done.add(key)
+                # Add awareness to entry
+                entry["awareness"] = awareness
+                pbar.update(1)
 
-    _write_json(output_json, data)
+    # Write output
+    output_path = Path(args.output_json)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    print(f"Writing results to: {output_path}")
+    _write_json(output_path, data)
+    
+    print("Done!")
     return 0
 
 
