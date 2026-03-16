@@ -856,6 +856,21 @@ void scriptMain()
                 GAMEPLAY::SET_WEATHER_TYPE_NOW_PERSIST((char*)name.c_str());
                 LOGI("script", std::string("Set weather to ")+name);
             }
+            else if (cmd.rfind("SET_POSTURE ", 0) == 0)
+            {
+                auto s = cmd.substr(12);
+                std::stringstream ss(s);
+                float x=0, y=0, z=0, rx=0, ry=0, rz=0;
+                ss >> x >> y >> z >> rx >> ry >> rz;
+                
+                Any cam = CAM::GET_RENDERING_CAM();
+                if (cam) {
+                    CAM::SET_CAM_COORD(cam, x, y, z);
+                    CAM::SET_CAM_ROT(cam, rx, ry, rz, 2);
+                    LOGI("script", std::string("Set posture to pos(") + std::to_string(x) + "," + std::to_string(y) + "," + std::to_string(z) + 
+                         ") rot(" + std::to_string(rx) + "," + std::to_string(ry) + "," + std::to_string(rz) + ")");
+                }
+            }
         }
 		WAIT(0);
 	}

@@ -403,6 +403,30 @@ void ServerV2::handle_client() {
             write_response(resp);
             return;
         }
+        case MSG_SET_POSTURE: {
+            if (hdr.length >= sizeof(float) * 6) {
+                float x = *reinterpret_cast<float*>(&payload[0]);
+                float y = *reinterpret_cast<float*>(&payload[4]);
+                float z = *reinterpret_cast<float*>(&payload[8]);
+                float rx = *reinterpret_cast<float*>(&payload[12]);
+                float ry = *reinterpret_cast<float*>(&payload[16]);
+                float rz = *reinterpret_cast<float*>(&payload[20]);
+                std::string s = std::string("SET_POSTURE ") + std::to_string(x) + " " + std::to_string(y) + " " + std::to_string(z) + " " + std::to_string(rx) + " " + std::to_string(ry) + " " + std::to_string(rz);
+                enqueue_command(s);
+                LOGD("server_v2", std::string("Enqueue ") + s);
+            }
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_POSTURE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            resp.resize(sizeof(rh));
+            std::memcpy(resp.data(), &rh.magic[0], 4);
+            std::memcpy(resp.data() + 4, &rh.version, 1);
+            std::memcpy(resp.data() + 5, &rh.type, 1);
+            std::memcpy(resp.data() + 6, &rh.flags, 1);
+            std::memcpy(resp.data() + 7, &rh.reserved, 1);
+            std::memcpy(resp.data() + 8, &rh.request_id, 8);
+            std::memcpy(resp.data() + 16, &rh.length, 4);
+            write_response(resp);
+            return;
+        }
         case MSG_CAPTURE: {
             enqueue_command("REQUEST");
             int tries = 0;

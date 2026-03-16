@@ -16,7 +16,8 @@ enum MsgType : uint8_t {
     MSG_GET_RECORDING_INFO = 12,
     MSG_SET_RECORDING_SESSION = 13,
     MSG_CREATE_FIRE = 14,
-    MSG_CREATE_FIGHT = 15
+    MSG_CREATE_FIGHT = 15,
+    MSG_SET_POSTURE = 16
 };
 
 struct MsgHeader {

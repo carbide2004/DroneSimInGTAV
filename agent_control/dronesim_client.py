@@ -20,6 +20,7 @@ TYPE_GET_RECORDING_INFO = 12
 TYPE_SET_RECORDING_SESSION = 13
 TYPE_CREATE_FIRE = 14
 TYPE_CREATE_FIGHT = 15
+TYPE_SET_POSTURE = 16
 
 def _pack_header(t, req_id, length):
     return struct.pack("4sBBBBQI", MAGIC, VERSION, t, 0, 0, req_id, length)
@@ -67,9 +68,32 @@ class DroneSimClient:
         self._recv(s)
         time.sleep(0.5)
 
+    def move_to(self, x, y, z):
+        """Move camera to absolute position (keeping current rotation)"""
+        current_pose = self.get_pose()
+        if current_pose is None:
+            return
+        _, _, _, rx, ry, rz = current_pose
+        self.set_posture(x, y, z, rx, ry, rz)
+
     def rotate(self, rx, ry, rz):
         payload = struct.pack("fff", rx, ry, rz)
         s = self._send(TYPE_ROTATE, 3, payload)
+        self._recv(s)
+        time.sleep(0.5)
+
+    def set_rotation(self, rx, ry, rz):
+        """Set camera to absolute rotation (keeping current position)"""
+        current_pose = self.get_pose()
+        if current_pose is None:
+            return
+        x, y, z = current_pose[:3]
+        self.set_posture(x, y, z, rx, ry, rz)
+
+    def set_posture(self, x, y, z, rx, ry, rz):
+        """Set camera to absolute position and rotation"""
+        payload = struct.pack("ffffff", x, y, z, rx, ry, rz)
+        s = self._send(TYPE_SET_POSTURE, 16, payload)
         self._recv(s)
         time.sleep(0.5)
 
