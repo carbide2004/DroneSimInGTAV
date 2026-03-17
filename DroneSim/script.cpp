@@ -437,23 +437,23 @@ static void save_verification_sample() {
     ensure_dir("data");
     ensure_dir("data\\verification");
     
-    // Create JSON entry
-    std::string json_entry = "{\n";
-    json_entry += "  \"scenario_id\": \"verification_" + std::string(timestamp) + "\",\n";
-    json_entry += "  \"anomaly_type\": \"" + g_anomalyType + "\",\n";
-    json_entry += "  \"anomaly_position\": {\"x\": " + std::to_string(g_anomalyPos.x) + 
+    // Create JSON entry (single line for JSONL format)
+    std::string json_entry = "{";
+    json_entry += "\"scenario_id\": \"verification_" + std::string(timestamp) + "\",";
+    json_entry += "\"anomaly_type\": \"" + g_anomalyType + "\",";
+    json_entry += "\"anomaly_position\": {\"x\": " + std::to_string(g_anomalyPos.x) + 
                   ", \"y\": " + std::to_string(g_anomalyPos.y) + 
-                  ", \"z\": " + std::to_string(g_anomalyPos.z) + "},\n";
-    json_entry += "  \"start_pose\": {\"x\": " + std::to_string(pos.x) + 
+                  ", \"z\": " + std::to_string(g_anomalyPos.z) + "},";
+    json_entry += "\"start_pose\": {\"x\": " + std::to_string(pos.x) + 
                   ", \"y\": " + std::to_string(pos.y) + 
                   ", \"z\": " + std::to_string(pos.z) + 
                   ", \"rx\": " + std::to_string(rot.x) + 
                   ", \"ry\": " + std::to_string(rot.y) + 
-                  ", \"rz\": " + std::to_string(rot.z) + "},\n";
-    json_entry += "  \"expected_steps\": " + std::to_string(g_verificationSteps) + ",\n";
-    json_entry += "  \"task_description\": \"" + task_desc + "\",\n";
-    json_entry += "  \"created_time\": \"" + std::string(timestamp) + "\"\n";
-    json_entry += "}\n";
+                  ", \"rz\": " + std::to_string(rot.z) + "},";
+    json_entry += "\"expected_steps\": " + std::to_string(g_verificationSteps) + ",";
+    json_entry += "\"task_description\": \"" + task_desc + "\",";
+    json_entry += "\"created_time\": \"" + std::string(timestamp) + "\"";
+    json_entry += "}";
     
     // Append to verification file
     std::ofstream file("data\\verification\\samples.jsonl", std::ios::app);
