@@ -432,6 +432,8 @@ static void save_verification_sample() {
     } else if (g_anomalyType == "fight") {
         task_desc = "find the street fight";
     }
+
+    g_verificationSteps -= 12; // Subtract 12 steps for camera rotation
     
     // Create verification directory
     ensure_dir("data");
@@ -527,9 +529,6 @@ static void start_verification_mode() {
         float targetZ = anomalyPos.z + 2.0f;
         
         CAM::SET_CAM_COORD(cam, targetX, targetY, targetZ);
-        
-        // Set camera to look down at the anomaly
-        CAM::SET_CAM_ROT(cam, -30.0f, 0.0f, 0.0f, 2);
         
         LOGI("script", std::string("Verification mode started: ") + g_anomalyType + 
              " at (" + std::to_string(anomalyPos.x) + ", " + 
