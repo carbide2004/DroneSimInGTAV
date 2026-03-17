@@ -872,6 +872,50 @@ void scriptMain()
                 }
             }
         }
+        else if (cmd.rfind("TELEPORT_PLAYER ", 0) == 0)
+        {
+            auto s = cmd.substr(16);
+            std::stringstream ss(s);
+            float x=0, y=0, z=0;
+            ss >> x >> y >> z;
+            
+            // Get player ped
+            Ped player = PLAYER::PLAYER_PED_ID();
+            if (player) {
+                // Make player invincible and invisible for verification
+                PLAYER::SET_PLAYER_INVINCIBLE(PLAYER::PLAYER_ID(), true);
+                ENTITY::SET_ENTITY_VISIBLE(player, false, false);
+                
+                // Teleport player directly to anomaly position
+                ENTITY::SET_ENTITY_COORDS(player, x, y, z, true, false, false, true);
+                
+                LOGI("script", std::string("Teleported player to anomaly center (") + std::to_string(x) + "," + std::to_string(y) + "," + std::to_string(z) + ") - invincible and invisible");
+            } else {
+                LOGW("script", "Failed to get player ped for teleportation");
+            }
+        }
+        else if (cmd == "RESTORE_PLAYER")
+        {
+            // Restore player to normal state after verification
+            Ped player = PLAYER::PLAYER_PED_ID();
+            if (player) {
+                // Restore visibility and mortality
+                ENTITY::SET_ENTITY_VISIBLE(player, true, false);
+                PLAYER::SET_PLAYER_INVINCIBLE(PLAYER::PLAYER_ID(), false);
+                
+                // Teleport player to a safe surface location away from anomaly
+                Any cam = CAM::GET_RENDERING_CAM();
+                if (cam) {
+                    Vector3 camPos = CAM::GET_CAM_COORD(cam);
+                    float ground_z = camPos.z;
+                    GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(camPos.x, camPos.y, camPos.z, &ground_z, false);
+                    // Move player 20m away from camera position
+                    ENTITY::SET_ENTITY_COORDS(player, camPos.x + 20.0f, camPos.y + 20.0f, ground_z + 1.0f, true, false, false, true);
+                }
+                
+                LOGI("script", "Player restored to normal state - visible and mortal");
+            }
+        }
 		WAIT(0);
 	}
 }
