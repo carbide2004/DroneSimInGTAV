@@ -528,9 +528,6 @@ static void start_verification_mode() {
         
         CAM::SET_CAM_COORD(cam, targetX, targetY, targetZ);
         
-        // Set camera to look down at the anomaly
-        CAM::SET_CAM_ROT(cam, -30.0f, 0.0f, 0.0f, 2);
-        
         LOGI("script", std::string("Verification mode started: ") + g_anomalyType + 
              " at (" + std::to_string(anomalyPos.x) + ", " + 
              std::to_string(anomalyPos.y) + ", " + std::to_string(anomalyPos.z) + 
@@ -882,12 +879,28 @@ void scriptMain()
             // Get player ped
             Ped player = PLAYER::PLAYER_PED_ID();
             if (player) {
+                // Temporarily switch to player view for teleportation
+                bool was_camera_mode = (scriptStatus == cameraMode);
+                if (was_camera_mode) {
+                    StopCamera();
+                    scriptStatus = scriptStop;
+                    WAIT(100);  // Wait for camera to stop
+                }
+                
                 // Make player invincible and invisible for verification
                 PLAYER::SET_PLAYER_INVINCIBLE(PLAYER::PLAYER_ID(), true);
                 ENTITY::SET_ENTITY_VISIBLE(player, false, false);
                 
                 // Teleport player directly to anomaly position
                 ENTITY::SET_ENTITY_COORDS(player, x, y, z, true, false, false, true);
+                WAIT(100);  // Wait for teleportation to complete
+                
+                // Switch back to camera mode if we were in camera mode
+                if (was_camera_mode) {
+                    startNewCamera();
+                    scriptStatus = cameraMode;
+                    WAIT(100);  // Wait for camera to start
+                }
                 
                 LOGI("script", std::string("Teleported player to anomaly center (") + std::to_string(x) + "," + std::to_string(y) + "," + std::to_string(z) + ") - invincible and invisible");
             } else {
@@ -899,21 +912,47 @@ void scriptMain()
             // Restore player to normal state after verification
             Ped player = PLAYER::PLAYER_PED_ID();
             if (player) {
+                // Temporarily switch to player view for restoration
+                bool was_camera_mode = (scriptStatus == cameraMode);
+                if (was_camera_mode) {
+                    StopCamera();
+                    scriptStatus = scriptStop;
+                    WAIT(100);  // Wait for camera to stop
+                }
+                
                 // Restore visibility and mortality
                 ENTITY::SET_ENTITY_VISIBLE(player, true, false);
                 PLAYER::SET_PLAYER_INVINCIBLE(PLAYER::PLAYER_ID(), false);
                 
                 // Teleport player to a safe surface location away from anomaly
                 Any cam = CAM::GET_RENDERING_CAM();
+                Vector3 safe_pos{};
                 if (cam) {
                     Vector3 camPos = CAM::GET_CAM_COORD(cam);
                     float ground_z = camPos.z;
                     GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(camPos.x, camPos.y, camPos.z, &ground_z, false);
                     // Move player 20m away from camera position
-                    ENTITY::SET_ENTITY_COORDS(player, camPos.x + 20.0f, camPos.y + 20.0f, ground_z + 1.0f, true, false, false, true);
+                    safe_pos.x = camPos.x + 20.0f;
+                    safe_pos.y = camPos.y + 20.0f;
+                    safe_pos.z = ground_z + 1.0f;
+                } else {
+                    // Fallback position if no camera
+                    safe_pos.x = 0.0f;
+                    safe_pos.y = 0.0f;
+                    safe_pos.z = 30.0f;
                 }
                 
-                LOGI("script", "Player restored to normal state - visible and mortal");
+                ENTITY::SET_ENTITY_COORDS(player, safe_pos.x, safe_pos.y, safe_pos.z, true, false, false, true);
+                WAIT(100);  // Wait for teleportation to complete
+                
+                // Switch back to camera mode if we were in camera mode
+                if (was_camera_mode) {
+                    startNewCamera();
+                    scriptStatus = cameraMode;
+                    WAIT(100);  // Wait for camera to start
+                }
+                
+                LOGI("script", std::string("Player restored to normal state at (") + std::to_string(safe_pos.x) + "," + std::to_string(safe_pos.y) + "," + std::to_string(safe_pos.z) + ")");
             }
         }
 		WAIT(0);
