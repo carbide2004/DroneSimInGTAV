@@ -290,7 +290,6 @@ static void create_fire_near_pos(float ox, float oy, float oz) {
     
     g_fireReady = true;
 }
-}
 
 static void create_fire_near_camera() {
     Any cam = CAM::GET_RENDERING_CAM();
