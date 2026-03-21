@@ -505,6 +505,8 @@ static void save_verification_sample() {
     } else if (g_anomalyType == "fight") {
         task_desc = "find the street fight";
     }
+
+    g_verificationSteps -= 12; // Subtract 12 steps for camera rotation
     
     // Create verification directory
     ensure_dir("data");
