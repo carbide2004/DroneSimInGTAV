@@ -6,29 +6,69 @@ def rgb_bytes_to_pil(w, h, rgb_bytes):
     w = int(w)
     h = int(h)
     raw = np.frombuffer(rgb_bytes, dtype=np.uint8)
-    if raw.size == w * h * 4:
+    expected_rgba = w * h * 4
+    expected_rgb = w * h * 3
+    
+    if raw.size == expected_rgba:
+        # Perfect RGBA format
         arr = raw.reshape((h, w, 4))[:, :, :3]
-    elif raw.size == w * h * 3:
+    elif raw.size == expected_rgb:
+        # Perfect RGB format
         arr = raw.reshape((h, w, 3))
+    elif abs(raw.size - expected_rgba) <= 4:
+        # Close to RGBA format (allow up to 4 bytes difference for alignment)
+        if raw.size < expected_rgba:
+            # Pad with zeros if missing bytes
+            padded = np.pad(raw, (0, expected_rgba - raw.size), mode='constant', constant_values=0)
+            arr = padded.reshape((h, w, 4))[:, :, :3]
+        else:
+            # Truncate if too many bytes
+            truncated = raw[:expected_rgba]
+            arr = truncated.reshape((h, w, 4))[:, :, :3]
+    elif abs(raw.size - expected_rgb) <= 4:
+        # Close to RGB format (allow up to 4 bytes difference for alignment)
+        if raw.size < expected_rgb:
+            # Pad with zeros if missing bytes
+            padded = np.pad(raw, (0, expected_rgb - raw.size), mode='constant', constant_values=0)
+            arr = padded.reshape((h, w, 3))
+        else:
+            # Truncate if too many bytes
+            truncated = raw[:expected_rgb]
+            arr = truncated.reshape((h, w, 3))
     else:
-        raise ValueError(f"Unexpected rgb bytes size: {raw.size} for {w}x{h}")
+        raise ValueError(f"Unexpected rgb bytes size: {raw.size} for {w}x{h} (expected {expected_rgb} or {expected_rgba})")
+    
     return Image.fromarray(arr, mode="RGB")
 
 
 def depth_bytes_to_pil(w, h, depth_bytes):
     w = int(w)
     h = int(h)
-    raw = np.frombuffer(depth_bytes, dtype=np.float32)
-    if raw.size != w * h:
-        raw_u8 = np.frombuffer(depth_bytes, dtype=np.uint8)
-        if raw_u8.size == w * h:
+    expected_float32 = w * h * 4  # float32 = 4 bytes per pixel
+    expected_uint8 = w * h        # uint8 = 1 byte per pixel
+    
+    # Try float32 format first
+    if len(depth_bytes) >= expected_float32 - 4:  # Allow small tolerance
+        try:
+            # Pad or truncate to exact size
+            if len(depth_bytes) < expected_float32:
+                padded_bytes = depth_bytes + b'\x00' * (expected_float32 - len(depth_bytes))
+            else:
+                padded_bytes = depth_bytes[:expected_float32]
+            
+            raw = np.frombuffer(padded_bytes, dtype=np.float32)
+            depth = raw.reshape((h, w))
+        except Exception:
+            # Fall back to uint8 if float32 fails
+            raw_u8 = np.frombuffer(depth_bytes[:expected_uint8], dtype=np.uint8)
+            depth = raw_u8.reshape((h, w)).astype(np.float32)
+    else:
+        # Try uint8 format
+        if len(depth_bytes) >= expected_uint8:
+            raw_u8 = np.frombuffer(depth_bytes[:expected_uint8], dtype=np.uint8)
             depth = raw_u8.reshape((h, w)).astype(np.float32)
         else:
-            raise ValueError(
-                f"Unexpected depth bytes size: {len(depth_bytes)} for {w}x{h}"
-            )
-    else:
-        depth = raw.reshape((h, w))
+            raise ValueError(f"Unexpected depth bytes size: {len(depth_bytes)} for {w}x{h} (expected {expected_uint8} or {expected_float32})")
 
     depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 

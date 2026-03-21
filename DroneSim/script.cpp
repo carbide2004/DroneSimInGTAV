@@ -45,6 +45,12 @@ static int g_verificationSteps = 0;
 static Vector3 g_anomalyPos;
 static std::string g_anomalyType;
 
+// Fire maintenance system
+static bool g_fireMaintenanceActive = false;
+static Vector3 g_fireMaintenancePos;
+static Vehicle g_fireVehicle = 0;
+static int g_fireMaintenanceTimer = 0;
+
 scriptStatusEnum scriptStatus = scriptStop;
 
 extern volatile catchState cmdToCatch;
@@ -175,6 +181,48 @@ static void record_step(const char* action, float dx, float dy, float dz, float 
     g_recordingStep = step + 1;
 }
 
+static void maintain_fire() {
+    if (!g_fireMaintenanceActive) return;
+    
+    g_fireMaintenanceTimer++;
+    
+    // Check and restart fires every 5 seconds (300 frames at 60fps)
+    if (g_fireMaintenanceTimer % 300 == 0) {
+        // Restart vehicle fire if vehicle exists and is not on fire
+        if (g_fireVehicle != 0 && ENTITY::DOES_ENTITY_EXIST(g_fireVehicle)) {
+            if (!FIRE::IS_ENTITY_ON_FIRE(g_fireVehicle)) {
+                FIRE::START_ENTITY_FIRE(g_fireVehicle);
+                LOGI("script", "Restarted vehicle fire");
+            }
+        }
+        
+        // Restart script fires at maintenance position
+        FIRE::START_SCRIPT_FIRE(g_fireMaintenancePos.x, g_fireMaintenancePos.y, g_fireMaintenancePos.z, 25, true);
+        FIRE::START_SCRIPT_FIRE(g_fireMaintenancePos.x + 1.0f, g_fireMaintenancePos.y, g_fireMaintenancePos.z, 20, true);
+        FIRE::START_SCRIPT_FIRE(g_fireMaintenancePos.x - 1.0f, g_fireMaintenancePos.y, g_fireMaintenancePos.z, 20, true);
+        FIRE::START_SCRIPT_FIRE(g_fireMaintenancePos.x, g_fireMaintenancePos.y + 1.0f, g_fireMaintenancePos.z, 20, true);
+        FIRE::START_SCRIPT_FIRE(g_fireMaintenancePos.x, g_fireMaintenancePos.y - 1.0f, g_fireMaintenancePos.z, 20, true);
+        
+        LOGD("script", "Fire maintenance cycle completed");
+    }
+}
+
+static void start_fire_maintenance(float x, float y, float z, Vehicle vehicle = 0) {
+    g_fireMaintenanceActive = true;
+    g_fireMaintenancePos.x = x;
+    g_fireMaintenancePos.y = y;
+    g_fireMaintenancePos.z = z;
+    g_fireVehicle = vehicle;
+    g_fireMaintenanceTimer = 0;
+    LOGI("script", std::string("Started fire maintenance at (") + std::to_string(x) + "," + std::to_string(y) + "," + std::to_string(z) + ")");
+}
+
+static void stop_fire_maintenance() {
+    g_fireMaintenanceActive = false;
+    g_fireVehicle = 0;
+    g_fireMaintenanceTimer = 0;
+    LOGI("script", "Stopped fire maintenance");
+}
 static void create_fire_near_pos(float ox, float oy, float oz) {
     g_fireReady = false;
     Vector3 nodePos; float nodeHeading = 0.0f;
@@ -185,6 +233,8 @@ static void create_fire_near_pos(float ox, float oy, float oz) {
     float gz = pz;
     bool hasGround = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(px, py, pz, &gz, false);
     if (!hasGround) gz = pz;
+    
+    // Use exact position instead of vehicle position to avoid offset
     g_firePos[0] = px;
     g_firePos[1] = py;
     g_firePos[2] = gz;
@@ -197,31 +247,49 @@ static void create_fire_near_pos(float ox, float oy, float oz) {
         while (!STREAMING::HAS_MODEL_LOADED(vh) && tries < 200) { WAIT(0); tries++; }
     }
 
+    Vehicle created_vehicle = 0;
     if (v_ok && STREAMING::HAS_MODEL_LOADED(vh)) {
         float heading = ok ? nodeHeading : 0.0f;
-        Vehicle v = VEHICLE::CREATE_VEHICLE(vh, g_firePos[0], g_firePos[1], g_firePos[2], heading, true, false);
+        created_vehicle = VEHICLE::CREATE_VEHICLE(vh, g_firePos[0], g_firePos[1], g_firePos[2], heading, true, false);
         STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(vh);
-        ENTITY::SET_ENTITY_AS_MISSION_ENTITY(v, true, true);
-        VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v);
-        VEHICLE::SET_VEHICLE_HANDBRAKE(v, true);
-        VEHICLE::SET_VEHICLE_ENGINE_ON(v, false, true, false);
-        Vector3 vpos = ENTITY::GET_ENTITY_COORDS(v, true);
-        g_firePos[0] = vpos.x;
-        g_firePos[1] = vpos.y;
-        g_firePos[2] = vpos.z;
-        VEHICLE::SET_VEHICLE_PETROL_TANK_HEALTH(v, -1000.0f);
-        VEHICLE::SET_VEHICLE_ENGINE_HEALTH(v, -1000.0f);
-        VEHICLE::SET_VEHICLE_DAMAGE(v, 0.0f, 0.0f, 0.0f, 2000.0f, 5.0f, true);
-        g_fireId = static_cast<int>(FIRE::START_ENTITY_FIRE(v));
+        ENTITY::SET_ENTITY_AS_MISSION_ENTITY(created_vehicle, true, true);
+        
+        // Ensure vehicle stays at exact position
+        ENTITY::FREEZE_ENTITY_POSITION(created_vehicle, true);
+        VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(created_vehicle);
+        VEHICLE::SET_VEHICLE_HANDBRAKE(created_vehicle, true);
+        VEHICLE::SET_VEHICLE_ENGINE_ON(created_vehicle, false, true, false);
+        
+        // Force vehicle to exact coordinates to prevent offset
+        ENTITY::SET_ENTITY_COORDS(created_vehicle, g_firePos[0], g_firePos[1], g_firePos[2], true, false, false, true);
+        
+        // Damage vehicle to make it burn
+        VEHICLE::SET_VEHICLE_PETROL_TANK_HEALTH(created_vehicle, -1000.0f);
+        VEHICLE::SET_VEHICLE_ENGINE_HEALTH(created_vehicle, -1000.0f);
+        VEHICLE::SET_VEHICLE_DAMAGE(created_vehicle, 0.0f, 0.0f, 0.0f, 2000.0f, 5.0f, true);
+        
+        // Create initial fire effects
+        g_fireId = static_cast<int>(FIRE::START_ENTITY_FIRE(created_vehicle));
+        
+        // Add explosion for visual effect
         FIRE::ADD_EXPLOSION(g_firePos[0], g_firePos[1], g_firePos[2] + 0.5f, 2, 10.0f, true, false, 1.0f);
+        
+        // Wait for fire to start
         int burn_tries = 0;
-        while (!FIRE::IS_ENTITY_ON_FIRE(v) && burn_tries < 60) { WAIT(0); burn_tries++; }
+        while (!FIRE::IS_ENTITY_ON_FIRE(created_vehicle) && burn_tries < 60) { WAIT(0); burn_tries++; }
+        
+        LOGI("script", std::string("CREATE_FIRE vehicle fire with maintenance at ") + std::to_string(g_firePos[0]) + "," + std::to_string(g_firePos[1]) + "," + std::to_string(g_firePos[2]));
     } else {
+        // Fallback: create script fires
         g_fireId = static_cast<int>(FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1], g_firePos[2], 25, true));
-        LOGW("script", "CREATE_FIRE vehicle model unavailable, using script fire");
+        LOGW("script", "CREATE_FIRE vehicle model unavailable, using script fires with maintenance");
     }
+    
+    // Start fire maintenance system
+    start_fire_maintenance(g_firePos[0], g_firePos[1], g_firePos[2], created_vehicle);
+    
     g_fireReady = true;
-    LOGI("script", std::string("CREATE_FIRE script fire at ") + std::to_string(g_firePos[0]) + "," + std::to_string(g_firePos[1]) + "," + std::to_string(g_firePos[2]));
+}
 }
 
 static void create_fire_near_camera() {
@@ -277,6 +345,11 @@ static void create_fight_near_pos(float ox, float oy, float oz) {
         peds[i] = PED::CREATE_PED(26, model, x, y, z, nodeHeading, true, true);
         ENTITY::SET_ENTITY_AS_MISSION_ENTITY(peds[i], true, true);
         PED::SET_PED_RELATIONSHIP_GROUP_HASH(peds[i], (i < n / 2) ? groupA : groupB);
+        
+        // Make fighting NPCs invincible so they don't die during verification
+        ENTITY::SET_ENTITY_INVINCIBLE(peds[i], true);
+        PED::SET_PED_CAN_BE_KNOCKED_OFF_VEHICLE(peds[i], false);
+        PED::SET_PED_CAN_BE_DRAGGED_OUT(peds[i], false);
     }
     STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(model);
 
@@ -762,6 +835,8 @@ void scriptMain()
             StopCamera();
             scriptStatus = scriptStop;
             stop_recording_session();
+            // Stop fire maintenance when exiting camera mode
+            stop_fire_maintenance();
             // Reset verification mode when exiting camera mode
             g_verificationMode = false;
             g_verificationSteps = 0;
@@ -769,7 +844,12 @@ void scriptMain()
         }
 
         std::string cmd;
-        if (!try_dequeue_command(cmd)) { WAIT(0); continue; }
+        if (!try_dequeue_command(cmd)) { 
+            // Maintain fire effects during verification
+            maintain_fire();
+            WAIT(0); 
+            continue; 
+        }
         if (cmd == "CREATE_CAMERA")
         {
             startNewCamera();
@@ -782,6 +862,8 @@ void scriptMain()
             StopCamera();
             scriptStatus = scriptStop;
             stop_recording_session();
+            // Stop fire maintenance when camera stops
+            stop_fire_maintenance();
             // setStatusText("Camera mode disabled.");
             LOGI("script", "Camera stopped and returned to player view");
         }
@@ -909,6 +991,9 @@ void scriptMain()
         }
         else if (cmd == "RESTORE_PLAYER")
         {
+            // Stop fire maintenance when restoring player
+            stop_fire_maintenance();
+            
             // Restore player to normal state after verification
             Ped player = PLAYER::PLAYER_PED_ID();
             if (player) {
