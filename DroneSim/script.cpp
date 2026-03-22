@@ -39,6 +39,23 @@ int g_fireId = -1;
 volatile bool g_fightReady = false;
 float g_fightPos[3] = {0};
 
+// 简单的3D位置类，替代可能有问题的Vector3
+class Position3D {
+public:
+    float x, y, z;
+
+    Position3D() : x(0.0f), y(0.0f), z(0.0f) {}
+    Position3D(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
+
+    // 计算到另一个位置的距离
+    float distance_to(Position3D other) const {
+        float dx = x - other.x;
+        float dy = y - other.y;
+        float dz = z - other.z;
+        return sqrtf(dx * dx + dy * dy + dz * dz);
+    }
+};
+
 // Verification mode variables
 static bool g_verificationMode = false;
 static int g_verificationSteps = 0;
@@ -664,23 +681,6 @@ static void run_manual_collect(AutoCollectEvent event_type) {
     else if (event_type == AUTO_EVENT_FIGHT) create_fight_near_camera();
     else create_accident_near_camera();
 }
-
-// 简单的3D位置类，替代可能有问题的Vector3
-class Position3D {
-public:
-    float x, y, z;
-    
-    Position3D() : x(0.0f), y(0.0f), z(0.0f) {}
-    Position3D(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
-    
-    // 计算到另一个位置的距离
-    float distance_to(Position3D other) const {
-        float dx = x - other.x;
-        float dy = y - other.y;
-        float dz = z - other.z;
-        return sqrtf(dx * dx + dy * dy + dz * dz);
-    }
-};
 
 static float yaw_to_target_deg(Position3D from, Position3D to) {
     float dx = to.x - from.x;
