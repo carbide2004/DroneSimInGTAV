@@ -532,7 +532,7 @@ static void save_verification_sample() {
     // Append to verification file
     std::ofstream file("data\\verification\\samples.jsonl", std::ios::app);
     if (file.is_open()) {
-        file << json_entry;
+        file << json_entry << std::endl;  // 添加换行符
         file.close();
         LOGI("script", std::string("Verification sample saved: ") + std::to_string(g_verificationSteps) + " steps");
     } else {
@@ -781,11 +781,6 @@ void scriptMain()
         
         if (scriptStatus == cameraMode)
         {
-            // 记录进入相机模式处理
-            if (loop_counter % 500 == 0) {
-                LOGD("script", "Processing camera mode keyboard inputs");
-            }
-            
             if (W.isKeyDown())
             {
                 record_step("AUTO_FORWARD", STEPSIZE, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
