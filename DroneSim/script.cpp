@@ -772,8 +772,20 @@ void scriptMain()
 
 	while (true)
 	{
+        // 在循环最开始就记录日志，确认循环是否在运行
+        static int loop_counter = 0;
+        loop_counter++;
+        if (loop_counter % 100 == 0) { // 每100次循环记录一次
+            LOGD("script", std::string("Main loop iteration: ") + std::to_string(loop_counter));
+        }
+        
         if (scriptStatus == cameraMode)
         {
+            // 记录进入相机模式处理
+            if (loop_counter % 500 == 0) {
+                LOGD("script", "Processing camera mode keyboard inputs");
+            }
+            
             if (W.isKeyDown())
             {
                 record_step("AUTO_FORWARD", STEPSIZE, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
