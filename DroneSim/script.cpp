@@ -722,12 +722,12 @@ static void run_auto_collect(AutoCollectEvent event_type) {
 
         if (fabsf(dz) > 1.0f) {
             if (dz > 0.0f) {
-                record_step("AUTO_UP", 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f);
-                moveCameraDelta(0.0f, 0.0f, 1.0f);
+                record_step("AUTO_UP", 0.0f, 0.0f, STEPSIZE, 0.0f, 0.0f, 0.0f);
+                moveCameraDelta(0.0f, 0.0f, STEPSIZE);
             } 
             else {
-                record_step("AUTO_DOWN", 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f);
-                moveCameraDelta(0.0f, 0.0f, -1.0f);
+                record_step("AUTO_DOWN", 0.0f, 0.0f, -STEPSIZE, 0.0f, 0.0f, 0.0f);
+                moveCameraDelta(0.0f, 0.0f, -STEPSIZE);
             }
         } 
         else {
@@ -744,8 +744,8 @@ static void run_auto_collect(AutoCollectEvent event_type) {
                 }
             } 
             else {
-                record_step("AUTO_FORWARD", 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-                moveCameraDelta(1.0f, 0.0f, 0.0f);
+                record_step("AUTO_FORWARD", STEPSIZE, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+                moveCameraDelta(STEPSIZE, 0.0f, 0.0f);
             }
         }
         WAIT(0);
@@ -776,20 +776,20 @@ void scriptMain()
         {
             if (W.isKeyDown())
             {
-                record_step("AUTO_FORWARD", 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-                moveCameraDelta(1.0f, 0.0f, 0.0f);
+                record_step("AUTO_FORWARD", STEPSIZE, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+                moveCameraDelta(STEPSIZE, 0.0f, 0.0f);
                 if (g_verificationMode) g_verificationSteps++;
             }
             if (shift.isKeyDown())
             {
-                record_step("AUTO_UP", 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f);
-                moveCameraDelta(0.0f, 0.0f, 1.0f);
+                record_step("AUTO_UP", 0.0f, 0.0f, STEPSIZE, 0.0f, 0.0f, 0.0f);
+                moveCameraDelta(0.0f, 0.0f, STEPSIZE);
                 if (g_verificationMode) g_verificationSteps++;
             }
             if (ctrl.isKeyDown())
             {
-                record_step("AUTO_DOWN", 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f);
-                moveCameraDelta(0.0f, 0.0f, -1.0f);
+                record_step("AUTO_DOWN", 0.0f, 0.0f, -STEPSIZE, 0.0f, 0.0f, 0.0f);
+                moveCameraDelta(0.0f, 0.0f, -STEPSIZE);
                 if (g_verificationMode) g_verificationSteps++;
             }
             if (Q.isKeyDown())

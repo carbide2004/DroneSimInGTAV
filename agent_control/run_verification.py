@@ -353,8 +353,8 @@ def main():
     parser.add_argument("--max_steps", type=int, default=150, help="Maximum steps per test")
     parser.add_argument("--sleep_s", type=float, default=3.0, help="Initial sleep time")
     parser.add_argument("--fov", type=float, default=None, help="Camera FOV")
-    parser.add_argument("--forward_step", type=float, default=1.0, help="Forward step size")
-    parser.add_argument("--down_step", type=float, default=1.0, help="Vertical step size")
+    parser.add_argument("--forward_step", type=float, default=5.0, help="Forward step size")
+    parser.add_argument("--down_step", type=float, default=5.0, help="Vertical step size")
     parser.add_argument("--yaw_step", type=float, default=15.0, help="Yaw step size")
     parser.add_argument("--sample_limit", type=int, default=-1, help="Limit number of samples to test (-1 for all)")
     

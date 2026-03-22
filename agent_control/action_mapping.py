@@ -53,9 +53,9 @@ def parse_action(model_text):
 def dispatch_action(
     cli,
     action,
-    forward_step=1.0,
-    up_step=1.0,
-    down_step=1.0,
+    forward_step=5.0,
+    up_step=5.0,
+    down_step=5.0,
     yaw_step=15.0,
 ):
     action = str(action).upper()
