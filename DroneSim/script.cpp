@@ -42,12 +42,12 @@ float g_fightPos[3] = {0};
 // Verification mode variables
 static bool g_verificationMode = false;
 static int g_verificationSteps = 0;
-static Vector3 g_anomalyPos;
+static Position3D g_anomalyPos;
 static std::string g_anomalyType;
 
 // Fire maintenance system
 static bool g_fireMaintenanceActive = false;
-static Vector3 g_fireMaintenancePos;
+static Position3D g_fireMaintenancePos;
 static Vehicle g_fireVehicle = 0;
 static int g_fireMaintenanceTimer = 0;
 
@@ -144,8 +144,12 @@ static void record_step(const char* action, float dx, float dy, float dz, float 
     if (g_recordingSessionDir[0] == '\0') return;
     if (!g_recordingStepsFile.is_open()) return;
     Any cam = CAM::GET_RENDERING_CAM();
-    Vector3 pos = CAM::GET_CAM_COORD(cam);
-    Vector3 rot = CAM::GET_CAM_ROT(cam, 2);
+    Vector3 cam_pos = CAM::GET_CAM_COORD(cam);
+    Vector3 cam_rot = CAM::GET_CAM_ROT(cam, 2);
+    
+    // 转换为Position3D进行处理
+    Position3D pos(cam_pos.x, cam_pos.y, cam_pos.z);
+    Position3D rot(cam_rot.x, cam_rot.y, cam_rot.z);
     makeCmdStart();
     int tries = 0;
     while (cmdToCatch != catchStop && tries < 6000) { WAIT(0); tries++; }
@@ -449,9 +453,14 @@ static void create_accident_near_pos(float ox, float oy, float oz) {
             collided = true;
             break;
         }
-        Vector3 p1 = ENTITY::GET_ENTITY_COORDS(v1, true);
-        Vector3 p2 = ENTITY::GET_ENTITY_COORDS(v2, true);
-        float dist = sqrt(pow(p1.x - p2.x, 2) + pow(p1.y - p2.y, 2) + pow(p1.z - p2.z, 2));
+        Vector3 p1_coords = ENTITY::GET_ENTITY_COORDS(v1, true);
+        Vector3 p2_coords = ENTITY::GET_ENTITY_COORDS(v2, true);
+        
+        // 转换为Position3D进行计算
+        Position3D p1(p1_coords.x, p1_coords.y, p1_coords.z);
+        Position3D p2(p2_coords.x, p2_coords.y, p2_coords.z);
+        
+        float dist = p1.distance_to(p2);
         if (dist < 4.0f) {
             collided = true;
             break;
@@ -461,8 +470,13 @@ static void create_accident_near_pos(float ox, float oy, float oz) {
     }
 
     if (collided) {
-        Vector3 p1 = ENTITY::GET_ENTITY_COORDS(v1, true);
-        Vector3 p2 = ENTITY::GET_ENTITY_COORDS(v2, true);
+        Vector3 p1_coords = ENTITY::GET_ENTITY_COORDS(v1, true);
+        Vector3 p2_coords = ENTITY::GET_ENTITY_COORDS(v2, true);
+        
+        // 转换为Position3D进行计算
+        Position3D p1(p1_coords.x, p1_coords.y, p1_coords.z);
+        Position3D p2(p2_coords.x, p2_coords.y, p2_coords.z);
+        
         g_accidentPos[0] = (p1.x + p2.x) / 2.0f;
         g_accidentPos[1] = (p1.y + p2.y) / 2.0f;
         g_accidentPos[2] = (p1.z + p2.z) / 2.0f;
@@ -486,8 +500,12 @@ static void save_verification_sample() {
     
     // Get current camera pose
     Any cam = CAM::GET_RENDERING_CAM();
-    Vector3 pos = CAM::GET_CAM_COORD(cam);
-    Vector3 rot = CAM::GET_CAM_ROT(cam, 2);
+    Vector3 cam_pos = CAM::GET_CAM_COORD(cam);
+    Vector3 cam_rot = CAM::GET_CAM_ROT(cam, 2);
+    
+    // 转换为Position3D进行处理
+    Position3D pos(cam_pos.x, cam_pos.y, cam_pos.z);
+    Position3D rot(cam_rot.x, cam_rot.y, cam_rot.z);
     
     // Create timestamp
     auto now = std::chrono::system_clock::now();
@@ -551,7 +569,7 @@ static void start_verification_mode() {
     srand(static_cast<unsigned int>(time(nullptr)));
     int choice = rand() % 2;
     
-    Vector3 anomalyPos;
+    Position3D anomalyPos;
     
     if (choice == 0) {
         // Create fire
@@ -967,16 +985,20 @@ void scriptMain()
         else if (cmd == "GET_POSE")
         {
             LOGD("script", "GET_POSE command received, starting processing");
-            Vector3 pos{}; Vector3 rot{};
+            Vector3 cam_pos{}; Vector3 cam_rot{};
             Any cam = CAM::GET_RENDERING_CAM();
             LOGD("script", std::string("GET_POSE: Got camera handle: ") + std::to_string(cam));
             
             if (cam != 0) {
-                pos = CAM::GET_CAM_COORD(cam);
-                LOGD("script", std::string("GET_POSE: Got position: ") + std::to_string(pos.x) + "," + std::to_string(pos.y) + "," + std::to_string(pos.z));
+                cam_pos = CAM::GET_CAM_COORD(cam);
+                LOGD("script", std::string("GET_POSE: Got position: ") + std::to_string(cam_pos.x) + "," + std::to_string(cam_pos.y) + "," + std::to_string(cam_pos.z));
                 
-                rot = CAM::GET_CAM_ROT(cam, 2);
-                LOGD("script", std::string("GET_POSE: Got rotation: ") + std::to_string(rot.x) + "," + std::to_string(rot.y) + "," + std::to_string(rot.z));
+                cam_rot = CAM::GET_CAM_ROT(cam, 2);
+                LOGD("script", std::string("GET_POSE: Got rotation: ") + std::to_string(cam_rot.x) + "," + std::to_string(cam_rot.y) + "," + std::to_string(cam_rot.z));
+                
+                // 转换为Position3D进行处理
+                Position3D pos(cam_pos.x, cam_pos.y, cam_pos.z);
+                Position3D rot(cam_rot.x, cam_rot.y, cam_rot.z);
                 
                 g_pose[0]=pos.x; g_pose[1]=pos.y; g_pose[2]=pos.z;
                 g_pose[3]=rot.x; g_pose[4]=rot.y; g_pose[5]=rot.z;
@@ -1109,14 +1131,15 @@ void scriptMain()
                 
                 // Teleport player to a safe surface location away from anomaly
                 Any cam = CAM::GET_RENDERING_CAM();
-                Vector3 safe_pos{};
+                Position3D safe_pos;
+                
                 if (cam) {
-                    Vector3 camPos = CAM::GET_CAM_COORD(cam);
-                    float ground_z = camPos.z;
-                    GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(camPos.x, camPos.y, camPos.z, &ground_z, false);
+                    Vector3 cam_pos = CAM::GET_CAM_COORD(cam);
+                    float ground_z = cam_pos.z;
+                    GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(cam_pos.x, cam_pos.y, cam_pos.z, &ground_z, false);
                     // Move player 20m away from camera position
-                    safe_pos.x = camPos.x + 20.0f;
-                    safe_pos.y = camPos.y + 20.0f;
+                    safe_pos.x = cam_pos.x + 20.0f;
+                    safe_pos.y = cam_pos.y + 20.0f;
                     safe_pos.z = ground_z + 1.0f;
                 } else {
                     // Fallback position if no camera
