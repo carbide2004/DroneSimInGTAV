@@ -1,6 +1,7 @@
 import argparse
 import json
 import math
+import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -13,7 +14,11 @@ from rgbd_utils import depth_bytes_to_pil, rgb_bytes_to_pil
 
 
 def _repo_root():
-    return Path(__file__).resolve().parent.parent
+    # Try environment variable first, then fallback to hardcoded path
+    env_path = os.getenv('DRONESIM_ROOT')
+    if env_path:
+        return Path(env_path)
+    return Path(r"E:\ToolApps\Steam\steamapps\common\Grand Theft Auto V")
 
 
 def _read_jsonl(path: Path) -> List[Dict]:
@@ -51,19 +56,31 @@ def _calculate_distance(pos1: Tuple[float, float, float], pos2: Tuple[float, flo
 
 
 def create_anomaly_at_position(cli: DroneSimClient, anomaly_type: str, position: Tuple[float, float, float]) -> Optional[Tuple]:
-    """Create anomaly at specified position"""
+    """Create anomaly at specified position with explicit view management"""
     x, y, z = position
     
-    # Save current camera posture
+    # Step 1: Stop camera to switch to player view
+    cli.stop_camera()
+    time.sleep(1.0)  # Wait for view switch
+    
+    # Step 2: Teleport player to anomaly center (sets invincible + invisible)
+    cli.teleport_player(x, y, z)
+    time.sleep(1.0)  # Wait for teleportation
+    
+    # Step 3: Switch back to camera mode
+    cam_id = cli.create_camera()
+    time.sleep(2.0)  # Wait for camera initialization
+    
+    # Step 4: Save current camera posture
     original_pose = cli.get_pose()
     if original_pose is None:
         return None
     
-    # Move camera to anomaly position temporarily to create the anomaly there
-    cli.set_posture(x, y, z + 2.0, -30.0, 0.0, 0.0)  # 2m above, looking down
+    # Step 5: Move camera to anomaly position temporarily to create the anomaly there
+    cli.set_posture(x, y, z + 2.0, 0.0, 0.0, 0.0)  # 2m above, no rotation change
     time.sleep(0.5)  # Wait for camera to move
     
-    # Create anomaly
+    # Step 6: Create anomaly
     if anomaly_type == "fire":
         result = cli.create_fire()
     elif anomaly_type == "fight":
@@ -72,7 +89,7 @@ def create_anomaly_at_position(cli: DroneSimClient, anomaly_type: str, position:
         print(f"Unknown anomaly type: {anomaly_type}")
         return None
     
-    # Restore original camera posture
+    # Step 7: Restore original camera posture
     if original_pose:
         ox, oy, oz, orx, ory, orz = original_pose
         cli.set_posture(ox, oy, oz, orx, ory, orz)
@@ -131,27 +148,29 @@ def run_single_verification(
     
     try:
         while steps < max_steps:
-            # Get current pose
+            # Get current pose with retry
             pose = cli.get_pose()
             if pose is None:
-                time.sleep(0.2)
-                pose = cli.get_pose()
-            if pose is None:
-                break
+                print(f"  [{steps}] Failed to get pose after retries, skipping step")
+                continue
             
             final_pose = pose
             
-            # Capture images
+            # Capture images with retry
             cap = cli.capture()
             if cap is None:
-                time.sleep(0.2)
-                cap = cli.capture()
-            if cap is None:
-                break
+                print(f"  [{steps}] Failed to capture images after retries, skipping step")
+                continue
             
             w, h, rgb_bytes, depth_bytes = cap
-            rgb_pil = rgb_bytes_to_pil(w, h, rgb_bytes)
-            depth_pil = depth_bytes_to_pil(w, h, depth_bytes)
+            
+            # Validate captured data before processing
+            try:
+                rgb_pil = rgb_bytes_to_pil(w, h, rgb_bytes)
+                depth_pil = depth_bytes_to_pil(w, h, depth_bytes)
+            except Exception as e:
+                print(f"  [{steps}] Failed to process captured images: {e}, skipping step")
+                continue
             
             # Generate action
             x, y, z, rx, ry, rz = pose
@@ -216,11 +235,10 @@ def run_single_verification(
     return result
 
 
-def print_summary(results: List[Dict]):
-    """Print verification summary"""
+def calculate_summary_stats(results: List[Dict]) -> Dict:
+    """Calculate summary statistics from results"""
     if not results:
-        print("\nNo results to summarize.")
-        return
+        return {}
     
     total = len(results)
     successful = sum(1 for r in results if r["success"])
@@ -234,6 +252,10 @@ def print_summary(results: List[Dict]):
     else:
         avg_steps = avg_efficiency = avg_distance = 0.0
     
+    # Calculate overall averages (including failed runs)
+    overall_avg_steps = sum(r["actual_steps"] for r in results) / total
+    overall_avg_efficiency = sum(r["path_efficiency"] for r in results) / total
+    
     # Group by anomaly type
     by_type = {}
     for r in results:
@@ -244,23 +266,62 @@ def print_summary(results: List[Dict]):
         if r["success"]:
             by_type[anomaly_type]["success"] += 1
     
+    # Calculate success rates by type
+    success_rates_by_type = {}
+    for anomaly_type, stats in by_type.items():
+        success_rates_by_type[anomaly_type] = {
+            "total": stats["total"],
+            "successful": stats["success"],
+            "success_rate": stats["success"] / stats["total"] if stats["total"] > 0 else 0.0
+        }
+    
+    return {
+        "total_samples": total,
+        "successful_samples": successful,
+        "failed_samples": total - successful,
+        "overall_success_rate": successful / total if total > 0 else 0.0,
+        "successful_runs_stats": {
+            "avg_steps": avg_steps,
+            "avg_path_efficiency": avg_efficiency,
+            "avg_final_distance": avg_distance
+        } if successful_results else None,
+        "overall_averages": {
+            "avg_steps": overall_avg_steps,
+            "avg_path_efficiency": overall_avg_efficiency
+        },
+        "by_anomaly_type": success_rates_by_type
+    }
+
+
+def print_summary(results: List[Dict]):
+    """Print verification summary"""
+    if not results:
+        print("\nNo results to summarize.")
+        return
+    
+    stats = calculate_summary_stats(results)
+    
     print(f"\n{'='*50}")
     print(f"VERIFICATION SUMMARY")
     print(f"{'='*50}")
-    print(f"Total samples: {total}")
-    print(f"Successful: {successful} ({successful/total*100:.1f}%)")
-    print(f"Failed: {total-successful} ({(total-successful)/total*100:.1f}%)")
+    print(f"Total samples: {stats['total_samples']}")
+    print(f"Successful: {stats['successful_samples']} ({stats['overall_success_rate']*100:.1f}%)")
+    print(f"Failed: {stats['failed_samples']} ({(1-stats['overall_success_rate'])*100:.1f}%)")
     
-    if successful_results:
+    if stats['successful_runs_stats']:
         print(f"\nSuccessful runs averages:")
-        print(f"  Steps: {avg_steps:.1f}")
-        print(f"  Path efficiency: {avg_efficiency:.2f}")
-        print(f"  Final distance: {avg_distance:.1f}m")
+        print(f"  Steps: {stats['successful_runs_stats']['avg_steps']:.1f}")
+        print(f"  Path efficiency: {stats['successful_runs_stats']['avg_path_efficiency']:.2f}")
+        print(f"  Final distance: {stats['successful_runs_stats']['avg_final_distance']:.1f}m")
+    
+    print(f"\nOverall averages (all runs):")
+    print(f"  Steps: {stats['overall_averages']['avg_steps']:.1f}")
+    print(f"  Path efficiency: {stats['overall_averages']['avg_path_efficiency']:.2f}")
     
     print(f"\nBy anomaly type:")
-    for anomaly_type, stats in by_type.items():
-        success_rate = stats["success"] / stats["total"] * 100
-        print(f"  {anomaly_type}: {stats['success']}/{stats['total']} ({success_rate:.1f}%)")
+    for anomaly_type, type_stats in stats['by_anomaly_type'].items():
+        success_rate = type_stats['success_rate'] * 100
+        print(f"  {anomaly_type}: {type_stats['successful']}/{type_stats['total']} ({success_rate:.1f}%)")
     
     print(f"{'='*50}")
 
@@ -275,16 +336,21 @@ def main():
         help="Model directory path"
     )
     parser.add_argument(
+        "--root_path",
+        default=None,
+        help="Root path for data files (overrides default and environment variable)"
+    )
+    parser.add_argument(
         "--verification_file",
-        default=str(_repo_root() / "data" / "verification" / "samples.jsonl"),
-        help="Verification samples file"
+        default=None,
+        help="Verification samples file (if not specified, uses root_path/data/verification/samples.jsonl)"
     )
     parser.add_argument(
         "--output_file",
-        default=str(_repo_root() / "data" / "verification" / "results.json"),
-        help="Results output file"
+        default=None,
+        help="Results output file (if not specified, uses root_path/data/verification/results.json)"
     )
-    parser.add_argument("--max_steps", type=int, default=200, help="Maximum steps per test")
+    parser.add_argument("--max_steps", type=int, default=150, help="Maximum steps per test")
     parser.add_argument("--sleep_s", type=float, default=3.0, help="Initial sleep time")
     parser.add_argument("--fov", type=float, default=None, help="Camera FOV")
     parser.add_argument("--forward_step", type=float, default=1.0, help="Forward step size")
@@ -293,6 +359,18 @@ def main():
     parser.add_argument("--sample_limit", type=int, default=-1, help="Limit number of samples to test (-1 for all)")
     
     args = parser.parse_args()
+    
+    # Determine root path
+    if args.root_path:
+        root_path = Path(args.root_path)
+    else:
+        root_path = _repo_root()
+    
+    # Set default file paths if not specified
+    if args.verification_file is None:
+        args.verification_file = str(root_path / "data" / "verification" / "samples.jsonl")
+    if args.output_file is None:
+        args.output_file = str(root_path / "data" / "verification" / "results.json")
     
     # Load verification samples
     verification_file = Path(args.verification_file)
@@ -355,14 +433,26 @@ def main():
         print(f"\nError during verification: {e}")
     finally:
         try:
+            # Stop camera to switch to player view for restoration
             cli.stop_camera()
+            time.sleep(1.0)
+            
+            # Restore player to normal state
+            cli.restore_player()
+            time.sleep(1.0)
+            
+            print("Player restored to normal state")
         except Exception:
             pass
     
     # Save results
     if results:
         output_file = Path(args.output_file)
-        _write_json(output_file, {
+        
+        # Calculate summary statistics
+        summary_stats = calculate_summary_stats(results)
+        
+        result_data = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "total_samples": len(samples),
             "completed_samples": len(results),
@@ -372,8 +462,11 @@ def main():
                 "down_step": args.down_step,
                 "yaw_step": args.yaw_step,
             },
+            "summary_statistics": summary_stats,
             "results": results
-        })
+        }
+        
+        _write_json(output_file, result_data)
         print(f"\nResults saved to: {output_file}")
         
         # Print summary
