@@ -676,7 +676,7 @@ static Vector3 find_good_start_position(Vector3 target, float min_distance = 50.
             }
             
             // 使用raycast检查从候选位置到目标是否有清晰视线
-            int raycast_handle = SHAPETEST::START_SHAPE_TEST_LOS_PROBE(
+            int raycast_handle = WORLDPROBE::_0x7EE9F5D83DD4F90E(
                 candidate_x, candidate_y, candidate_z,
                 target.x, target.y, target.z,
                 1, // 只检查世界几何体
@@ -686,19 +686,19 @@ static Vector3 find_good_start_position(Vector3 target, float min_distance = 50.
             
             // 等待raycast完成
             int result_ready = 0;
-            int hit = 0;
+            BOOL hit = FALSE;
             Vector3 hit_pos{}, hit_normal{};
-            Any hit_entity = 0;
+            Entity hit_entity = 0;
             
             // 等待raycast结果（最多等待几帧）
             for (int wait_frames = 0; wait_frames < 5; wait_frames++) {
-                result_ready = SHAPETEST::GET_SHAPE_TEST_RESULT(raycast_handle, &hit, &hit_pos, &hit_normal, &hit_entity);
+                result_ready = WORLDPROBE::_GET_RAYCAST_RESULT(raycast_handle, &hit, &hit_pos, &hit_normal, &hit_entity);
                 if (result_ready != 1) break; // 1表示还在处理中
                 WAIT(0);
             }
             
             // 如果raycast没有击中任何东西，说明视线清晰
-            if (result_ready == 2 && hit == 0) {
+            if (result_ready == 2 && hit == FALSE) {
                 Vector3 good_pos{};
                 good_pos.x = candidate_x;
                 good_pos.y = candidate_y;
