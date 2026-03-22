@@ -591,7 +591,7 @@ void ServerV2::handle_client() {
                 depth_ptr = nullptr;
             }
             
-            uint32_t hdr_len = sizeof(uint32_t) * 4 + static_cast<uint32_t>(rgb_size) + static_cast<uint32_t>(depth_size);
+            uint32_t hdr_len = sizeof(uint32_t) * 6 + static_cast<uint32_t>(rgb_size) + static_cast<uint32_t>(depth_size);
             
             // Validate total response size
             const uint32_t MAX_RESPONSE_SIZE = 100 * 1024 * 1024; // 100MB max response
@@ -643,9 +643,11 @@ void ServerV2::handle_client() {
             p32[1] = static_cast<uint32_t>(depth_size);
             p32[2] = static_cast<uint32_t>(w_rgb);
             p32[3] = static_cast<uint32_t>(h_rgb);
+            p32[4] = static_cast<uint32_t>(w_depth);
+            p32[5] = static_cast<uint32_t>(h_depth);
             
             // Copy image data with additional safety checks
-            unsigned char* p = resp.data() + sizeof(rh) + sizeof(uint32_t) * 4;
+            unsigned char* p = resp.data() + sizeof(rh) + sizeof(uint32_t) * 6;
             if (rgb_size > 0 && rgb_ptr != nullptr) {
                 try {
                     // Verify we have enough space in response buffer
