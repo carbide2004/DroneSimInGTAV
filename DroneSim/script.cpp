@@ -637,6 +637,14 @@ static float yaw_to_target_deg(const Vector3& from, const Vector3& to) {
     return yaw;
 }
 
+// Position3D版本的yaw计算函数
+static float yaw_to_target_deg(const Position3D& from, const Position3D& to) {
+    float dx = to.x - from.x;
+    float dy = to.y - from.y;
+    float yaw = atan2f(-dx, dy) * (180.0f / 3.14159f);
+    return yaw;
+}
+
 enum AutoCollectEvent {
     AUTO_EVENT_ACCIDENT = 1,
     AUTO_EVENT_FIRE = 2,
@@ -654,8 +662,23 @@ static void run_manual_collect(AutoCollectEvent event_type) {
     else create_accident_near_camera();
 }
 
+// 简单的3D位置结构体，替代可能有问题的Vector3
+struct Position3D {
+    float x, y, z;
+    Position3D() : x(0.0f), y(0.0f), z(0.0f) {}
+    Position3D(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
+    
+    // 计算到另一个位置的距离
+    float distance_to(const Position3D& other) const {
+        float dx = x - other.x;
+        float dy = y - other.y;
+        float dz = z - other.z;
+        return sqrtf(dx * dx + dy * dy + dz * dz);
+    }
+};
+
 // 改进的起始位置选择函数
-static Vector3 find_good_start_position(Vector3 target, float min_distance = 50.0f, float max_distance = 150.0f) {
+static Position3D find_good_start_position(Position3D target, float min_distance = 50.0f, float max_distance = 150.0f) {
     const int max_attempts = 16; // 尝试16个方向
     const float angle_step = 360.0f / max_attempts;
     
@@ -699,10 +722,7 @@ static Vector3 find_good_start_position(Vector3 target, float min_distance = 50.
             
             // 如果raycast没有击中任何东西，说明视线清晰
             if (result_ready == 2 && hit == FALSE) {
-                Vector3 good_pos{};
-                good_pos.x = candidate_x;
-                good_pos.y = candidate_y;
-                good_pos.z = candidate_z;
+                Position3D good_pos(candidate_x, candidate_y, candidate_z);
                 LOGD("script", "start: pos(" + std::to_string(good_pos.x) + "," + std::to_string(good_pos.y) + "," + std::to_string(good_pos.z) + 
                 ") target: (" + std::to_string(target.x) + "," + std::to_string(target.y) + "," + std::to_string(target.z) + ") dist=" + std::to_string(dist));
                 return good_pos;
@@ -712,10 +732,7 @@ static Vector3 find_good_start_position(Vector3 target, float min_distance = 50.
     
     // 如果没找到理想位置，返回默认位置
     LOGW("script", "Could not find clear line of sight, using fallback position");
-    Vector3 fallback{};
-    fallback.x = target.x + 100.0f;
-    fallback.y = target.y;
-    fallback.z = target.z + 20.0f;
+    Position3D fallback(target.x + 100.0f, target.y, target.z + 20.0f);
     return fallback;
 }
 
@@ -730,7 +747,7 @@ static void run_auto_collect(AutoCollectEvent event_type) {
     else if (event_type == AUTO_EVENT_FIGHT) task = "find the street fight";
     if (!g_recordingEnabled) start_recording_session(task);
 
-    Vector3 center{};
+    Position3D center;
     if (event_type == AUTO_EVENT_FIRE) {
         create_fire_near_camera();
         center.x = g_firePos[0]; center.y = g_firePos[1]; center.z = g_firePos[2];
@@ -741,13 +758,10 @@ static void run_auto_collect(AutoCollectEvent event_type) {
         create_accident_near_camera();
         center.x = g_accidentPos[0]; center.y = g_accidentPos[1]; center.z = g_accidentPos[2];
     }
-    Vector3 target{};
-    target.x = center.x;
-    target.y = center.y;
-    target.z = center.z + 5.0f;
+    Position3D target(center.x, center.y, center.z + 5.0f);
 
     // 使用改进的起始位置选择算法
-    Vector3 start_pos = find_good_start_position(target, 50.0f, 150.0f);
+    Position3D start_pos = find_good_start_position(target, 50.0f, 150.0f);
 
     Any cam = CAM::GET_RENDERING_CAM();
     CAM::SET_CAM_COORD(cam, start_pos.x, start_pos.y, start_pos.z);
@@ -757,12 +771,12 @@ static void run_auto_collect(AutoCollectEvent event_type) {
     bool reached = false;
     for (int step = 0; step < maxSteps; step++) {
         cam = CAM::GET_RENDERING_CAM();
-        Vector3 pos = CAM::GET_CAM_COORD(cam);
+        Vector3 cam_pos = CAM::GET_CAM_COORD(cam);
         Vector3 rot = CAM::GET_CAM_ROT(cam, 2);
-        float dx = target.x - pos.x;
-        float dy = target.y - pos.y;
-        float dz = target.z - pos.z;
-        float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+        
+        // 转换为Position3D进行计算
+        Position3D pos(cam_pos.x, cam_pos.y, cam_pos.z);
+        float dist = pos.distance_to(target);
         
         // 添加调试日志
         LOGD("script", std::string("Step ") + std::to_string(step) + ": pos(" + std::to_string(pos.x) + "," + std::to_string(pos.y) + "," + std::to_string(pos.z) + 
@@ -773,6 +787,10 @@ static void run_auto_collect(AutoCollectEvent event_type) {
             reached = true; 
             break; 
         }
+
+        float dx = target.x - pos.x;
+        float dy = target.y - pos.y;
+        float dz = target.z - pos.z;
 
         if (fabsf(dz) > STEPSIZE) {
             if (dz > 0.0f) {
