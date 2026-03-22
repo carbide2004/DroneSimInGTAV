@@ -888,14 +888,27 @@ void scriptMain()
             }
             else if (cmd == "GET_POSE")
             {
+                LOGD("script", "GET_POSE command received, starting processing");
                 Vector3 pos{}; Vector3 rot{};
                 Any cam = CAM::GET_RENDERING_CAM();
-                pos = CAM::GET_CAM_COORD(cam);
-                rot = CAM::GET_CAM_ROT(cam, 2);
-                g_pose[0]=pos.x; g_pose[1]=pos.y; g_pose[2]=pos.z;
-                g_pose[3]=rot.x; g_pose[4]=rot.y; g_pose[5]=rot.z;
-                g_poseReady = true;
-                LOGD("script", std::string("GET_POSE: ") + std::to_string(g_pose[0]) + " " + std::to_string(g_pose[1]) + " " + std::to_string(g_pose[2]) + " " + std::to_string(g_pose[3]) + " " + std::to_string(g_pose[4]) + " " + std::to_string(g_pose[5]));
+                LOGD("script", std::string("GET_POSE: Got camera handle: ") + std::to_string(cam));
+                
+                if (cam != 0) {
+                    pos = CAM::GET_CAM_COORD(cam);
+                    LOGD("script", std::string("GET_POSE: Got position: ") + std::to_string(pos.x) + "," + std::to_string(pos.y) + "," + std::to_string(pos.z));
+                    
+                    rot = CAM::GET_CAM_ROT(cam, 2);
+                    LOGD("script", std::string("GET_POSE: Got rotation: ") + std::to_string(rot.x) + "," + std::to_string(rot.y) + "," + std::to_string(rot.z));
+                    
+                    g_pose[0]=pos.x; g_pose[1]=pos.y; g_pose[2]=pos.z;
+                    g_pose[3]=rot.x; g_pose[4]=rot.y; g_pose[5]=rot.z;
+                    g_poseReady = true;
+                    LOGD("script", std::string("GET_POSE completed successfully: ") + std::to_string(g_pose[0]) + " " + std::to_string(g_pose[1]) + " " + std::to_string(g_pose[2]) + " " + std::to_string(g_pose[3]) + " " + std::to_string(g_pose[4]) + " " + std::to_string(g_pose[5]));
+                } else {
+                    LOGE("script", "GET_POSE: No active camera found (cam handle is 0)");
+                    // 即使失败也设置g_poseReady，避免server_v2无限等待
+                    g_poseReady = true;
+                }
             }
             else if (cmd.rfind("MOVE ", 0) == 0)
             {
