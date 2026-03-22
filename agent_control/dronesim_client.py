@@ -21,6 +21,8 @@ TYPE_SET_RECORDING_SESSION = 13
 TYPE_CREATE_FIRE = 14
 TYPE_CREATE_FIGHT = 15
 TYPE_SET_POSTURE = 16
+TYPE_TELEPORT_PLAYER = 17
+TYPE_RESTORE_PLAYER = 18
 
 def _pack_header(t, req_id, length):
     return struct.pack("4sBBBBQI", MAGIC, VERSION, t, 0, 0, req_id, length)
@@ -184,6 +186,19 @@ class DroneSimClient:
             return None
         x, y, z = struct.unpack("fff", p[:12])
         return x, y, z
+    
+    def teleport_player(self, x, y, z):
+        """Teleport player character to anomaly center with invincibility and invisibility"""
+        payload = struct.pack("fff", x, y, z)
+        s = self._send(TYPE_TELEPORT_PLAYER, 17, payload)
+        self._recv(s)
+        time.sleep(1.5)  # Longer wait for view switching and teleportation
+
+    def restore_player(self):
+        """Restore player to normal state after verification"""
+        s = self._send(TYPE_RESTORE_PLAYER, 18)
+        self._recv(s)
+        time.sleep(1.5)  # Longer wait for view switching and restoration
 
 def visualize(rgb_bytes, depth_bytes, w, h):
     try:
