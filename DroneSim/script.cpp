@@ -718,9 +718,9 @@ static void run_auto_collect(AutoCollectEvent event_type) {
         float dy = target.y - pos.y;
         float dz = target.z - pos.z;
         float dist = sqrtf(dx * dx + dy * dy + dz * dz);
-        if (dist <= 10.0f) { reached = true; break; }
+        if (dist <= STEPSIZE * 2.0f) { reached = true; break; }
 
-        if (fabsf(dz) > 1.0f) {
+        if (fabsf(dz) > STEPSIZE) {
             if (dz > 0.0f) {
                 record_step("AUTO_UP", 0.0f, 0.0f, STEPSIZE, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(0.0f, 0.0f, STEPSIZE);
