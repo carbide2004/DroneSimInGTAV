@@ -631,7 +631,7 @@ static float quantize_deg(float a, float step) {
 }
 
 // Position3D版本的yaw计算函数
-static float yaw_to_target_deg(const Position3D& from, const Position3D& to) {
+static float yaw_to_target_deg(Position3D from, Position3D to) {
     float dx = to.x - from.x;
     float dy = to.y - from.y;
     float yaw = atan2f(-dx, dy) * (180.0f / 3.14159f);
@@ -664,7 +664,7 @@ public:
     Position3D(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
     
     // 计算到另一个位置的距离
-    float distance_to(const Position3D& other) const {
+    float distance_to(Position3D other) const {
         float dx = x - other.x;
         float dy = y - other.y;
         float dz = z - other.z;
