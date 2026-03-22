@@ -667,12 +667,12 @@ static Vector3 find_good_start_position(Vector3 target, float min_distance = 50.
         for (float dist = min_distance; dist <= max_distance; dist += 25.0f) {
             float candidate_x = target.x + cosf(rad) * dist;
             float candidate_y = target.y + sinf(rad) * dist;
-            float candidate_z = target.z + 20.0f; // 起始高度比目标高20米
+            float candidate_z = target.z + 10.0f; // 起始高度比目标高20米
             
             // 获取地面高度
             float ground_z = candidate_z;
             if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(candidate_x, candidate_y, candidate_z, &ground_z, false)) {
-                candidate_z = ground_z + 15.0f; // 地面上方15米
+                candidate_z = ground_z + 10.0f; // 地面上方15米
             }
             
             // 使用raycast检查从候选位置到目标是否有清晰视线
