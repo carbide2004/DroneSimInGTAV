@@ -630,13 +630,6 @@ static float quantize_deg(float a, float step) {
     return roundf(a / step) * step;
 }
 
-static float yaw_to_target_deg(const Vector3& from, const Vector3& to) {
-    float dx = to.x - from.x;
-    float dy = to.y - from.y;
-    float yaw = atan2f(-dx, dy) * (180.0f / 3.14159f);
-    return yaw;
-}
-
 // Position3D版本的yaw计算函数
 static float yaw_to_target_deg(const Position3D& from, const Position3D& to) {
     float dx = to.x - from.x;
@@ -662,9 +655,11 @@ static void run_manual_collect(AutoCollectEvent event_type) {
     else create_accident_near_camera();
 }
 
-// 简单的3D位置结构体，替代可能有问题的Vector3
-struct Position3D {
+// 简单的3D位置类，替代可能有问题的Vector3
+class Position3D {
+public:
     float x, y, z;
+    
     Position3D() : x(0.0f), y(0.0f), z(0.0f) {}
     Position3D(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
     
