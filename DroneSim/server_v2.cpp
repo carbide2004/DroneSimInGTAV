@@ -65,19 +65,42 @@ bool ServerV2::read_exact(asio::ip::tcp::socket& s, void* buf, size_t len) {
 }
 
 void ServerV2::handle_client() {
-    MsgHeader hdr{};
-    if (!read_exact(socket_, &hdr.magic[0], 4)) { socket_.close(); start_accept(); return; }
-    if (!read_exact(socket_, &hdr.version, 1)) { socket_.close(); start_accept(); return; }
-    if (!read_exact(socket_, &hdr.type, 1)) { socket_.close(); start_accept(); return; }
-    if (!read_exact(socket_, &hdr.flags, 1)) { socket_.close(); start_accept(); return; }
-    if (!read_exact(socket_, &hdr.reserved, 1)) { socket_.close(); start_accept(); return; }
-    if (!read_exact(socket_, &hdr.request_id, 8)) { socket_.close(); start_accept(); return; }
-    if (!read_exact(socket_, &hdr.length, 4)) { socket_.close(); start_accept(); return; }
-    if (std::memcmp(hdr.magic, "DSV2", 4) != 0) { socket_.close(); start_accept(); return; }
-    std::vector<unsigned char> payload(hdr.length);
-    if (hdr.length) {
-        if (!read_exact(socket_, payload.data(), hdr.length)) { socket_.close(); start_accept(); return; }
-    }
+    try {
+        MsgHeader hdr{};
+        if (!read_exact(socket_, &hdr.magic[0], 4)) { socket_.close(); start_accept(); return; }
+        if (!read_exact(socket_, &hdr.version, 1)) { socket_.close(); start_accept(); return; }
+        if (!read_exact(socket_, &hdr.type, 1)) { socket_.close(); start_accept(); return; }
+        if (!read_exact(socket_, &hdr.flags, 1)) { socket_.close(); start_accept(); return; }
+        if (!read_exact(socket_, &hdr.reserved, 1)) { socket_.close(); start_accept(); return; }
+        if (!read_exact(socket_, &hdr.request_id, 8)) { socket_.close(); start_accept(); return; }
+        if (!read_exact(socket_, &hdr.length, 4)) { socket_.close(); start_accept(); return; }
+        if (std::memcmp(hdr.magic, "DSV2", 4) != 0) { socket_.close(); start_accept(); return; }
+        
+        // Validate payload length to prevent excessive memory allocation
+        const uint32_t MAX_PAYLOAD_SIZE = 10 * 1024 * 1024; // 10MB max
+        if (hdr.length > MAX_PAYLOAD_SIZE) {
+            LOGW("server_v2", std::string("Payload too large: ") + std::to_string(hdr.length) + " bytes");
+            socket_.close(); 
+            start_accept(); 
+            return;
+        }
+        
+        std::vector<unsigned char> payload;
+        if (hdr.length > 0) {
+            try {
+                payload.resize(hdr.length);
+                if (!read_exact(socket_, payload.data(), hdr.length)) { 
+                    socket_.close(); 
+                    start_accept(); 
+                    return; 
+                }
+            } catch (const std::exception& e) {
+                LOGE("server_v2", std::string("Failed to allocate payload buffer: ") + e.what());
+                socket_.close(); 
+                start_accept(); 
+                return;
+            }
+        }
 
     std::vector<unsigned char> resp;
     switch (hdr.type) {
@@ -99,12 +122,20 @@ void ServerV2::handle_client() {
         }
         case MSG_MOVE: {
             if (hdr.length >= sizeof(float) * 3) {
-                float dx = *reinterpret_cast<float*>(&payload[0]);
-                float dy = *reinterpret_cast<float*>(&payload[4]);
-                float dz = *reinterpret_cast<float*>(&payload[8]);
-                std::string s = std::string("MOVE ") + std::to_string(dx) + " " + std::to_string(dy) + " " + std::to_string(dz);
-                enqueue_command(s);
-                LOGD("server_v2", std::string("Enqueue ") + s);
+                // Validate payload alignment for float access
+                if (payload.size() >= sizeof(float) * 3 && 
+                    reinterpret_cast<uintptr_t>(payload.data()) % alignof(float) == 0) {
+                    float dx = *reinterpret_cast<float*>(&payload[0]);
+                    float dy = *reinterpret_cast<float*>(&payload[4]);
+                    float dz = *reinterpret_cast<float*>(&payload[8]);
+                    std::string s = std::string("MOVE ") + std::to_string(dx) + " " + std::to_string(dy) + " " + std::to_string(dz);
+                    enqueue_command(s);
+                    LOGD("server_v2", std::string("Enqueue ") + s);
+                } else {
+                    LOGW("server_v2", "MSG_MOVE: Invalid payload alignment or size");
+                }
+            } else {
+                LOGW("server_v2", "MSG_MOVE: Insufficient payload length");
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_MOVE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
@@ -120,12 +151,20 @@ void ServerV2::handle_client() {
         }
         case MSG_ROTATE: {
             if (hdr.length >= sizeof(float) * 3) {
-                float rx = *reinterpret_cast<float*>(&payload[0]);
-                float ry = *reinterpret_cast<float*>(&payload[4]);
-                float rz = *reinterpret_cast<float*>(&payload[8]);
-                std::string s = std::string("ROTATE ") + std::to_string(rx) + " " + std::to_string(ry) + " " + std::to_string(rz);
-                enqueue_command(s);
-                LOGD("server_v2", std::string("Enqueue ") + s);
+                // Validate payload alignment for float access
+                if (payload.size() >= sizeof(float) * 3 && 
+                    reinterpret_cast<uintptr_t>(payload.data()) % alignof(float) == 0) {
+                    float rx = *reinterpret_cast<float*>(&payload[0]);
+                    float ry = *reinterpret_cast<float*>(&payload[4]);
+                    float rz = *reinterpret_cast<float*>(&payload[8]);
+                    std::string s = std::string("ROTATE ") + std::to_string(rx) + " " + std::to_string(ry) + " " + std::to_string(rz);
+                    enqueue_command(s);
+                    LOGD("server_v2", std::string("Enqueue ") + s);
+                } else {
+                    LOGW("server_v2", "MSG_ROTATE: Invalid payload alignment or size");
+                }
+            } else {
+                LOGW("server_v2", "MSG_ROTATE: Insufficient payload length");
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_ROTATE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
@@ -141,9 +180,17 @@ void ServerV2::handle_client() {
         }
         case MSG_SET_FOV: {
             if (hdr.length >= sizeof(float)) {
-                float fov = *reinterpret_cast<float*>(&payload[0]);
-                std::string s = std::string("SETFOV:") + std::to_string(fov);
-                enqueue_command(s);
+                // Validate payload alignment for float access
+                if (payload.size() >= sizeof(float) && 
+                    reinterpret_cast<uintptr_t>(payload.data()) % alignof(float) == 0) {
+                    float fov = *reinterpret_cast<float*>(&payload[0]);
+                    std::string s = std::string("SETFOV:") + std::to_string(fov);
+                    enqueue_command(s);
+                } else {
+                    LOGW("server_v2", "MSG_SET_FOV: Invalid payload alignment or size");
+                }
+            } else {
+                LOGW("server_v2", "MSG_SET_FOV: Insufficient payload length");
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_FOV; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
@@ -193,11 +240,19 @@ void ServerV2::handle_client() {
         }
         case MSG_SET_TIME: {
             if (hdr.length >= 12) {
-                int h = *reinterpret_cast<int*>(&payload[0]);
-                int m = *reinterpret_cast<int*>(&payload[4]);
-                int s = *reinterpret_cast<int*>(&payload[8]);
-                std::string sCmd = std::string("SET_TIME ") + std::to_string(h) + " " + std::to_string(m) + " " + std::to_string(s);
-                enqueue_command(sCmd);
+                // Validate payload alignment for int access
+                if (payload.size() >= 12 && 
+                    reinterpret_cast<uintptr_t>(payload.data()) % alignof(int) == 0) {
+                    int h = *reinterpret_cast<int*>(&payload[0]);
+                    int m = *reinterpret_cast<int*>(&payload[4]);
+                    int s = *reinterpret_cast<int*>(&payload[8]);
+                    std::string sCmd = std::string("SET_TIME ") + std::to_string(h) + " " + std::to_string(m) + " " + std::to_string(s);
+                    enqueue_command(sCmd);
+                } else {
+                    LOGW("server_v2", "MSG_SET_TIME: Invalid payload alignment or size");
+                }
+            } else {
+                LOGW("server_v2", "MSG_SET_TIME: Insufficient payload length");
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_TIME; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
@@ -405,15 +460,23 @@ void ServerV2::handle_client() {
         }
         case MSG_SET_POSTURE: {
             if (hdr.length >= sizeof(float) * 6) {
-                float x = *reinterpret_cast<float*>(&payload[0]);
-                float y = *reinterpret_cast<float*>(&payload[4]);
-                float z = *reinterpret_cast<float*>(&payload[8]);
-                float rx = *reinterpret_cast<float*>(&payload[12]);
-                float ry = *reinterpret_cast<float*>(&payload[16]);
-                float rz = *reinterpret_cast<float*>(&payload[20]);
-                std::string s = std::string("SET_POSTURE ") + std::to_string(x) + " " + std::to_string(y) + " " + std::to_string(z) + " " + std::to_string(rx) + " " + std::to_string(ry) + " " + std::to_string(rz);
-                enqueue_command(s);
-                LOGD("server_v2", std::string("Enqueue ") + s);
+                // Validate payload alignment for float access
+                if (payload.size() >= sizeof(float) * 6 && 
+                    reinterpret_cast<uintptr_t>(payload.data()) % alignof(float) == 0) {
+                    float x = *reinterpret_cast<float*>(&payload[0]);
+                    float y = *reinterpret_cast<float*>(&payload[4]);
+                    float z = *reinterpret_cast<float*>(&payload[8]);
+                    float rx = *reinterpret_cast<float*>(&payload[12]);
+                    float ry = *reinterpret_cast<float*>(&payload[16]);
+                    float rz = *reinterpret_cast<float*>(&payload[20]);
+                    std::string s = std::string("SET_POSTURE ") + std::to_string(x) + " " + std::to_string(y) + " " + std::to_string(z) + " " + std::to_string(rx) + " " + std::to_string(ry) + " " + std::to_string(rz);
+                    enqueue_command(s);
+                    LOGD("server_v2", std::string("Enqueue ") + s);
+                } else {
+                    LOGW("server_v2", "MSG_SET_POSTURE: Invalid payload alignment or size");
+                }
+            } else {
+                LOGW("server_v2", "MSG_SET_POSTURE: Insufficient payload length");
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_POSTURE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
@@ -429,12 +492,20 @@ void ServerV2::handle_client() {
         }
         case MSG_TELEPORT_PLAYER: {
             if (hdr.length >= sizeof(float) * 3) {
-                float x = *reinterpret_cast<float*>(&payload[0]);
-                float y = *reinterpret_cast<float*>(&payload[4]);
-                float z = *reinterpret_cast<float*>(&payload[8]);
-                std::string s = std::string("TELEPORT_PLAYER ") + std::to_string(x) + " " + std::to_string(y) + " " + std::to_string(z);
-                enqueue_command(s);
-                LOGD("server_v2", std::string("Enqueue ") + s);
+                // Validate payload alignment for float access
+                if (payload.size() >= sizeof(float) * 3 && 
+                    reinterpret_cast<uintptr_t>(payload.data()) % alignof(float) == 0) {
+                    float x = *reinterpret_cast<float*>(&payload[0]);
+                    float y = *reinterpret_cast<float*>(&payload[4]);
+                    float z = *reinterpret_cast<float*>(&payload[8]);
+                    std::string s = std::string("TELEPORT_PLAYER ") + std::to_string(x) + " " + std::to_string(y) + " " + std::to_string(z);
+                    enqueue_command(s);
+                    LOGD("server_v2", std::string("Enqueue ") + s);
+                } else {
+                    LOGW("server_v2", "MSG_TELEPORT_PLAYER: Invalid payload alignment or size");
+                }
+            } else {
+                LOGW("server_v2", "MSG_TELEPORT_PLAYER: Insufficient payload length");
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_TELEPORT_PLAYER; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
@@ -469,32 +540,166 @@ void ServerV2::handle_client() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 tries++;
             }
-            void* rgb_ptr = nullptr; int rgb_size = export_get_color_buffer(&rgb_ptr);
-            void* depth_ptr = nullptr; int depth_size = export_get_depth_buffer(&depth_ptr);
+            
+            // Get buffer pointers and sizes
+            void* rgb_ptr = nullptr; 
+            int rgb_size = export_get_color_buffer(&rgb_ptr);
+            void* depth_ptr = nullptr; 
+            int depth_size = export_get_depth_buffer(&depth_ptr);
+            
             LOGD("server_v2", std::string("Capture: rgb_size=") + std::to_string(rgb_size) + ", depth_size=" + std::to_string(depth_size));
+            
+            // Validate buffer sizes to prevent crashes
+            const int MAX_BUFFER_SIZE = 50 * 1024 * 1024; // 50MB max per buffer
+            if (rgb_size < 0 || rgb_size > MAX_BUFFER_SIZE) {
+                LOGW("server_v2", std::string("Invalid RGB buffer size: ") + std::to_string(rgb_size));
+                rgb_size = 0;
+                rgb_ptr = nullptr;
+            }
+            if (depth_size < 0 || depth_size > MAX_BUFFER_SIZE) {
+                LOGW("server_v2", std::string("Invalid depth buffer size: ") + std::to_string(depth_size));
+                depth_size = 0;
+                depth_ptr = nullptr;
+            }
+            
+            // Validate pointers
+            if (rgb_size > 0 && rgb_ptr == nullptr) {
+                LOGW("server_v2", "RGB buffer pointer is null despite non-zero size");
+                rgb_size = 0;
+            }
+            if (depth_size > 0 && depth_ptr == nullptr) {
+                LOGW("server_v2", "Depth buffer pointer is null despite non-zero size");
+                depth_size = 0;
+            }
+            
             int w_rgb = export_get_last_color_width();
             int h_rgb = export_get_last_color_height();
             int w_depth = export_get_last_depth_width();
             int h_depth = export_get_last_depth_height();
-            uint32_t hdr_len = sizeof(uint32_t) * 4 + rgb_size + depth_size;
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CAPTURE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = hdr_len;
-            resp.resize(sizeof(rh) + hdr_len);
-            std::memcpy(resp.data(), &rh.magic[0], 4);
-            std::memcpy(resp.data() + 4, &rh.version, 1);
-            std::memcpy(resp.data() + 5, &rh.type, 1);
-            std::memcpy(resp.data() + 6, &rh.flags, 1);
-            std::memcpy(resp.data() + 7, &rh.reserved, 1);
-            std::memcpy(resp.data() + 8, &rh.request_id, 8);
-            std::memcpy(resp.data() + 16, &rh.length, 4);
-            uint32_t* p32 = reinterpret_cast<uint32_t*>(resp.data() + 20);
+            
+            // Validate dimensions
+            if (w_rgb <= 0 || h_rgb <= 0 || w_rgb > 10000 || h_rgb > 10000) {
+                LOGW("server_v2", std::string("Invalid RGB dimensions: ") + std::to_string(w_rgb) + "x" + std::to_string(h_rgb));
+                w_rgb = h_rgb = 0;
+                rgb_size = 0;
+                rgb_ptr = nullptr;
+            }
+            if (w_depth <= 0 || h_depth <= 0 || w_depth > 10000 || h_depth > 10000) {
+                LOGW("server_v2", std::string("Invalid depth dimensions: ") + std::to_string(w_depth) + "x" + std::to_string(h_depth));
+                w_depth = h_depth = 0;
+                depth_size = 0;
+                depth_ptr = nullptr;
+            }
+            
+            uint32_t hdr_len = sizeof(uint32_t) * 4 + static_cast<uint32_t>(rgb_size) + static_cast<uint32_t>(depth_size);
+            
+            // Validate total response size
+            const uint32_t MAX_RESPONSE_SIZE = 100 * 1024 * 1024; // 100MB max response
+            if (hdr_len > MAX_RESPONSE_SIZE) {
+                LOGE("server_v2", std::string("Response too large: ") + std::to_string(hdr_len) + " bytes");
+                // Send empty response
+                MsgHeader rh{}; 
+                std::memcpy(rh.magic, "DSV2", 4); 
+                rh.version = hdr.version; 
+                rh.type = MSG_CAPTURE; 
+                rh.flags = 0; 
+                rh.reserved = 0; 
+                rh.request_id = hdr.request_id; 
+                rh.length = 0;
+                resp.resize(sizeof(rh));
+                std::memcpy(resp.data(), &rh, sizeof(rh));
+                write_response(resp);
+                return;
+            }
+            
+            // Create response
+            MsgHeader rh{}; 
+            std::memcpy(rh.magic, "DSV2", 4); 
+            rh.version = hdr.version; 
+            rh.type = MSG_CAPTURE; 
+            rh.flags = 0; 
+            rh.reserved = 0; 
+            rh.request_id = hdr.request_id; 
+            rh.length = hdr_len;
+            
+            try {
+                resp.resize(sizeof(rh) + hdr_len);
+            } catch (const std::exception& e) {
+                LOGE("server_v2", std::string("Failed to allocate response buffer: ") + e.what());
+                // Send empty response
+                rh.length = 0;
+                resp.resize(sizeof(rh));
+                std::memcpy(resp.data(), &rh, sizeof(rh));
+                write_response(resp);
+                return;
+            }
+            
+            // Copy header
+            std::memcpy(resp.data(), &rh, sizeof(rh));
+            
+            // Copy payload header (dimensions and sizes)
+            uint32_t* p32 = reinterpret_cast<uint32_t*>(resp.data() + sizeof(rh));
             p32[0] = static_cast<uint32_t>(rgb_size);
             p32[1] = static_cast<uint32_t>(depth_size);
             p32[2] = static_cast<uint32_t>(w_rgb);
             p32[3] = static_cast<uint32_t>(h_rgb);
-            unsigned char* p = resp.data() + 20 + sizeof(uint32_t) * 4;
-            if (rgb_size > 0) std::memcpy(p, rgb_ptr, rgb_size);
+            
+            // Copy image data with additional safety checks
+            unsigned char* p = resp.data() + sizeof(rh) + sizeof(uint32_t) * 4;
+            if (rgb_size > 0 && rgb_ptr != nullptr) {
+                try {
+                    // Verify we have enough space in response buffer
+                    if (p + rgb_size <= resp.data() + resp.size()) {
+                        std::memcpy(p, rgb_ptr, rgb_size);
+                    } else {
+                        LOGE("server_v2", "RGB buffer copy would exceed response buffer bounds");
+                        // Send empty response instead
+                        MsgHeader empty_rh{}; 
+                        std::memcpy(empty_rh.magic, "DSV2", 4); 
+                        empty_rh.version = hdr.version; 
+                        empty_rh.type = MSG_CAPTURE; 
+                        empty_rh.flags = 0; 
+                        empty_rh.reserved = 0; 
+                        empty_rh.request_id = hdr.request_id; 
+                        empty_rh.length = 0;
+                        resp.resize(sizeof(empty_rh));
+                        std::memcpy(resp.data(), &empty_rh, sizeof(empty_rh));
+                        write_response(resp);
+                        return;
+                    }
+                } catch (const std::exception& e) {
+                    LOGE("server_v2", std::string("RGB buffer copy failed: ") + e.what());
+                    return;
+                }
+            }
             p += rgb_size;
-            if (depth_size > 0) std::memcpy(p, depth_ptr, depth_size);
+            if (depth_size > 0 && depth_ptr != nullptr) {
+                try {
+                    // Verify we have enough space in response buffer
+                    if (p + depth_size <= resp.data() + resp.size()) {
+                        std::memcpy(p, depth_ptr, depth_size);
+                    } else {
+                        LOGE("server_v2", "Depth buffer copy would exceed response buffer bounds");
+                        // Send empty response instead
+                        MsgHeader empty_rh{}; 
+                        std::memcpy(empty_rh.magic, "DSV2", 4); 
+                        empty_rh.version = hdr.version; 
+                        empty_rh.type = MSG_CAPTURE; 
+                        empty_rh.flags = 0; 
+                        empty_rh.reserved = 0; 
+                        empty_rh.request_id = hdr.request_id; 
+                        empty_rh.length = 0;
+                        resp.resize(sizeof(empty_rh));
+                        std::memcpy(resp.data(), &empty_rh, sizeof(empty_rh));
+                        write_response(resp);
+                        return;
+                    }
+                } catch (const std::exception& e) {
+                    LOGE("server_v2", std::string("Depth buffer copy failed: ") + e.what());
+                    return;
+                }
+            }
+            
             write_response(resp);
             return;
         }
@@ -502,12 +707,45 @@ void ServerV2::handle_client() {
             socket_.close(); start_accept(); return;
         }
     }
+    
+    } catch (const std::exception& e) {
+        LOGE("server_v2", std::string("Exception in handle_client: ") + e.what());
+        try {
+            socket_.close();
+        } catch (...) {
+            // Ignore close errors
+        }
+        start_accept();
+    } catch (...) {
+        LOGE("server_v2", "Unknown exception in handle_client");
+        try {
+            socket_.close();
+        } catch (...) {
+            // Ignore close errors
+        }
+        start_accept();
+    }
 }
 
 void ServerV2::write_response(const std::vector<unsigned char>& data) {
-    system::error_code ec;
-    asio::write(socket_, asio::buffer(data), ec);
-    socket_.close();
+    try {
+        system::error_code ec;
+        asio::write(socket_, asio::buffer(data), ec);
+        if (ec) {
+            LOGW("server_v2", std::string("Write error: ") + ec.message());
+        }
+    } catch (const std::exception& e) {
+        LOGE("server_v2", std::string("Write exception: ") + e.what());
+    } catch (...) {
+        LOGE("server_v2", "Unknown write exception");
+    }
+    
+    try {
+        socket_.close();
+    } catch (...) {
+        // Ignore close errors
+    }
+    
     start_accept();
 }
 
