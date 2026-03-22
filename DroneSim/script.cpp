@@ -630,14 +630,6 @@ static float quantize_deg(float a, float step) {
     return roundf(a / step) * step;
 }
 
-// Position3D版本的yaw计算函数
-static float yaw_to_target_deg(Position3D from, Position3D to) {
-    float dx = to.x - from.x;
-    float dy = to.y - from.y;
-    float yaw = atan2f(-dx, dy) * (180.0f / 3.14159f);
-    return yaw;
-}
-
 enum AutoCollectEvent {
     AUTO_EVENT_ACCIDENT = 1,
     AUTO_EVENT_FIRE = 2,
@@ -671,6 +663,13 @@ public:
         return sqrtf(dx * dx + dy * dy + dz * dz);
     }
 };
+
+static float yaw_to_target_deg(Position3D from, Position3D to) {
+    float dx = to.x - from.x;
+    float dy = to.y - from.y;
+    float yaw = atan2f(-dx, dy) * (180.0f / 3.14159f);
+    return yaw;
+}
 
 // 改进的起始位置选择函数
 static Position3D find_good_start_position(Position3D target, float min_distance = 50.0f, float max_distance = 150.0f) {

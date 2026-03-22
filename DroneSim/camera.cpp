@@ -59,6 +59,7 @@ void moveCameraDelta(float dx, float dy, float dz)
         camNewPos.z += dz * cameraSpeedFactor;
     }
     CAM::SET_CAM_COORD(cameraHandle, camNewPos.x, camNewPos.y, camNewPos.z);
+	CAM::SET_CAM_ROT(cameraHandle, camRot.x, camRot.y, camRot.z, 2);
 }
 
 void rotateCameraDelta(float rx, float ry, float rz)
