@@ -779,6 +779,15 @@ static void run_auto_collect(AutoCollectEvent event_type) {
     CAM::SET_CAM_COORD(cam, start_pos.x, start_pos.y, start_pos.z);
     float yaw = quantize_deg(yaw_to_target_deg(start_pos, target), YAW_STEPSIZE);
     CAM::SET_CAM_ROT(cam, 0.0f, 0.0f, yaw, 2);
+    
+    // 等待相机位置稳定，然后获取实际位置
+    WAIT(100);
+    Vector3 actual_cam_pos = CAM::GET_CAM_COORD(cam);
+    Position3D actual_start_pos(actual_cam_pos.x, actual_cam_pos.y, actual_cam_pos.z);
+    
+    LOGD("script", "Intended start: (" + std::to_string(start_pos.x) + "," + std::to_string(start_pos.y) + "," + std::to_string(start_pos.z) + 
+         ") Actual start: (" + std::to_string(actual_start_pos.x) + "," + std::to_string(actual_start_pos.y) + "," + std::to_string(actual_start_pos.z) + ")");
+    
     int maxSteps = 50;
     bool reached = false;
     for (int step = 0; step < maxSteps; step++) {
