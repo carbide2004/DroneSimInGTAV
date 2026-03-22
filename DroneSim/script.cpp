@@ -846,6 +846,13 @@ void scriptMain()
 
         std::string cmd;
         if (!try_dequeue_command(cmd)) { 
+            // 添加心跳日志，确认主循环在运行
+            static int heartbeat_counter = 0;
+            heartbeat_counter++;
+            if (heartbeat_counter % 1000 == 0) { // 每1000次循环记录一次
+                LOGD("script", std::string("Script main loop heartbeat: ") + std::to_string(heartbeat_counter) + ", queue size: " + std::to_string(command_queue_size()));
+            }
+            
             // Maintain fire effects during verification
             maintain_fire();
             WAIT(0); 
