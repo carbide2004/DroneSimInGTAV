@@ -654,6 +654,70 @@ static void run_manual_collect(AutoCollectEvent event_type) {
     else create_accident_near_camera();
 }
 
+// 改进的起始位置选择函数
+static Vector3 find_good_start_position(Vector3 target, float min_distance = 50.0f, float max_distance = 150.0f) {
+    const int max_attempts = 16; // 尝试16个方向
+    const float angle_step = 360.0f / max_attempts;
+    
+    for (int attempt = 0; attempt < max_attempts; attempt++) {
+        float angle = angle_step * attempt;
+        float rad = angle * (3.14159f / 180.0f);
+        
+        // 在不同距离上尝试
+        for (float dist = min_distance; dist <= max_distance; dist += 25.0f) {
+            float candidate_x = target.x + cosf(rad) * dist;
+            float candidate_y = target.y + sinf(rad) * dist;
+            float candidate_z = target.z + 20.0f; // 起始高度比目标高20米
+            
+            // 获取地面高度
+            float ground_z = candidate_z;
+            if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(candidate_x, candidate_y, candidate_z, &ground_z, false)) {
+                candidate_z = ground_z + 15.0f; // 地面上方15米
+            }
+            
+            // 使用raycast检查从候选位置到目标是否有清晰视线
+            int raycast_handle = SHAPETEST::START_SHAPE_TEST_LOS_PROBE(
+                candidate_x, candidate_y, candidate_z,
+                target.x, target.y, target.z,
+                1, // 只检查世界几何体
+                0, // 忽略实体
+                4  // 标准碰撞检测
+            );
+            
+            // 等待raycast完成
+            int result_ready = 0;
+            int hit = 0;
+            Vector3 hit_pos{}, hit_normal{};
+            Any hit_entity = 0;
+            
+            // 等待raycast结果（最多等待几帧）
+            for (int wait_frames = 0; wait_frames < 5; wait_frames++) {
+                result_ready = SHAPETEST::GET_SHAPE_TEST_RESULT(raycast_handle, &hit, &hit_pos, &hit_normal, &hit_entity);
+                if (result_ready != 1) break; // 1表示还在处理中
+                WAIT(0);
+            }
+            
+            // 如果raycast没有击中任何东西，说明视线清晰
+            if (result_ready == 2 && hit == 0) {
+                Vector3 good_pos{};
+                good_pos.x = candidate_x;
+                good_pos.y = candidate_y;
+                good_pos.z = candidate_z;
+                LOGD("script", std::string("Found good start position at distance ") + std::to_string(dist) + "m, angle " + std::to_string(angle) + "°");
+                return good_pos;
+            }
+        }
+    }
+    
+    // 如果没找到理想位置，返回默认位置
+    LOGW("script", "Could not find clear line of sight, using fallback position");
+    Vector3 fallback{};
+    fallback.x = target.x + 100.0f;
+    fallback.y = target.y;
+    fallback.z = target.z + 20.0f;
+    return fallback;
+}
+
 static void run_auto_collect(AutoCollectEvent event_type) {
     static bool active = false;
     if (active) return;
@@ -681,34 +745,14 @@ static void run_auto_collect(AutoCollectEvent event_type) {
     target.y = center.y;
     target.z = center.z + 5.0f;
 
-    Vector3 centerNode{}; float centerHeading = 0.0f;
-    bool okCenterNode = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(center.x, center.y, center.z, &centerNode, &centerHeading, 1, 3.0, 0);
-    float rad = (okCenterNode ? centerHeading : 0.0f) * (3.14159f / 180.0f);
-    float dirx = -sinf(rad);
-    float diry = cosf(rad);
-    float startDist = 100.0f;
-    float candx = center.x - dirx * startDist;
-    float candy = center.y - diry * startDist;
-    float candz = center.z;
-
-    Vector3 startNode{}; float startHeading = 0.0f;
-    bool okStartNode = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(candx, candy, candz, &startNode, &startHeading, 1, 3.0, 0);
-    float sx = okStartNode ? startNode.x : candx;
-    float sy = okStartNode ? startNode.y : candy;
-    float sz0 = okStartNode ? startNode.z : candz;
-    float gz = sz0;
-    bool hasGround = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(sx, sy, sz0, &gz, false);
-    if (!hasGround) gz = sz0;
-    float sz = gz + 10.0f;
+    // 使用改进的起始位置选择算法
+    Vector3 start_pos = find_good_start_position(target, 50.0f, 150.0f);
 
     Any cam = CAM::GET_RENDERING_CAM();
-    CAM::SET_CAM_COORD(cam, sx, sy, sz);
-    Vector3 startPos{}; startPos.x = sx; startPos.y = sy; startPos.z = sz;
-    float yaw = quantize_deg(yaw_to_target_deg(startPos, target), YAW_STEPSIZE);
+    CAM::SET_CAM_COORD(cam, start_pos.x, start_pos.y, start_pos.z);
+    float yaw = quantize_deg(yaw_to_target_deg(start_pos, target), YAW_STEPSIZE);
     CAM::SET_CAM_ROT(cam, 0.0f, 0.0f, yaw, 2);
-    WAIT(0);
-
-    int maxSteps = 500;
+    int maxSteps = 50;
     bool reached = false;
     for (int step = 0; step < maxSteps; step++) {
         cam = CAM::GET_RENDERING_CAM();
