@@ -278,42 +278,136 @@ void ExtractScreenBuffer(ID3D11DeviceContext* ctx, ID3D11Texture2D* back, HRESUL
 extern "C" {
 	__declspec(dllexport) int export_get_depth_buffer(void** buf)
 	{
-		if (lastDev == nullptr || lastCtx == nullptr || depthRes == nullptr) return -1;
-        unpack_depth(lastDev.Get(), lastCtx.Get(), depthRes.Get(), depthBuf, stencilBuf);
-        *buf = &depthBuf[0];
-        return depthBuf.size();
+		try {
+			if (lastDev == nullptr || lastCtx == nullptr || depthRes == nullptr) {
+				LOGE("export", "export_get_depth_buffer: Invalid device/context/resource pointers");
+				return -1;
+			}
+			unpack_depth(lastDev.Get(), lastCtx.Get(), depthRes.Get(), depthBuf, stencilBuf);
+			if (depthBuf.empty()) {
+				LOGE("export", "export_get_depth_buffer: Depth buffer is empty after unpack");
+				return -1;
+			}
+			*buf = &depthBuf[0];
+			return depthBuf.size();
+		} catch (const std::system_error& e) {
+			LOGE("export", std::string("export_get_depth_buffer: System error - ") + e.what());
+			return -1;
+		} catch (const std::exception& e) {
+			LOGE("export", std::string("export_get_depth_buffer: Exception - ") + e.what());
+			return -1;
+		} catch (...) {
+			LOGE("export", "export_get_depth_buffer: Unknown exception");
+			return -1;
+		}
     }
 	__declspec(dllexport) int export_get_color_buffer(void** buf)
 	{
-		if (lastDev == nullptr || lastCtx == nullptr || colorRes == nullptr) return -1;
-        copyTexToVector(lastDev.Get(), lastCtx.Get(), colorRes.Get(), colorBuf);
-        *buf = &colorBuf[0];
-        return colorBuf.size();
+		try {
+			if (lastDev == nullptr || lastCtx == nullptr || colorRes == nullptr) {
+				LOGE("export", "export_get_color_buffer: Invalid device/context/resource pointers");
+				return -1;
+			}
+			copyTexToVector(lastDev.Get(), lastCtx.Get(), colorRes.Get(), colorBuf);
+			if (colorBuf.empty()) {
+				LOGE("export", "export_get_color_buffer: Color buffer is empty after copy");
+				return -1;
+			}
+			*buf = &colorBuf[0];
+			return colorBuf.size();
+		} catch (const std::system_error& e) {
+			LOGE("export", std::string("export_get_color_buffer: System error - ") + e.what());
+			return -1;
+		} catch (const std::invalid_argument& e) {
+			LOGE("export", std::string("export_get_color_buffer: Invalid argument - ") + e.what());
+			return -1;
+		} catch (const std::exception& e) {
+			LOGE("export", std::string("export_get_color_buffer: Exception - ") + e.what());
+			return -1;
+		} catch (...) {
+			LOGE("export", "export_get_color_buffer: Unknown exception");
+			return -1;
+		}
     }
 	__declspec(dllexport) int export_get_stencil_buffer(void** buf)
 	{
-		if (lastDev == nullptr || lastCtx == nullptr || depthRes == nullptr) return -1;
-        unpack_depth(lastDev.Get(), lastCtx.Get(), depthRes.Get(), depthBuf, stencilBuf);
-        *buf = &stencilBuf[0];
-        return stencilBuf.size();
+		try {
+			if (lastDev == nullptr || lastCtx == nullptr || depthRes == nullptr) {
+				LOGE("export", "export_get_stencil_buffer: Invalid device/context/resource pointers");
+				return -1;
+			}
+			unpack_depth(lastDev.Get(), lastCtx.Get(), depthRes.Get(), depthBuf, stencilBuf);
+			if (stencilBuf.empty()) {
+				LOGE("export", "export_get_stencil_buffer: Stencil buffer is empty after unpack");
+				return -1;
+			}
+			*buf = &stencilBuf[0];
+			return stencilBuf.size();
+		} catch (const std::system_error& e) {
+			LOGE("export", std::string("export_get_stencil_buffer: System error - ") + e.what());
+			return -1;
+		} catch (const std::exception& e) {
+			LOGE("export", std::string("export_get_stencil_buffer: Exception - ") + e.what());
+			return -1;
+		} catch (...) {
+			LOGE("export", "export_get_stencil_buffer: Unknown exception");
+			return -1;
+		}
     }
 	__declspec(dllexport) int export_get_constant_buffer(rage_matrices* buf) {
-		if (constantBuf == nullptr) return -1;
-		D3D11_MAPPED_SUBRESOURCE res = { 0 };
-		lastCtx->Map(constantBuf.Get(), 0, D3D11_MAP_READ, 0, &res);
-		memmove(buf, res.pData, sizeof(constants));
-		lastCtx->Unmap(constantBuf.Get(), 0);
-		return sizeof(rage_matrices);
+		try {
+			if (constantBuf == nullptr) {
+				LOGE("export", "export_get_constant_buffer: Constant buffer is null");
+				return -1;
+			}
+			if (lastCtx == nullptr) {
+				LOGE("export", "export_get_constant_buffer: Device context is null");
+				return -1;
+			}
+			D3D11_MAPPED_SUBRESOURCE res = { 0 };
+			HRESULT hr = lastCtx->Map(constantBuf.Get(), 0, D3D11_MAP_READ, 0, &res);
+			if (FAILED(hr)) {
+				LOGE("export", std::string("export_get_constant_buffer: Failed to map constant buffer, HRESULT: ") + std::to_string(hr));
+				return -1;
+			}
+			if (res.pData == nullptr) {
+				LOGE("export", "export_get_constant_buffer: Mapped data pointer is null");
+				lastCtx->Unmap(constantBuf.Get(), 0);
+				return -1;
+			}
+			memmove(buf, res.pData, sizeof(constants));
+			lastCtx->Unmap(constantBuf.Get(), 0);
+			return sizeof(rage_matrices);
+		} catch (const std::exception& e) {
+			LOGE("export", std::string("export_get_constant_buffer: Exception - ") + e.what());
+			return -1;
+		} catch (...) {
+			LOGE("export", "export_get_constant_buffer: Unknown exception");
+			return -1;
+		}
 	}
 	__declspec(dllexport) int export_get_screen_buffer(WCHAR *pictureName)
 	{
-		if (lastCtx == nullptr || backBuf == nullptr || !SUCCEEDED(screenHr)) return 0;
-		HRESULT hr = DirectX::SaveWICTextureToFile(lastCtx.Get(), backBuf.Get(),
-			GUID_ContainerFormatBmp, pictureName);
-		if (SUCCEEDED(hr)) {
-			return 1;
+		try {
+			if (lastCtx == nullptr || backBuf == nullptr || !SUCCEEDED(screenHr)) {
+				LOGE("export", "export_get_screen_buffer: Invalid context/buffer or screen HR failed");
+				return 0;
+			}
+			HRESULT hr = DirectX::SaveWICTextureToFile(lastCtx.Get(), backBuf.Get(),
+				GUID_ContainerFormatBmp, pictureName);
+			if (SUCCEEDED(hr)) {
+				return 1;
+			} else {
+				LOGE("export", std::string("export_get_screen_buffer: Failed to save texture, HRESULT: ") + std::to_string(hr));
+				return 2;
+			}
+		} catch (const std::exception& e) {
+			LOGE("export", std::string("export_get_screen_buffer: Exception - ") + e.what());
+			return 0;
+		} catch (...) {
+			LOGE("export", "export_get_screen_buffer: Unknown exception");
+			return 0;
 		}
-		else return 2;
 	}
 
 	__declspec(dllexport) long long int export_get_last_depth_time() {
