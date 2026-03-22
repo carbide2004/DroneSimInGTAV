@@ -65,19 +65,58 @@ bool ServerV2::read_exact(asio::ip::tcp::socket& s, void* buf, size_t len) {
 }
 
 void ServerV2::handle_client() {
-    MsgHeader hdr{};
-    if (!read_exact(socket_, &hdr.magic[0], 4)) { socket_.close(); start_accept(); return; }
-    if (!read_exact(socket_, &hdr.version, 1)) { socket_.close(); start_accept(); return; }
-    if (!read_exact(socket_, &hdr.type, 1)) { socket_.close(); start_accept(); return; }
-    if (!read_exact(socket_, &hdr.flags, 1)) { socket_.close(); start_accept(); return; }
-    if (!read_exact(socket_, &hdr.reserved, 1)) { socket_.close(); start_accept(); return; }
-    if (!read_exact(socket_, &hdr.request_id, 8)) { socket_.close(); start_accept(); return; }
-    if (!read_exact(socket_, &hdr.length, 4)) { socket_.close(); start_accept(); return; }
-    if (std::memcmp(hdr.magic, "DSV2", 4) != 0) { socket_.close(); start_accept(); return; }
-    std::vector<unsigned char> payload(hdr.length);
-    if (hdr.length) {
-        if (!read_exact(socket_, payload.data(), hdr.length)) { socket_.close(); start_accept(); return; }
-    }
+    try {
+        MsgHeader hdr{};
+        if (!read_exact(socket_, &hdr.magic[0], 4)) { 
+            LOGE("server_v2", "Failed to read magic bytes from client");
+            socket_.close(); start_accept(); return; 
+        }
+        if (!read_exact(socket_, &hdr.version, 1)) { 
+            LOGE("server_v2", "Failed to read version from client");
+            socket_.close(); start_accept(); return; 
+        }
+        if (!read_exact(socket_, &hdr.type, 1)) { 
+            LOGE("server_v2", "Failed to read message type from client");
+            socket_.close(); start_accept(); return; 
+        }
+        if (!read_exact(socket_, &hdr.flags, 1)) { 
+            LOGE("server_v2", "Failed to read flags from client");
+            socket_.close(); start_accept(); return; 
+        }
+        if (!read_exact(socket_, &hdr.reserved, 1)) { 
+            LOGE("server_v2", "Failed to read reserved field from client");
+            socket_.close(); start_accept(); return; 
+        }
+        if (!read_exact(socket_, &hdr.request_id, 8)) { 
+            LOGE("server_v2", "Failed to read request_id from client");
+            socket_.close(); start_accept(); return; 
+        }
+        if (!read_exact(socket_, &hdr.length, 4)) { 
+            LOGE("server_v2", "Failed to read length from client");
+            socket_.close(); start_accept(); return; 
+        }
+        
+        if (std::memcmp(hdr.magic, "DSV2", 4) != 0) { 
+            LOGE("server_v2", "Invalid magic bytes received");
+            socket_.close(); start_accept(); return; 
+        }
+        
+        // 验证payload长度的合理性 (RGBD数据最大约30MB)
+        if (hdr.length > 50 * 1024 * 1024) { // 50MB限制，为RGBD数据预留足够空间
+            LOGE("server_v2", std::string("Payload too large: ") + std::to_string(hdr.length) + " bytes");
+            socket_.close(); start_accept(); return;
+        }
+        
+        std::vector<unsigned char> payload;
+        if (hdr.length > 0) {
+            payload.resize(hdr.length);
+            if (!read_exact(socket_, payload.data(), hdr.length)) { 
+                LOGE("server_v2", std::string("Failed to read payload of ") + std::to_string(hdr.length) + " bytes");
+                socket_.close(); start_accept(); return; 
+            }
+        }
+        
+        LOGD("server_v2", std::string("Received message type ") + std::to_string(hdr.type) + " with payload " + std::to_string(hdr.length) + " bytes");
 
     std::vector<unsigned char> resp;
     switch (hdr.type) {
@@ -98,13 +137,21 @@ void ServerV2::handle_client() {
             return;
         }
         case MSG_MOVE: {
-            if (hdr.length >= sizeof(float) * 3) {
+            if (hdr.length >= sizeof(float) * 3 && payload.size() >= sizeof(float) * 3) {
                 float dx = *reinterpret_cast<float*>(&payload[0]);
                 float dy = *reinterpret_cast<float*>(&payload[4]);
                 float dz = *reinterpret_cast<float*>(&payload[8]);
-                std::string s = std::string("MOVE ") + std::to_string(dx) + " " + std::to_string(dy) + " " + std::to_string(dz);
-                enqueue_command(s);
-                LOGD("server_v2", std::string("Enqueue ") + s);
+                
+                // 验证浮点数的有效性
+                if (std::isfinite(dx) && std::isfinite(dy) && std::isfinite(dz)) {
+                    std::string s = std::string("MOVE ") + std::to_string(dx) + " " + std::to_string(dy) + " " + std::to_string(dz);
+                    enqueue_command(s);
+                    LOGD("server_v2", std::string("Enqueue ") + s);
+                } else {
+                    LOGE("server_v2", "Invalid float values in MOVE command");
+                }
+            } else {
+                LOGE("server_v2", std::string("MSG_MOVE: Invalid payload size. Expected: ") + std::to_string(sizeof(float) * 3) + ", Got: " + std::to_string(hdr.length));
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_MOVE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
@@ -404,16 +451,25 @@ void ServerV2::handle_client() {
             return;
         }
         case MSG_SET_POSTURE: {
-            if (hdr.length >= sizeof(float) * 6) {
+            if (hdr.length >= sizeof(float) * 6 && payload.size() >= sizeof(float) * 6) {
                 float x = *reinterpret_cast<float*>(&payload[0]);
                 float y = *reinterpret_cast<float*>(&payload[4]);
                 float z = *reinterpret_cast<float*>(&payload[8]);
                 float rx = *reinterpret_cast<float*>(&payload[12]);
                 float ry = *reinterpret_cast<float*>(&payload[16]);
                 float rz = *reinterpret_cast<float*>(&payload[20]);
-                std::string s = std::string("SET_POSTURE ") + std::to_string(x) + " " + std::to_string(y) + " " + std::to_string(z) + " " + std::to_string(rx) + " " + std::to_string(ry) + " " + std::to_string(rz);
-                enqueue_command(s);
-                LOGD("server_v2", std::string("Enqueue ") + s);
+                
+                // 验证所有浮点数的有效性
+                if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z) && 
+                    std::isfinite(rx) && std::isfinite(ry) && std::isfinite(rz)) {
+                    std::string s = std::string("SET_POSTURE ") + std::to_string(x) + " " + std::to_string(y) + " " + std::to_string(z) + " " + std::to_string(rx) + " " + std::to_string(ry) + " " + std::to_string(rz);
+                    enqueue_command(s);
+                    LOGD("server_v2", std::string("Enqueue ") + s);
+                } else {
+                    LOGE("server_v2", "Invalid float values in SET_POSTURE command");
+                }
+            } else {
+                LOGE("server_v2", std::string("MSG_SET_POSTURE: Invalid payload size. Expected: ") + std::to_string(sizeof(float) * 6) + ", Got: " + std::to_string(hdr.length));
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_POSTURE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(sizeof(rh));
@@ -463,66 +519,227 @@ void ServerV2::handle_client() {
             return;
         }
         case MSG_CAPTURE: {
+            LOGD("server_v2", "Processing MSG_CAPTURE request");
             enqueue_command("REQUEST");
             int tries = 0;
             while (cmdToCatch != catchStop && tries < 3000) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 tries++;
             }
-            void* rgb_ptr = nullptr; int rgb_size = export_get_color_buffer(&rgb_ptr);
-            void* depth_ptr = nullptr; int depth_size = export_get_depth_buffer(&depth_ptr);
-            LOGD("server_v2", std::string("Capture: rgb_size=") + std::to_string(rgb_size) + ", depth_size=" + std::to_string(depth_size));
-            int w_rgb = export_get_last_color_width();
-            int h_rgb = export_get_last_color_height();
-            int w_depth = export_get_last_depth_width();
-            int h_depth = export_get_last_depth_height();
-            uint32_t hdr_len = sizeof(uint32_t) * 4 + rgb_size + depth_size;
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CAPTURE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = hdr_len;
-            resp.resize(sizeof(rh) + hdr_len);
-            std::memcpy(resp.data(), &rh.magic[0], 4);
-            std::memcpy(resp.data() + 4, &rh.version, 1);
-            std::memcpy(resp.data() + 5, &rh.type, 1);
-            std::memcpy(resp.data() + 6, &rh.flags, 1);
-            std::memcpy(resp.data() + 7, &rh.reserved, 1);
-            std::memcpy(resp.data() + 8, &rh.request_id, 8);
-            std::memcpy(resp.data() + 16, &rh.length, 4);
-            uint32_t* p32 = reinterpret_cast<uint32_t*>(resp.data() + 20);
-            p32[0] = static_cast<uint32_t>(rgb_size);
-            p32[1] = static_cast<uint32_t>(depth_size);
-            p32[2] = static_cast<uint32_t>(w_rgb);
-            p32[3] = static_cast<uint32_t>(h_rgb);
-            unsigned char* p = resp.data() + 20 + sizeof(uint32_t) * 4;
-            if (rgb_size > 0) std::memcpy(p, rgb_ptr, rgb_size);
-            p += rgb_size;
-            if (depth_size > 0) std::memcpy(p, depth_ptr, depth_size);
+            
+            if (tries >= 3000) {
+                LOGW("server_v2", "MSG_CAPTURE: Timeout waiting for capture completion");
+            }
+            
+            void* rgb_ptr = nullptr; 
+            void* depth_ptr = nullptr;
+            int rgb_size = 0;
+            int depth_size = 0;
+            
+            try {
+                rgb_size = export_get_color_buffer(&rgb_ptr);
+                depth_size = export_get_depth_buffer(&depth_ptr);
+                
+                if (rgb_ptr == nullptr || depth_ptr == nullptr) {
+                    LOGE("server_v2", "MSG_CAPTURE: Null buffer pointers returned");
+                    // 返回空响应
+                    MsgHeader rh{}; 
+                    std::memcpy(rh.magic, "DSV2", 4); 
+                    rh.version = hdr.version; 
+                    rh.type = MSG_CAPTURE; 
+                    rh.flags = 0; 
+                    rh.reserved = 0; 
+                    rh.request_id = hdr.request_id; 
+                    rh.length = 0;
+                    resp.resize(sizeof(rh));
+                    std::memcpy(resp.data(), &rh.magic[0], 4);
+                    std::memcpy(resp.data() + 4, &rh.version, 1);
+                    std::memcpy(resp.data() + 5, &rh.type, 1);
+                    std::memcpy(resp.data() + 6, &rh.flags, 1);
+                    std::memcpy(resp.data() + 7, &rh.reserved, 1);
+                    std::memcpy(resp.data() + 8, &rh.request_id, 8);
+                    std::memcpy(resp.data() + 16, &rh.length, 4);
+                    write_response(resp);
+                    return;
+                }
+                
+                LOGD("server_v2", std::string("Capture: rgb_size=") + std::to_string(rgb_size) + ", depth_size=" + std::to_string(depth_size));
+                
+                int w_rgb = export_get_last_color_width();
+                int h_rgb = export_get_last_color_height();
+                int w_depth = export_get_last_depth_width();
+                int h_depth = export_get_last_depth_height();
+                
+                // 验证尺寸的合理性
+                if (w_rgb <= 0 || h_rgb <= 0 || w_depth <= 0 || h_depth <= 0) {
+                    LOGE("server_v2", std::string("Invalid image dimensions: rgb(") + std::to_string(w_rgb) + "x" + std::to_string(h_rgb) + "), depth(" + std::to_string(w_depth) + "x" + std::to_string(h_depth) + ")");
+                    // 返回空响应
+                    MsgHeader rh{}; 
+                    std::memcpy(rh.magic, "DSV2", 4); 
+                    rh.version = hdr.version; 
+                    rh.type = MSG_CAPTURE; 
+                    rh.flags = 0; 
+                    rh.reserved = 0; 
+                    rh.request_id = hdr.request_id; 
+                    rh.length = 0;
+                    resp.resize(sizeof(rh));
+                    std::memcpy(resp.data(), &rh.magic[0], 4);
+                    std::memcpy(resp.data() + 4, &rh.version, 1);
+                    std::memcpy(resp.data() + 5, &rh.type, 1);
+                    std::memcpy(resp.data() + 6, &rh.flags, 1);
+                    std::memcpy(resp.data() + 7, &rh.reserved, 1);
+                    std::memcpy(resp.data() + 8, &rh.request_id, 8);
+                    std::memcpy(resp.data() + 16, &rh.length, 4);
+                    write_response(resp);
+                    return;
+                }
+                
+                uint32_t hdr_len = sizeof(uint32_t) * 4 + rgb_size + depth_size;
+                MsgHeader rh{}; 
+                std::memcpy(rh.magic, "DSV2", 4); 
+                rh.version = hdr.version; 
+                rh.type = MSG_CAPTURE; 
+                rh.flags = 0; 
+                rh.reserved = 0; 
+                rh.request_id = hdr.request_id; 
+                rh.length = hdr_len;
+                
+                resp.resize(sizeof(rh) + hdr_len);
+                std::memcpy(resp.data(), &rh.magic[0], 4);
+                std::memcpy(resp.data() + 4, &rh.version, 1);
+                std::memcpy(resp.data() + 5, &rh.type, 1);
+                std::memcpy(resp.data() + 6, &rh.flags, 1);
+                std::memcpy(resp.data() + 7, &rh.reserved, 1);
+                std::memcpy(resp.data() + 8, &rh.request_id, 8);
+                std::memcpy(resp.data() + 16, &rh.length, 4);
+                
+                uint32_t* p32 = reinterpret_cast<uint32_t*>(resp.data() + 20);
+                p32[0] = static_cast<uint32_t>(rgb_size);
+                p32[1] = static_cast<uint32_t>(depth_size);
+                p32[2] = static_cast<uint32_t>(w_rgb);
+                p32[3] = static_cast<uint32_t>(h_rgb);
+                
+                unsigned char* p = resp.data() + 20 + sizeof(uint32_t) * 4;
+                if (rgb_size > 0) {
+                    std::memcpy(p, rgb_ptr, rgb_size);
+                }
+                p += rgb_size;
+                if (depth_size > 0) {
+                    std::memcpy(p, depth_ptr, depth_size);
+                }
+                
+            } catch (const std::exception& e) {
+                LOGE("server_v2", std::string("Exception in MSG_CAPTURE: ") + e.what());
+                // 返回空响应
+                MsgHeader rh{}; 
+                std::memcpy(rh.magic, "DSV2", 4); 
+                rh.version = hdr.version; 
+                rh.type = MSG_CAPTURE; 
+                rh.flags = 0; 
+                rh.reserved = 0; 
+                rh.request_id = hdr.request_id; 
+                rh.length = 0;
+                resp.resize(sizeof(rh));
+                std::memcpy(resp.data(), &rh.magic[0], 4);
+                std::memcpy(resp.data() + 4, &rh.version, 1);
+                std::memcpy(resp.data() + 5, &rh.type, 1);
+                std::memcpy(resp.data() + 6, &rh.flags, 1);
+                std::memcpy(resp.data() + 7, &rh.reserved, 1);
+                std::memcpy(resp.data() + 8, &rh.request_id, 8);
+                std::memcpy(resp.data() + 16, &rh.length, 4);
+                write_response(resp);
+                return;
+            }
             write_response(resp);
             return;
         }
         default: {
+            LOGE("server_v2", std::string("Unknown message type: ") + std::to_string(hdr.type));
             socket_.close(); start_accept(); return;
         }
+    }
+    } catch (const std::exception& e) {
+        LOGE("server_v2", std::string("Exception in handle_client: ") + e.what());
+        try {
+            socket_.close();
+        } catch (...) {
+            // 忽略关闭socket时的异常
+        }
+        start_accept();
+        return;
+    } catch (...) {
+        LOGE("server_v2", "Unknown exception in handle_client");
+        try {
+            socket_.close();
+        } catch (...) {
+            // 忽略关闭socket时的异常
+        }
+        start_accept();
+        return;
     }
 }
 
 void ServerV2::write_response(const std::vector<unsigned char>& data) {
-    system::error_code ec;
-    asio::write(socket_, asio::buffer(data), ec);
-    socket_.close();
+    try {
+        system::error_code ec;
+        size_t bytes_written = asio::write(socket_, asio::buffer(data), ec);
+        if (ec) {
+            LOGE("server_v2", std::string("Failed to write response: ") + ec.message());
+        } else {
+            LOGD("server_v2", std::string("Response sent successfully: ") + std::to_string(bytes_written) + " bytes");
+        }
+    } catch (const std::exception& e) {
+        LOGE("server_v2", std::string("Exception in write_response: ") + e.what());
+    } catch (...) {
+        LOGE("server_v2", "Unknown exception in write_response");
+    }
+    
+    try {
+        socket_.close();
+    } catch (...) {
+        // 忽略关闭socket时的异常
+    }
     start_accept();
 }
 
 void InitializeServerV2() {
     if (!g_ws_inited_v2) {
-        WSADATA wsaData; int r = WSAStartup(MAKEWORD(2,2), &wsaData); if (r == 0) g_ws_inited_v2 = true;
+        WSADATA wsaData; 
+        int r = WSAStartup(MAKEWORD(2,2), &wsaData); 
+        if (r == 0) {
+            g_ws_inited_v2 = true;
+            LOGD("server_v2", "WSAStartup successful");
+        } else {
+            LOGE("server_v2", std::string("WSAStartup failed with error: ") + std::to_string(r));
+            return;
+        }
     }
-    if (g_serverV2Instance) return;
-    g_thread_v2 = std::make_unique<std::thread>([](){
-        try {
-            g_serverV2Instance = std::make_unique<ServerV2>(g_io_v2, 23456);
-            g_io_v2.run();
-        } catch (...) {}
-    });
-    g_thread_v2->detach();
+    
+    if (g_serverV2Instance) {
+        LOGD("server_v2", "ServerV2 already initialized");
+        return;
+    }
+    
+    try {
+        g_thread_v2 = std::make_unique<std::thread>([](){
+            try {
+                LOGD("server_v2", "Starting ServerV2 on port 23456");
+                g_serverV2Instance = std::make_unique<ServerV2>(g_io_v2, 23456);
+                g_io_v2.run();
+                LOGD("server_v2", "ServerV2 io_context finished");
+            } catch (const std::exception& e) {
+                LOGE("server_v2", std::string("Exception in server thread: ") + e.what());
+            } catch (...) {
+                LOGE("server_v2", "Unknown exception in server thread");
+            }
+        });
+        g_thread_v2->detach();
+        LOGD("server_v2", "ServerV2 thread started and detached");
+    } catch (const std::exception& e) {
+        LOGE("server_v2", std::string("Failed to create server thread: ") + e.what());
+    } catch (...) {
+        LOGE("server_v2", "Unknown exception creating server thread");
+    }
 }
 
 void ShutdownServerV2() {
