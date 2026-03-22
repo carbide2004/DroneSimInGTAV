@@ -205,13 +205,40 @@ void ServerV2::handle_client() {
             return;
         }
         case MSG_GET_POSE: {
+            // 清理可能的残留状态
             g_poseReady = false;
+            
+            // 清空命令队列中可能的旧GET_POSE命令
+            std::string dummy_cmd;
+            while (try_dequeue_command(dummy_cmd)) {
+                if (dummy_cmd != "GET_POSE") {
+                    // 如果不是GET_POSE命令，重新放回队列
+                    enqueue_command(dummy_cmd);
+                    break;
+                }
+                // 如果是GET_POSE命令，丢弃它
+                LOGD("server_v2", "Discarded stale GET_POSE command");
+            }
+            
             enqueue_command("GET_POSE");
             LOGD("server_v2", std::string("GET_POSE enqueued"));
             int tries = 0;
-            while (!g_poseReady && tries < 300) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_GET_POSE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
+            while (!g_poseReady && tries < 300) { 
+                std::this_thread::sleep_for(std::chrono::milliseconds(5)); 
+                tries++; 
+            }
+            
+            MsgHeader rh{}; 
+            std::memcpy(rh.magic, "DSV2", 4); 
+            rh.version = hdr.version; 
+            rh.type = MSG_GET_POSE; 
+            rh.flags = 0; 
+            rh.reserved = 0; 
+            rh.request_id = hdr.request_id;
+            
             if (!g_poseReady) {
+                // 超时后强制重置状态，防止下次请求时的状态污染
+                g_poseReady = false;
                 rh.length = 0;
                 resp.resize(sizeof(rh));
                 std::memcpy(resp.data(), &rh.magic[0], 4);
@@ -221,7 +248,7 @@ void ServerV2::handle_client() {
                 std::memcpy(resp.data() + 7, &rh.reserved, 1);
                 std::memcpy(resp.data() + 8, &rh.request_id, 8);
                 std::memcpy(resp.data() + 16, &rh.length, 4);
-                LOGW("server_v2", "GET_POSE timeout or camera mode inactive");
+                LOGW("server_v2", "GET_POSE timeout or camera mode inactive - state reset");
             } else {
                 rh.length = sizeof(float)*6;
                 resp.resize(sizeof(rh) + sizeof(float)*6);
@@ -234,6 +261,8 @@ void ServerV2::handle_client() {
                 std::memcpy(resp.data() + 16, &rh.length, 4);
                 std::memcpy(resp.data() + 20, &g_pose[0], sizeof(float)*6);
                 LOGD("server_v2", std::string("GET_POSE ready: ") + std::to_string(g_pose[0]) + "," + std::to_string(g_pose[1]) + "," + std::to_string(g_pose[2]));
+                // 成功后也重置状态，为下次请求做准备
+                g_poseReady = false;
             }
             write_response(resp);
             return;
