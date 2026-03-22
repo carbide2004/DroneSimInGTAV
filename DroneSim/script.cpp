@@ -704,7 +704,7 @@ static void run_auto_collect(AutoCollectEvent event_type) {
     Any cam = CAM::GET_RENDERING_CAM();
     CAM::SET_CAM_COORD(cam, sx, sy, sz);
     Vector3 startPos{}; startPos.x = sx; startPos.y = sy; startPos.z = sz;
-    float yaw = quantize_deg(yaw_to_target_deg(startPos, target), 15.0f);
+    float yaw = quantize_deg(yaw_to_target_deg(startPos, target), YAW_STEPSIZE);
     CAM::SET_CAM_ROT(cam, 0.0f, 0.0f, yaw, 2);
     WAIT(0);
 
@@ -731,16 +731,16 @@ static void run_auto_collect(AutoCollectEvent event_type) {
             }
         } 
         else {
-            float desiredYaw = quantize_deg(yaw_to_target_deg(pos, target), 15.0f);
+            float desiredYaw = quantize_deg(yaw_to_target_deg(pos, target), YAW_STEPSIZE);
             float delta = wrap_angle_deg(desiredYaw - rot.z);
-            if (fabsf(delta) >= 15.0f) {
+            if (fabsf(delta) >= YAW_STEPSIZE) {
                 if (delta > 0.0f) {
-                    record_step("AUTO_YAW_LEFT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 15.0f);
-                    rotateCameraDelta(0.0f, 0.0f, 15.0f);
+                    record_step("AUTO_YAW_LEFT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, YAW_STEPSIZE);
+                    rotateCameraDelta(0.0f, 0.0f, YAW_STEPSIZE);
                 } 
                 else {
-                    record_step("AUTO_YAW_RIGHT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -15.0f);
-                    rotateCameraDelta(0.0f, 0.0f, -15.0f);
+                    record_step("AUTO_YAW_RIGHT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -YAW_STEPSIZE);
+                    rotateCameraDelta(0.0f, 0.0f, -YAW_STEPSIZE);
                 }
             } 
             else {
@@ -794,14 +794,14 @@ void scriptMain()
             }
             if (Q.isKeyDown())
             {
-                record_step("AUTO_YAW_LEFT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 15.0f);
-                rotateCameraDelta(0.0f, 0.0f, 15.0f);
+                record_step("AUTO_YAW_LEFT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, YAW_STEPSIZE);
+                rotateCameraDelta(0.0f, 0.0f, YAW_STEPSIZE);
                 if (g_verificationMode) g_verificationSteps++;
             }
             if (E.isKeyDown())
             {
-                record_step("AUTO_YAW_RIGHT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -15.0f);
-                rotateCameraDelta(0.0f, 0.0f, -15.0f);
+                record_step("AUTO_YAW_RIGHT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -YAW_STEPSIZE);
+                rotateCameraDelta(0.0f, 0.0f, -YAW_STEPSIZE);
                 if (g_verificationMode) g_verificationSteps++;
             }
             if (F5.isKeyDown())

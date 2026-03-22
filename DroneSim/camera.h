@@ -10,6 +10,7 @@
 const float PI = acos(1.0) * 2;
 const float cameraSpeedFactor = 1;
 const float STEPSIZE = 5.0;
+const float YAW_STEPSIZE = 15.0;
 
 extern int adjustCameraFinished;
 
