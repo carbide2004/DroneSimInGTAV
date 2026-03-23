@@ -937,14 +937,14 @@ static void run_auto_collect(AutoCollectEvent event_type) {
 
 // 获取随机道路节点位置
 static Position3D get_random_road_node() {
-    // GTA V地图的核心区域范围（避免海洋和偏远山区）
-    const float MAP_MIN_X = -3000.0f;
-    const float MAP_MAX_X = 3000.0f;
-    const float MAP_MIN_Y = -2000.0f;
-    const float MAP_MAX_Y = 6000.0f;
+    // 缩小到洛圣都核心区域，避免海洋和偏远山区
+    const float MAP_MIN_X = -2000.0f;  // 缩小范围
+    const float MAP_MAX_X = 1500.0f;   // 缩小范围
+    const float MAP_MIN_Y = -1500.0f;  // 缩小范围
+    const float MAP_MAX_Y = 3000.0f;   // 缩小范围
     const float MAP_Z = 100.0f; // 起始高度
-
-    srand(time(0));
+    const float MAX_SEARCH_RADIUS = 500.0f;  // 增大搜索半径
+    const float MAX_ACCEPTABLE_DISTANCE = 300.0f;  // 最大可接受距离
 
     // 最多尝试50次找到有效的道路节点
     for (int attempts = 0; attempts < 50; attempts++) {
@@ -955,13 +955,23 @@ static Position3D get_random_road_node() {
         LOGD("script", "Attempt " + std::to_string(attempts + 1) + ": trying random point (" +
              std::to_string(random_x) + "," + std::to_string(random_y) + ")");
 
-        // 查找最近的道路节点，增大搜索半径
+        // 查找最近的道路节点，使用更大的搜索半径
         Vector3 node_pos;
-        bool found = PATHFIND::GET_CLOSEST_VEHICLE_NODE(random_x, random_y, MAP_Z, &node_pos, 1, 100.0f, 0);
+        bool found = PATHFIND::GET_CLOSEST_VEHICLE_NODE(random_x, random_y, MAP_Z, &node_pos, 1, MAX_SEARCH_RADIUS, 0);
 
         if (found) {
+            // 计算距离，验证是否合理
+            float distance = sqrt(pow(node_pos.x - random_x, 2) + pow(node_pos.y - random_y, 2));
+            
             LOGD("script", "Found vehicle node at (" + std::to_string(node_pos.x) + "," +
-                 std::to_string(node_pos.y) + "," + std::to_string(node_pos.z) + ")");
+                 std::to_string(node_pos.y) + "," + std::to_string(node_pos.z) + "), distance: " + 
+                 std::to_string(distance) + "m");
+
+            // 如果距离太远，跳过这个节点
+            if (distance > MAX_ACCEPTABLE_DISTANCE) {
+                LOGD("script", "Vehicle node too far (" + std::to_string(distance) + "m), skipping");
+                continue;
+            }
 
             // 获取地面高度，尝试多种方法
             float ground_z = node_pos.z;
@@ -988,13 +998,13 @@ static Position3D get_random_road_node() {
                 Position3D road_node(node_pos.x, node_pos.y, ground_z + 1.0f);
                 LOGD("script", "Found valid road node: (" + std::to_string(road_node.x) + "," +
                      std::to_string(road_node.y) + "," + std::to_string(road_node.z) + ") after " +
-                     std::to_string(attempts + 1) + " attempts");
+                     std::to_string(attempts + 1) + " attempts, distance: " + std::to_string(distance) + "m");
                 return road_node;
             } else {
                 LOGD("script", "All ground height methods failed");
             }
         } else {
-            LOGD("script", "No vehicle node found within 100m radius");
+            LOGD("script", "No vehicle node found within " + std::to_string(MAX_SEARCH_RADIUS) + "m radius");
         }
     }
 
@@ -1018,6 +1028,7 @@ static void run_automated_collection(int collection_count = 10) {
     // 获取玩家并设置全面保护
     Ped player = PLAYER::PLAYER_PED_ID();
     if (player) {
+        // 基础保护
         ENTITY::SET_ENTITY_INVINCIBLE(player, true);
         ENTITY::SET_ENTITY_VISIBLE(player, false, false);
         ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, false);
@@ -1025,7 +1036,16 @@ static void run_automated_collection(int collection_count = 10) {
         // 防止被载具撞击
         ENTITY::SET_ENTITY_COLLISION(player, false, false);
         
-        LOGI("script", "Player set to full protection mode (invincible, invisible)");
+        // 额外保护措施
+        PLAYER::SET_PLAYER_INVINCIBLE(PLAYER::PLAYER_ID(), true);
+        ENTITY::SET_ENTITY_PROOFS(player, true, true, true, true, true, true, true, true);
+        
+        // 将玩家移到地下隐藏位置（额外保险）
+        Vector3 player_pos;
+        player_pos = ENTITY::GET_ENTITY_COORDS(player, true);
+        ENTITY::SET_ENTITY_COORDS(player, player_pos.x, player_pos.y, player_pos.z - 50.0f, true, false, false, true);
+        
+        LOGI("script", "Player set to maximum protection mode (invincible, invisible, underground)");
     }
 
     // 随机种子
@@ -1135,12 +1155,19 @@ static void run_automated_collection(int collection_count = 10) {
         LOGI("script", "Player teleported to (" + std::to_string(target_node.x) + "," +
             std::to_string(target_node.y) + "," + std::to_string(target_node.z) + ")");
     }
+    // 恢复玩家状态
     if (player) {
+        // 恢复基础状态
         ENTITY::SET_ENTITY_INVINCIBLE(player, false);
         ENTITY::SET_ENTITY_VISIBLE(player, true, false);
         ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, true);
         ENTITY::SET_ENTITY_COLLISION(player, true, true);
-        LOGI("script", "Player visibility and invincibility restored");
+        
+        // 恢复额外保护设置
+        PLAYER::SET_PLAYER_INVINCIBLE(PLAYER::PLAYER_ID(), false);
+        ENTITY::SET_ENTITY_PROOFS(player, false, false, false, false, false, false, false, false);
+        
+        LOGI("script", "Player protection and visibility restored");
     }
 
     automated_active = false;
