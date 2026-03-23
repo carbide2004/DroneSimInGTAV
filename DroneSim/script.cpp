@@ -39,6 +39,9 @@ int g_fireId = -1;
 volatile bool g_fightReady = false;
 float g_fightPos[3] = {0};
 
+static std::vector<Vehicle> g_spawnedVehicles;
+static std::vector<Ped> g_spawnedPeds;
+
 // 简单的3D位置类，替代可能有问题的Vector3
 class Position3D {
 public:
@@ -272,6 +275,9 @@ static void create_fire_near_pos(float ox, float oy, float oz) {
     if (v_ok && STREAMING::HAS_MODEL_LOADED(vh)) {
         float heading = ok ? nodeHeading : 0.0f;
         created_vehicle = VEHICLE::CREATE_VEHICLE(vh, g_firePos[0], g_firePos[1], g_firePos[2], heading, true, false);
+        if (created_vehicle != 0) {
+            g_spawnedVehicles.push_back(created_vehicle); 
+        }
         STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(vh);
         ENTITY::SET_ENTITY_AS_MISSION_ENTITY(created_vehicle, true, true);
         
@@ -363,6 +369,9 @@ static void create_fight_near_pos(float ox, float oy, float oz) {
         float y = g_fightPos[1] + sinf(a) * r;
         float z = g_fightPos[2];
         peds[i] = PED::CREATE_PED(26, model, x, y, z, nodeHeading, true, true);
+        if (peds[i] != 0) {
+            g_spawnedPeds.push_back(peds[i]);
+        }
         ENTITY::SET_ENTITY_AS_MISSION_ENTITY(peds[i], true, true);
         PED::SET_PED_RELATIONSHIP_GROUP_HASH(peds[i], (i < n / 2) ? groupA : groupB);
         
@@ -746,6 +755,30 @@ static void delete_recording_session() {
     LOGI("script", "Recording session deleted due to collision");
 }
 
+static void clear_spawned_entities() {
+    LOGI("script", "Clearing spawned vehicles and peds...");
+
+    // 1. 清理车辆
+    for (Vehicle veh : g_spawnedVehicles) {
+        if (ENTITY::DOES_ENTITY_EXIST(veh)) {
+            ENTITY::SET_ENTITY_AS_MISSION_ENTITY(veh, true, true); // 获取控制权
+            ENTITY::DELETE_ENTITY(&veh);
+        }
+    }
+    g_spawnedVehicles.clear();
+
+    // 2. 清理 NPC (Peds)
+    for (Ped ped : g_spawnedPeds) {
+        if (ENTITY::DOES_ENTITY_EXIST(ped)) {
+            ENTITY::SET_ENTITY_AS_MISSION_ENTITY(ped, true, true);
+            ENTITY::DELETE_ENTITY(&ped);
+        }
+    }
+    g_spawnedPeds.clear();
+
+    LOGI("script", "Cleanup completed.");
+}
+
 // 基于道路节点朝向的起始位置选择函数
 static Position3D find_good_start_position(Position3D target, float offset_distance = 50.0f) {
     // 找到离目标点最近的道路节点及其朝向
@@ -815,7 +848,7 @@ static void run_auto_collect(AutoCollectEvent event_type) {
         create_accident_near_camera();
         center.x = g_accidentPos[0]; center.y = g_accidentPos[1]; center.z = g_accidentPos[2];
     }
-    Position3D target(center.x, center.y, center.z);
+    Position3D target(center.x, center.y, center.z + 3.0f);
 
     // 使用基于道路节点的起始位置选择算法
     Position3D start_pos = find_good_start_position(target, 50.0f);
@@ -878,6 +911,8 @@ static void run_auto_collect(AutoCollectEvent event_type) {
                 if (check_collision_raycast(pos, next_pos)) {
                     LOGW("script", "Collision detected for DOWN movement, stopping auto_collect");
                     delete_recording_session();
+                    stop_fire_maintenance();
+                    clear_spawned_entities();
                     active = false;
                     return;
                 }
@@ -910,6 +945,8 @@ static void run_auto_collect(AutoCollectEvent event_type) {
                 if (check_collision_raycast(pos, next_pos)) {
                     LOGW("script", "Collision detected for FORWARD movement, stopping auto_collect");
                     delete_recording_session();
+                    stop_fire_maintenance();
+                    clear_spawned_entities();
                     active = false;
                     return;
                 }
@@ -922,37 +959,46 @@ static void run_auto_collect(AutoCollectEvent event_type) {
 
     record_step(reached ? "AUTO_STOP_REACHED" : "AUTO_STOP_MAXSTEPS", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
     stop_recording_session();
+    stop_fire_maintenance();
+    clear_spawned_entities();
     active = false;
 }
 
 static Position3D get_random_road_node() {
-    // 1. 确保随机数种子已初始化（建议放在脚本初始化处，只调用一次）
-    static bool seeded = false;
-    if (!seeded) { srand(time(nullptr)); seeded = true; }
-
-    // 获取玩家当前坐标，以此为中心进行辐射（防止跨越未加载的区块地图）
     Entity playerPed = PLAYER::PLAYER_PED_ID();
     Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, true);
 
-    const float SEARCH_RADIUS = 300.0f; // 缩减到玩家周围加载的范围内
+    const float MIN_RADIUS = 100.0f;
+    const float MAX_RADIUS = 400.0f;
 
-    for (int attempts = 0; attempts < 30; attempts++) {
-        // 在玩家周围生成随机偏置 [-300, 300]
-        float offset_x = ((rand() / (float)RAND_MAX) * 2.0f - 1.0f) * SEARCH_RADIUS;
-        float offset_y = ((rand() / (float)RAND_MAX) * 2.0f - 1.0f) * SEARCH_RADIUS;
+    for (int attempts = 0; attempts < 20; attempts++) {
+        // 1. 生成 0.0 到 1.0 之间的随机浮点数
+        float rnd_r = (float)rand() / (float)RAND_MAX;
+        float rnd_a = (float)rand() / (float)RAND_MAX;
 
-        float target_x = playerPos.x + offset_x;
-        float target_y = playerPos.y + offset_y;
+        // 2. 映射到圆形的半径和弧度 (极坐标撒点)
+        float radius = MIN_RADIUS + rnd_r * (MAX_RADIUS - MIN_RADIUS);
+        float angle = rnd_a * 6.2831853f; // 2 * PI
+
+        float target_x = playerPos.x + radius * cosf(angle);
+        float target_y = playerPos.y + radius * sinf(angle);
+
+        // 3. 随机选择第 N 近的节点（1 到 4），打破“总是吸附到同一个最近点”的魔咒
+        int nth = (rand() % 4) + 1;
 
         Vector3 node_pos;
-        // 直接获取载具路网节点，node_pos.z 已经是道路高度，无需二次 Ground_Z 校验
-        if (PATHFIND::GET_CLOSEST_VEHICLE_NODE(target_x, target_y, playerPos.z, &node_pos, 1, 100.0f, 0)) {
-            return Position3D(node_pos.x, node_pos.y, node_pos.z + 1.0f);
+        // 参数 1：只找车辆网格节点
+        // 参数 3.0f：高度权重（防止错误吸附到立交桥下）
+        // 参数 0：无特定标志，但结合 Nth 搜寻能有效拉开路网距离
+        if (PATHFIND::GET_NTH_CLOSEST_VEHICLE_NODE(target_x, target_y, playerPos.z, nth, &node_pos, 1, 3.0f, 0)) {
+            if (node_pos.x != 0.0f && node_pos.y != 0.0f) {
+                return Position3D(node_pos.x, node_pos.y, node_pos.z + 1.0f);
+            }
         }
     }
 
-    LOGW("script", "降级使用保底坐标");
-    return Position3D(playerPos.x, playerPos.y, playerPos.z); // 直接返回玩家当前脚下作为保底
+    LOGW("script", "Fallback to player pos");
+    return Position3D(playerPos.x, playerPos.y, playerPos.z);
 }
 
 
@@ -974,18 +1020,8 @@ static void run_automated_collection(int collection_count = 10) {
         ENTITY::SET_ENTITY_INVINCIBLE(player, true);
         ENTITY::SET_ENTITY_VISIBLE(player, false, false);
         ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, false);
-        
-        // 防止被载具撞击
-        ENTITY::SET_ENTITY_COLLISION(player, false, false);
-        
-        // 额外保护措施
-        PLAYER::SET_PLAYER_INVINCIBLE(PLAYER::PLAYER_ID(), true);
         ENTITY::SET_ENTITY_PROOFS(player, true, true, true, true, true, true, true, true);
-        
-        // 将玩家移到地下隐藏位置（额外保险）
-        Vector3 player_pos;
-        player_pos = ENTITY::GET_ENTITY_COORDS(player, true);
-        ENTITY::SET_ENTITY_COORDS(player, player_pos.x, player_pos.y, player_pos.z - 50.0f, true, false, false, true);
+        PLAYER::SET_MAX_WANTED_LEVEL(0);
         
         LOGI("script", "Player set to maximum protection mode (invincible, invisible, underground)");
     }
@@ -1018,6 +1054,8 @@ static void run_automated_collection(int collection_count = 10) {
             LOGI("script", "Player teleported to (" + std::to_string(target_node.x) + "," +
                 std::to_string(target_node.y) + "," + std::to_string(target_node.z) + ")");
         }
+
+        WAIT(10000);
 
         // 4. 切换回相机视角
         if (scriptStatus != cameraMode) {
@@ -1103,11 +1141,6 @@ static void run_automated_collection(int collection_count = 10) {
         ENTITY::SET_ENTITY_INVINCIBLE(player, false);
         ENTITY::SET_ENTITY_VISIBLE(player, true, false);
         ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, true);
-        ENTITY::SET_ENTITY_COLLISION(player, true, true);
-        
-        // 恢复额外保护设置
-        PLAYER::SET_PLAYER_INVINCIBLE(PLAYER::PLAYER_ID(), false);
-        ENTITY::SET_ENTITY_PROOFS(player, false, false, false, false, false, false, false, false);
         
         LOGI("script", "Player protection and visibility restored");
     }
@@ -1175,7 +1208,7 @@ void scriptMain()
             if (F12.isKeyDown())
             {
                 LOGD("script", "F12 pressed - Starting automated batch collection (10 samples)");
-                run_automated_collection(10);
+                run_automated_collection(100);
             }
             if (F5.isKeyDown())
             {
