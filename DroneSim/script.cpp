@@ -1015,12 +1015,17 @@ static void run_automated_collection(int collection_count = 10) {
     automated_active = true;
     LOGI("script", "Starting automated collection: " + std::to_string(collection_count) + " samples");
 
-    // 获取玩家并设置无敌和不可见
+    // 获取玩家并设置全面保护
     Ped player = PLAYER::PLAYER_PED_ID();
     if (player) {
         ENTITY::SET_ENTITY_INVINCIBLE(player, true);
         ENTITY::SET_ENTITY_VISIBLE(player, false, false);
-        LOGI("script", "Player set to invincible and invisible");
+        ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, false);
+        
+        // 防止被载具撞击
+        ENTITY::SET_ENTITY_COLLISION(player, false, false);
+        
+        LOGI("script", "Player set to full protection mode (invincible, invisible)");
     }
 
     // 随机种子
@@ -1134,6 +1139,8 @@ static void run_automated_collection(int collection_count = 10) {
     if (player) {
         ENTITY::SET_ENTITY_INVINCIBLE(player, false);
         ENTITY::SET_ENTITY_VISIBLE(player, true, false);
+        ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, true);
+        ENTITY::SET_ENTITY_COLLISION(player, true, true);
         LOGI("script", "Player visibility and invincibility restored");
     }
 
