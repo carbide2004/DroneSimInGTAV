@@ -747,7 +747,6 @@ static void delete_recording_session() {
 }
 
 // 基于道路节点朝向的起始位置选择函数
-// 基于道路节点朝向的起始位置选择函数
 static Position3D find_good_start_position(Position3D target, float offset_distance = 50.0f) {
     // 找到离目标点最近的道路节点及其朝向
     Vector3 node_pos;
@@ -764,35 +763,13 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
     LOGD("script", "Found closest node: (" + std::to_string(node.x) + "," + std::to_string(node.y) + "," + std::to_string(node.z) +
          ") heading: " + std::to_string(node_heading) + " degrees");
 
-    // 方法1: 尝试找到相邻的道路节点来确定真实的道路方向
-    Vector3 next_node_pos;
-    float next_heading = 0.0f;
+    // 使用道路节点朝向计算方向向量
+    // GTA V坐标系：0度 = 北方(Y轴正方向)
+    float heading_rad = node_heading * (3.14159f / 180.0f);
+    float dir_x = sinf(heading_rad);  // GTA V中heading的x分量
+    float dir_y = cosf(heading_rad);  // GTA V中heading的y分量
 
-    // 沿着节点朝向寻找下一个节点
-    float search_x = node_pos.x + sinf(node_heading * 3.14159f / 180.0f) * 30.0f;
-    float search_y = node_pos.y + cosf(node_heading * 3.14159f / 180.0f) * 30.0f;
-    bool found_next = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(search_x, search_y, node_pos.z, &next_node_pos, &next_heading, 1, 50.0f, 0);
-
-    float dir_x, dir_y;
-
-    if (found_next && (fabsf(next_node_pos.x - node_pos.x) > 5.0f || fabsf(next_node_pos.y - node_pos.y) > 5.0f)) {
-        // 使用两个节点之间的实际方向
-        float dx = next_node_pos.x - node_pos.x;
-        float dy = next_node_pos.y - node_pos.y;
-        float dist = sqrtf(dx * dx + dy * dy);
-        dir_x = dx / dist;
-        dir_y = dy / dist;
-        LOGD("script", "Using direction from two road nodes: next node at (" +
-             std::to_string(next_node_pos.x) + "," + std::to_string(next_node_pos.y) + ")");
-    } else {
-        // 回退到使用节点朝向
-        float heading_rad = node_heading * (3.14159f / 180.0f);
-        dir_x = sinf(heading_rad);
-        dir_y = cosf(heading_rad);
-        LOGD("script", "Using node heading direction: " + std::to_string(node_heading) + " degrees");
-    }
-
-    // 从道路节点沿着道路方向的反方向偏移指定距离
+    // 从道路节点沿着道路朝向的反方向偏移指定距离（确保起始点在道路上）
     float start_x = node_pos.x - dir_x * offset_distance;
     float start_y = node_pos.y - dir_y * offset_distance;
 
@@ -820,10 +797,11 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
     Position3D start_pos(start_x, start_y, ground_z + 10.0f);
 
     LOGD("script", "Calculated start position: (" + std::to_string(start_pos.x) + "," + std::to_string(start_pos.y) + "," + std::to_string(start_pos.z) +
-         ") offset=" + std::to_string(offset_distance) + "m from road node");
+         ") offset=" + std::to_string(offset_distance) + "m from road node (heading=" + std::to_string(node_heading) + "° GTA V: 0°=North)");
 
     return start_pos;
 }
+
 
 
 
