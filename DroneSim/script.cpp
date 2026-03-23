@@ -1061,21 +1061,45 @@ static void run_automated_collection(int collection_count = 10) {
             LOGI("script", "Switched back to camera mode");
         }
 
-        // 5. 在目标位置创建火灾事件
-        create_fire_near_pos(target_node.x, target_node.y, target_node.z);
-        WAIT(1000); // 等待火灾创建完成
-
-        // 6. 检查火灾是否创建成功
-        if (!g_fireReady) {
-            LOGW("script", "Fire creation failed, skipping this attempt");
-            continue;
+        // 5. 随机选择事件类型并在目标位置创建事件
+        AutoCollectEvent event_type;
+        int event_choice = rand() % 2; // 0或1
+        
+        if (event_choice == 0) {
+            // 创建火灾事件
+            event_type = AUTO_EVENT_FIRE;
+            create_fire_near_pos(target_node.x, target_node.y, target_node.z);
+            WAIT(1000); // 等待火灾创建完成
+            LOGI("script", "Created fire event at target location");
+            
+            // 6. 检查火灾是否创建成功
+            if (!g_fireReady) {
+                LOGW("script", "Fire creation failed, skipping this attempt");
+                continue;
+            }
+            
+            // 7. 执行自动采集
+            LOGI("script", "Starting auto_collect for fire at (" + std::to_string(g_firePos[0]) + "," +
+                std::to_string(g_firePos[1]) + "," + std::to_string(g_firePos[2]) + ")");
+        } else {
+            // 创建群架事件
+            event_type = AUTO_EVENT_FIGHT;
+            create_fight_near_pos(target_node.x, target_node.y, target_node.z);
+            WAIT(1000); // 等待群架创建完成
+            LOGI("script", "Created fight event at target location");
+            
+            // 6. 检查群架是否创建成功
+            if (!g_fightReady) {
+                LOGW("script", "Fight creation failed, skipping this attempt");
+                continue;
+            }
+            
+            // 7. 执行自动采集
+            LOGI("script", "Starting auto_collect for fight at (" + std::to_string(g_fightPos[0]) + "," +
+                std::to_string(g_fightPos[1]) + "," + std::to_string(g_fightPos[2]) + ")");
         }
-
-        // 7. 执行自动采集
-        LOGI("script", "Starting auto_collect for fire at (" + std::to_string(g_firePos[0]) + "," +
-            std::to_string(g_firePos[1]) + "," + std::to_string(g_firePos[2]) + ")");
-
-        run_auto_collect(AUTO_EVENT_FIRE);
+        
+        run_auto_collect(event_type);
 
         // 8. 等待采集完成
         WAIT(2000);
