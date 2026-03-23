@@ -359,8 +359,8 @@ static void create_fight_near_pos(float ox, float oy, float oz) {
     for (int i = 0; i < n; i++) {
         float a = (2.0f * 3.14159f) * (static_cast<float>(i) / static_cast<float>(n));
         float r = 2.0f;
-        float x = g_fightPos[0] + cosf(a) * r;
-        float y = g_fightPos[1] + sinf(a) * r;
+        float x = g_fightPos[0] + sinf(a) * r;
+        float y = g_fightPos[1] + cosf(a) * r;
         float z = g_fightPos[2];
         peds[i] = PED::CREATE_PED(26, model, x, y, z, nodeHeading, true, true);
         ENTITY::SET_ENTITY_AS_MISSION_ENTITY(peds[i], true, true);
@@ -440,8 +440,8 @@ static void create_accident_near_pos(float ox, float oy, float oz) {
     VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v1);
     VEHICLE::SET_VEHICLE_HANDBRAKE(v1, true);
 
-    float xr = nodePos.x + cos(nodeHeading * 3.14159f / 180.0f) * offset;
-    float yr = nodePos.y + sin(nodeHeading * 3.14159f / 180.0f) * offset;
+    float xr = nodePos.x + sin(nodeHeading * 3.14159f / 180.0f) * offset;
+    float yr = nodePos.y + cos(nodeHeading * 3.14159f / 180.0f) * offset;
     v2 = VEHICLE::CREATE_VEHICLE(h2, xr, yr, gz, nodeHeading + 180.0f, true, false);
     STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(h2);
     VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v2);
@@ -764,10 +764,10 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
          ") heading: " + std::to_string(node_heading) + " degrees");
 
     // 使用道路节点朝向计算方向向量
-    // GTA V坐标系：0度 = 北方(X轴正方向)
+    // GTA V坐标系：0度 = 北方(Y轴正方向)
     float heading_rad = node_heading * (3.14159f / 180.0f);
-    float dir_x = cosf(heading_rad);  // GTA V中heading的x分量
-    float dir_y = sinf(heading_rad);  // GTA V中heading的y分量
+    float dir_x = sinf(heading_rad);  // GTA V中heading的x分量
+    float dir_y = cosf(heading_rad);  // GTA V中heading的y分量
 
     // 从道路节点沿着道路朝向的反方向偏移指定距离（确保起始点在道路上）
     float start_x = node_pos.x - dir_x * offset_distance;
