@@ -359,8 +359,8 @@ static void create_fight_near_pos(float ox, float oy, float oz) {
     for (int i = 0; i < n; i++) {
         float a = (2.0f * 3.14159f) * (static_cast<float>(i) / static_cast<float>(n));
         float r = 2.0f;
-        float x = g_fightPos[0] + sinf(a) * r;
-        float y = g_fightPos[1] + cosf(a) * r;
+        float x = g_fightPos[0] + cosf(a) * r;
+        float y = g_fightPos[1] + sinf(a) * r;
         float z = g_fightPos[2];
         peds[i] = PED::CREATE_PED(26, model, x, y, z, nodeHeading, true, true);
         ENTITY::SET_ENTITY_AS_MISSION_ENTITY(peds[i], true, true);
@@ -440,8 +440,8 @@ static void create_accident_near_pos(float ox, float oy, float oz) {
     VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v1);
     VEHICLE::SET_VEHICLE_HANDBRAKE(v1, true);
 
-    float xr = nodePos.x + sin(nodeHeading * 3.14159f / 180.0f) * offset;
-    float yr = nodePos.y + cos(nodeHeading * 3.14159f / 180.0f) * offset;
+    float xr = nodePos.x + cos(nodeHeading * 3.14159f / 180.0f) * offset;
+    float yr = nodePos.y + sin(nodeHeading * 3.14159f / 180.0f) * offset;
     v2 = VEHICLE::CREATE_VEHICLE(h2, xr, yr, gz, nodeHeading + 180.0f, true, false);
     STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(h2);
     VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v2);
@@ -759,86 +759,35 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
         return fallback;
     }
 
-    Position3D node(node_pos.x, node_pos.y, node_pos.z);
-    LOGD("script", "Found closest node: (" + std::to_string(node.x) + "," + std::to_string(node.y) + "," + std::to_string(node.z) +
-         ") raw_heading: " + std::to_string(node_heading));
-
-    // 测试不同的角度单位和坐标系假设
-    // 假设1: heading是角度制，0度=北方(Y轴正方向)
-    float heading_rad_deg = node_heading * (3.14159f / 180.0f);
-    float dir_x_deg = sinf(heading_rad_deg);
-    float dir_y_deg = cosf(heading_rad_deg);
+    // 转换到数学坐标系角度
+    float math_angle = 90.0f - node_heading;
+    float angle_rad = math_angle * (3.14159f / 180.0f);
     
-    // 假设2: heading已经是弧度制，0度=北方(Y轴正方向)
-    float dir_x_rad = sinf(node_heading);
-    float dir_y_rad = cosf(node_heading);
-    
-    // 假设3: heading是角度制，0度=东方(X轴正方向)
-    float heading_rad_east = node_heading * (3.14159f / 180.0f);
-    float dir_x_east = cosf(heading_rad_east);
-    float dir_y_east = sinf(heading_rad_east);
-    
-    LOGD("script", "Direction vectors test:");
-    LOGD("script", "  Deg+North: dir_x=" + std::to_string(dir_x_deg) + ", dir_y=" + std::to_string(dir_y_deg));
-    LOGD("script", "  Rad+North: dir_x=" + std::to_string(dir_x_rad) + ", dir_y=" + std::to_string(dir_y_rad));
-    LOGD("script", "  Deg+East:  dir_x=" + std::to_string(dir_x_east) + ", dir_y=" + std::to_string(dir_y_east));
+    // 使用数学坐标系计算方向向量
+    float dir_x = cosf(angle_rad);
+    float dir_y = sinf(angle_rad);
 
-    // 现在测试弧度制假设
-    float dir_x = sinf(node_heading);  // 直接使用弧度制，无需转换
-    float dir_y = cosf(node_heading);
-
-    // 从道路节点沿着道路朝向的反方向偏移指定距离（确保起始点在道路上）
+    // 从道路节点沿着道路朝向的反方向偏移指定距离
     float start_x = node_pos.x - dir_x * offset_distance;
     float start_y = node_pos.y - dir_y * offset_distance;
 
-    // 获取地面高度，尝试多种方法
+    // 获取地面高度
     float ground_z = node_pos.z;
-    bool ground_found = false;
-
-    // 方法1: 直接使用节点高度附近查找
     if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(start_x, start_y, node_pos.z + 10.0f, &ground_z, false)) {
-        ground_found = true;
-        LOGD("script", "Ground height found using node height: " + std::to_string(ground_z));
+        // 成功获取地面高度
     }
-    // 方法2: 尝试从更高位置查找
     else if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(start_x, start_y, 1000.0f, &ground_z, false)) {
-        ground_found = true;
-        LOGD("script", "Ground height found from high altitude: " + std::to_string(ground_z));
+        // 从高空获取地面高度
     }
-    // 方法3: 直接使用道路节点的高度
     else {
+        // 使用道路节点高度
         ground_z = node_pos.z;
-        ground_found = true;
-        LOGD("script", "Using vehicle node height directly: " + std::to_string(ground_z));
     }
 
     Position3D start_pos(start_x, start_y, ground_z + 15.0f);
 
-    // 计算起始点到目标点的距离和方向，用于验证
-    float actual_distance = sqrt(pow(target.x - start_pos.x, 2) + pow(target.y - start_pos.y, 2));
-    float actual_angle_rad = atan2(target.y - start_pos.y, target.x - start_pos.x);
-    float actual_angle_deg = actual_angle_rad * (180.0f / 3.14159f);
-    
-    // 标准化角度到0-360度范围
-    if (actual_angle_deg < 0) actual_angle_deg += 360.0f;
-    
-    // 计算期望的方向（道路heading的反方向）
-    // 如果heading是弧度制，先转换为角度制进行显示和比较
-    float node_heading_deg = node_heading * (180.0f / 3.14159f);
-    float expected_direction = node_heading_deg + 180.0f;
-    if (expected_direction >= 360.0f) expected_direction -= 360.0f;
-    
-    float direction_error = abs(actual_angle_deg - expected_direction);
-    if (direction_error > 180.0f) direction_error = 360.0f - direction_error;
-
-    LOGD("script", "Final result:");
-    LOGD("script", "  Start: (" + std::to_string(start_pos.x) + "," + std::to_string(start_pos.y) + "," + std::to_string(start_pos.z) + ")");
-    LOGD("script", "  Target: (" + std::to_string(target.x) + "," + std::to_string(target.y) + "," + std::to_string(target.z) + ")");
-    LOGD("script", "  Distance: " + std::to_string(actual_distance) + "m (expected: " + std::to_string(offset_distance) + "m)");
-    LOGD("script", "  Actual direction: " + std::to_string(actual_angle_deg) + "° (normalized)");
-    LOGD("script", "  Road heading: " + std::to_string(node_heading) + " rad (" + std::to_string(node_heading_deg) + "°), expected reverse: " + std::to_string(expected_direction) + "°");
-    LOGD("script", "  Direction error: " + std::to_string(direction_error) + "° (should be close to 0°)");
-    LOGD("script", "  Direction vector used: (" + std::to_string(dir_x) + "," + std::to_string(dir_y) + ")");
+    LOGD("script", "Target: (" + std::to_string(target.x) + "," + std::to_string(target.y) + "," + std::to_string(target.z) + ")");
+    LOGD("script", "Start:  (" + std::to_string(start_pos.x) + "," + std::to_string(start_pos.y) + "," + std::to_string(start_pos.z) + ")");
 
     return start_pos;
 }
@@ -953,8 +902,8 @@ static void run_auto_collect(AutoCollectEvent event_type) {
             else {
                 // 计算前进的目标位置
                 float forward_rad = rot.z * (3.14159f / 180.0f);
-                float forward_x = pos.x + sinf(forward_rad) * STEPSIZE;
-                float forward_y = pos.y + cosf(forward_rad) * STEPSIZE;
+                float forward_x = pos.x + cosf(forward_rad) * STEPSIZE;
+                float forward_y = pos.y + sinf(forward_rad) * STEPSIZE;
                 Position3D next_pos(forward_x, forward_y, pos.z);
                 
                 // 检测前进移动是否会碰撞
