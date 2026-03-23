@@ -689,63 +689,57 @@ static float yaw_to_target_deg(Position3D from, Position3D to) {
     return yaw;
 }
 
-// 改进的起始位置选择函数
-static Position3D find_good_start_position(Position3D target, float min_distance = 50.0f, float max_distance = 150.0f) {
-    const int max_attempts = 16; // 尝试16个方向
-    const float angle_step = 360.0f / max_attempts;
+// 基于道路节点的起始位置选择函数
+static Position3D find_good_start_position(Position3D target, float offset_distance = 50.0f) {
+    // 找到离目标点最近的道路节点
+    Vector3 node_pos;
+    bool found_node = PATHFIND::GET_CLOSEST_VEHICLE_NODE(target.x, target.y, target.z, &node_pos, 1, 3.0f, 0);
     
-    for (int attempt = 0; attempt < max_attempts; attempt++) {
-        float angle = angle_step * attempt;
-        float rad = angle * (3.14159f / 180.0f);
-        
-        // 在不同距离上尝试
-        for (float dist = min_distance; dist <= max_distance; dist += 25.0f) {
-            float candidate_x = target.x + cosf(rad) * dist;
-            float candidate_y = target.y + sinf(rad) * dist;
-            float candidate_z = target.z + 10.0f;
-            
-            // 获取地面高度
-            float ground_z = candidate_z;
-            if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(candidate_x, candidate_y, candidate_z, &ground_z, false)) {
-                candidate_z = ground_z + 10.0f;
-            }
-            
-            // 使用raycast检查从候选位置到目标是否有清晰视线
-            int raycast_handle = WORLDPROBE::_0x7EE9F5D83DD4F90E(
-                candidate_x, candidate_y, candidate_z,
-                target.x, target.y, target.z,
-                1, // 只检查世界几何体
-                0, // 忽略实体
-                4  // 标准碰撞检测
-            );
-            
-            // 等待raycast完成
-            int result_ready = 0;
-            BOOL hit = FALSE;
-            Vector3 hit_pos{}, hit_normal{};
-            Entity hit_entity = 0;
-            
-            // 等待raycast结果（最多等待几帧）
-            for (int wait_frames = 0; wait_frames < 5; wait_frames++) {
-                result_ready = WORLDPROBE::_GET_RAYCAST_RESULT(raycast_handle, &hit, &hit_pos, &hit_normal, &hit_entity);
-                if (result_ready != 1) break; // 1表示还在处理中
-                WAIT(0);
-            }
-            
-            // 如果raycast没有击中任何东西，说明视线清晰
-            if (result_ready == 2 && hit == FALSE) {
-                Position3D good_pos(candidate_x, candidate_y, candidate_z);
-                LOGD("script", "start: pos(" + std::to_string(good_pos.x) + "," + std::to_string(good_pos.y) + "," + std::to_string(good_pos.z) + 
-                ") target: (" + std::to_string(target.x) + "," + std::to_string(target.y) + "," + std::to_string(target.z) + ") dist=" + std::to_string(dist));
-                return good_pos;
-            }
-        }
+    if (!found_node) {
+        LOGW("script", "Could not find closest vehicle node, using fallback position");
+        Position3D fallback(target.x + offset_distance, target.y, target.z + 20.0f);
+        return fallback;
     }
     
-    // 如果没找到理想位置，返回默认位置
-    LOGW("script", "Could not find clear line of sight, using fallback position");
-    Position3D fallback(target.x + 100.0f, target.y, target.z + 20.0f);
-    return fallback;
+    Position3D node(node_pos.x, node_pos.y, node_pos.z);
+    LOGD("script", "Found closest node: (" + std::to_string(node.x) + "," + std::to_string(node.y) + "," + std::to_string(node.z) + ")");
+    
+    // 计算从节点到目标的方向向量
+    float dx = target.x - node.x;
+    float dy = target.y - node.y;
+    float distance_to_target = sqrtf(dx * dx + dy * dy);
+    
+    if (distance_to_target < 1.0f) {
+        // 如果节点离目标太近，使用默认方向
+        dx = 1.0f;
+        dy = 0.0f;
+        distance_to_target = 1.0f;
+        LOGW("script", "Node too close to target, using default direction");
+    }
+    
+    // 归一化方向向量
+    float norm_dx = dx / distance_to_target;
+    float norm_dy = dy / distance_to_target;
+    
+    // 在反方向上偏移指定距离
+    float start_x = node.x - norm_dx * offset_distance;
+    float start_y = node.y - norm_dy * offset_distance;
+    
+    // 获取地面高度
+    float ground_z = target.z;
+    if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(start_x, start_y, target.z + 50.0f, &ground_z, false)) {
+        ground_z += 10.0f; // 地面高度加10m
+    } else {
+        ground_z = target.z + 10.0f; // 如果获取地面高度失败，使用目标高度加10m
+        LOGW("script", "Could not get ground height, using target height + 10m");
+    }
+    
+    Position3D start_pos(start_x, start_y, ground_z);
+    
+    LOGD("script", "Calculated start position: (" + std::to_string(start_pos.x) + "," + std::to_string(start_pos.y) + "," + std::to_string(start_pos.z) + 
+         ") offset=" + std::to_string(offset_distance) + "m from node");
+    
+    return start_pos;
 }
 
 static void run_auto_collect(AutoCollectEvent event_type) {
@@ -772,8 +766,8 @@ static void run_auto_collect(AutoCollectEvent event_type) {
     }
     Position3D target(center.x, center.y, center.z + 5.0f);
 
-    // 使用改进的起始位置选择算法
-    Position3D start_pos = find_good_start_position(target, 50.0f, 150.0f);
+    // 使用基于道路节点的起始位置选择算法
+    Position3D start_pos = find_good_start_position(target, 50.0f);
 
     Any cam = CAM::GET_RENDERING_CAM();
     CAM::SET_CAM_COORD(cam, start_pos.x, start_pos.y, start_pos.z);
