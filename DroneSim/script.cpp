@@ -925,82 +925,34 @@ static void run_auto_collect(AutoCollectEvent event_type) {
     active = false;
 }
 
-// 获取随机道路节点位置
 static Position3D get_random_road_node() {
-    // 缩小到洛圣都核心区域，避免海洋和偏远山区
-    const float MAP_MIN_X = -2000.0f;  // 缩小范围
-    const float MAP_MAX_X = 1500.0f;   // 缩小范围
-    const float MAP_MIN_Y = -1500.0f;  // 缩小范围
-    const float MAP_MAX_Y = 3000.0f;   // 缩小范围
-    const float MAP_Z = 100.0f; // 起始高度
-    const float MAX_SEARCH_RADIUS = 500.0f;  // 增大搜索半径
-    const float MAX_ACCEPTABLE_DISTANCE = 300.0f;  // 最大可接受距离
+    // 1. 确保随机数种子已初始化（建议放在脚本初始化处，只调用一次）
+    static bool seeded = false;
+    if (!seeded) { srand(time(nullptr)); seeded = true; }
 
-    // 最多尝试50次找到有效的道路节点
-    for (int attempts = 0; attempts < 50; attempts++) {
-        // 生成随机坐标
-        float random_x = MAP_MIN_X + (rand() / (float)RAND_MAX) * (MAP_MAX_X - MAP_MIN_X);
-        float random_y = MAP_MIN_Y + (rand() / (float)RAND_MAX) * (MAP_MAX_Y - MAP_MIN_Y);
+    // 获取玩家当前坐标，以此为中心进行辐射（防止跨越未加载的区块地图）
+    Entity playerPed = PLAYER::PLAYER_PED_ID();
+    Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, true);
 
-        LOGD("script", "Attempt " + std::to_string(attempts + 1) + ": trying random point (" +
-             std::to_string(random_x) + "," + std::to_string(random_y) + ")");
+    const float SEARCH_RADIUS = 300.0f; // 缩减到玩家周围加载的范围内
 
-        // 查找最近的道路节点，使用更大的搜索半径
+    for (int attempts = 0; attempts < 30; attempts++) {
+        // 在玩家周围生成随机偏置 [-300, 300]
+        float offset_x = ((rand() / (float)RAND_MAX) * 2.0f - 1.0f) * SEARCH_RADIUS;
+        float offset_y = ((rand() / (float)RAND_MAX) * 2.0f - 1.0f) * SEARCH_RADIUS;
+
+        float target_x = playerPos.x + offset_x;
+        float target_y = playerPos.y + offset_y;
+
         Vector3 node_pos;
-        bool found = PATHFIND::GET_CLOSEST_VEHICLE_NODE(random_x, random_y, MAP_Z, &node_pos, 1, MAX_SEARCH_RADIUS, 0);
-
-        if (found) {
-            // 计算距离，验证是否合理
-            float distance = sqrt(pow(node_pos.x - random_x, 2) + pow(node_pos.y - random_y, 2));
-            
-            LOGD("script", "Found vehicle node at (" + std::to_string(node_pos.x) + "," +
-                 std::to_string(node_pos.y) + "," + std::to_string(node_pos.z) + "), distance: " + 
-                 std::to_string(distance) + "m");
-
-            // 如果距离太远，跳过这个节点
-            if (distance > MAX_ACCEPTABLE_DISTANCE) {
-                LOGD("script", "Vehicle node too far (" + std::to_string(distance) + "m), skipping");
-                continue;
-            }
-
-            // 获取地面高度，尝试多种方法
-            float ground_z = node_pos.z;
-            bool ground_found = false;
-            
-            // 方法1: 直接使用节点高度附近查找
-            if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(node_pos.x, node_pos.y, node_pos.z + 10.0f, &ground_z, false)) {
-                ground_found = true;
-                LOGD("script", "Ground height found using node height: " + std::to_string(ground_z));
-            }
-            // 方法2: 尝试从更高位置查找
-            else if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(node_pos.x, node_pos.y, 1000.0f, &ground_z, false)) {
-                ground_found = true;
-                LOGD("script", "Ground height found from high altitude: " + std::to_string(ground_z));
-            }
-            // 方法3: 直接使用道路节点的高度
-            else {
-                ground_z = node_pos.z;
-                ground_found = true;
-                LOGD("script", "Using vehicle node height directly: " + std::to_string(ground_z));
-            }
-            
-            if (ground_found) {
-                Position3D road_node(node_pos.x, node_pos.y, ground_z + 1.0f);
-                LOGD("script", "Found valid road node: (" + std::to_string(road_node.x) + "," +
-                     std::to_string(road_node.y) + "," + std::to_string(road_node.z) + ") after " +
-                     std::to_string(attempts + 1) + " attempts, distance: " + std::to_string(distance) + "m");
-                return road_node;
-            } else {
-                LOGD("script", "All ground height methods failed");
-            }
-        } else {
-            LOGD("script", "No vehicle node found within " + std::to_string(MAX_SEARCH_RADIUS) + "m radius");
+        // 直接获取载具路网节点，node_pos.z 已经是道路高度，无需二次 Ground_Z 校验
+        if (PATHFIND::GET_CLOSEST_VEHICLE_NODE(target_x, target_y, playerPos.z, &node_pos, 1, 100.0f, 0)) {
+            return Position3D(node_pos.x, node_pos.y, node_pos.z + 1.0f);
         }
     }
 
-    // 如果找不到有效节点，返回洛圣都市中心的已知道路位置
-    LOGW("script", "Could not find valid random road node after 50 attempts, using Los Santos center");
-    return Position3D(-275.0f, -957.0f, 31.0f); // 洛圣都市中心的道路位置
+    LOGW("script", "降级使用保底坐标");
+    return Position3D(playerPos.x, playerPos.y, playerPos.z); // 直接返回玩家当前脚下作为保底
 }
 
 
