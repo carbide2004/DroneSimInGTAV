@@ -818,12 +818,24 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
     float actual_distance = sqrt(pow(target.x - start_pos.x, 2) + pow(target.y - start_pos.y, 2));
     float actual_angle_rad = atan2(target.y - start_pos.y, target.x - start_pos.x);
     float actual_angle_deg = actual_angle_rad * (180.0f / 3.14159f);
+    
+    // 标准化角度到0-360度范围
+    if (actual_angle_deg < 0) actual_angle_deg += 360.0f;
+    
+    // 计算期望的方向（道路heading的反方向）
+    float expected_direction = node_heading + 180.0f;
+    if (expected_direction >= 360.0f) expected_direction -= 360.0f;
+    
+    float direction_error = abs(actual_angle_deg - expected_direction);
+    if (direction_error > 180.0f) direction_error = 360.0f - direction_error;
 
     LOGD("script", "Final result:");
     LOGD("script", "  Start: (" + std::to_string(start_pos.x) + "," + std::to_string(start_pos.y) + "," + std::to_string(start_pos.z) + ")");
     LOGD("script", "  Target: (" + std::to_string(target.x) + "," + std::to_string(target.y) + "," + std::to_string(target.z) + ")");
     LOGD("script", "  Distance: " + std::to_string(actual_distance) + "m (expected: " + std::to_string(offset_distance) + "m)");
-    LOGD("script", "  Actual direction: " + std::to_string(actual_angle_deg) + "° (road heading: " + std::to_string(node_heading) + ")");
+    LOGD("script", "  Actual direction: " + std::to_string(actual_angle_deg) + "° (normalized)");
+    LOGD("script", "  Road heading: " + std::to_string(node_heading) + "°, expected reverse: " + std::to_string(expected_direction) + "°");
+    LOGD("script", "  Direction error: " + std::to_string(direction_error) + "° (should be close to 0°)");
     LOGD("script", "  Direction vector used: (" + std::to_string(dir_x) + "," + std::to_string(dir_y) + ")");
 
     return start_pos;
