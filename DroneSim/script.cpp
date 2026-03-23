@@ -924,11 +924,11 @@ static void run_auto_collect(AutoCollectEvent event_type) {
 
 // 获取随机道路节点位置
 static Position3D get_random_road_node() {
-    // GTA V地图的大致范围
-    const float MAP_MIN_X = -4000.0f;
-    const float MAP_MAX_X = 4000.0f;
-    const float MAP_MIN_Y = -4000.0f;
-    const float MAP_MAX_Y = 8000.0f;
+    // GTA V地图的核心区域范围（避免海洋和偏远山区）
+    const float MAP_MIN_X = -3000.0f;
+    const float MAP_MAX_X = 3000.0f;
+    const float MAP_MIN_Y = -2000.0f;
+    const float MAP_MAX_Y = 6000.0f;
     const float MAP_Z = 100.0f; // 起始高度
 
     // 最多尝试50次找到有效的道路节点
@@ -937,27 +937,40 @@ static Position3D get_random_road_node() {
         float random_x = MAP_MIN_X + (rand() / (float)RAND_MAX) * (MAP_MAX_X - MAP_MIN_X);
         float random_y = MAP_MIN_Y + (rand() / (float)RAND_MAX) * (MAP_MAX_Y - MAP_MIN_Y);
 
-        // 查找最近的道路节点
+        LOGD("script", "Attempt " + std::to_string(attempts + 1) + ": trying random point (" +
+             std::to_string(random_x) + "," + std::to_string(random_y) + ")");
+
+        // 查找最近的道路节点，增大搜索半径
         Vector3 node_pos;
-        bool found = PATHFIND::GET_CLOSEST_VEHICLE_NODE(random_x, random_y, MAP_Z, &node_pos, 1, 50.0f, 0);
+        bool found = PATHFIND::GET_CLOSEST_VEHICLE_NODE(random_x, random_y, MAP_Z, &node_pos, 1, 100.0f, 0);
 
         if (found) {
+            LOGD("script", "Found vehicle node at (" + std::to_string(node_pos.x) + "," +
+                 std::to_string(node_pos.y) + "," + std::to_string(node_pos.z) + ")");
+
             // 获取地面高度
             float ground_z = node_pos.z;
-            if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(node_pos.x, node_pos.y, node_pos.z + 50.0f, &ground_z, false)) {
+            bool ground_found = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(node_pos.x, node_pos.y, node_pos.z + 50.0f, &ground_z, false);
+
+            if (ground_found) {
                 Position3D road_node(node_pos.x, node_pos.y, ground_z + 1.0f);
-                LOGD("script", "Found random road node: (" + std::to_string(road_node.x) + "," +
-                    std::to_string(road_node.y) + "," + std::to_string(road_node.z) + ") after " +
-                    std::to_string(attempts + 1) + " attempts");
+                LOGD("script", "Found valid road node: (" + std::to_string(road_node.x) + "," +
+                     std::to_string(road_node.y) + "," + std::to_string(road_node.z) + ") after " +
+                     std::to_string(attempts + 1) + " attempts");
                 return road_node;
+            } else {
+                LOGD("script", "Vehicle node found but ground height failed");
             }
+        } else {
+            LOGD("script", "No vehicle node found within 100m radius");
         }
     }
 
-    // 如果找不到有效节点，返回默认位置
-    LOGW("script", "Could not find valid random road node after 50 attempts, using default position");
-    return Position3D(0.0f, 0.0f, 30.0f);
+    // 如果找不到有效节点，返回洛圣都市中心的已知道路位置
+    LOGW("script", "Could not find valid random road node after 50 attempts, using Los Santos center");
+    return Position3D(-275.0f, -957.0f, 31.0f); // 洛圣都市中心的道路位置
 }
+
 
 // 自动化采集流程
 static void run_automated_collection(int collection_count = 10) {
