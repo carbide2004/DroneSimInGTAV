@@ -783,9 +783,9 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
     LOGD("script", "  Rad+North: dir_x=" + std::to_string(dir_x_rad) + ", dir_y=" + std::to_string(dir_y_rad));
     LOGD("script", "  Deg+East:  dir_x=" + std::to_string(dir_x_east) + ", dir_y=" + std::to_string(dir_y_east));
 
-    // 暂时使用假设1（原来的方法）
-    float dir_x = dir_x_deg;
-    float dir_y = dir_y_deg;
+    // 现在测试弧度制假设
+    float dir_x = sinf(node_heading);  // 直接使用弧度制，无需转换
+    float dir_y = cosf(node_heading);
 
     // 从道路节点沿着道路朝向的反方向偏移指定距离（确保起始点在道路上）
     float start_x = node_pos.x - dir_x * offset_distance;
@@ -823,7 +823,9 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
     if (actual_angle_deg < 0) actual_angle_deg += 360.0f;
     
     // 计算期望的方向（道路heading的反方向）
-    float expected_direction = node_heading + 180.0f;
+    // 如果heading是弧度制，先转换为角度制进行显示和比较
+    float node_heading_deg = node_heading * (180.0f / 3.14159f);
+    float expected_direction = node_heading_deg + 180.0f;
     if (expected_direction >= 360.0f) expected_direction -= 360.0f;
     
     float direction_error = abs(actual_angle_deg - expected_direction);
@@ -834,7 +836,7 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
     LOGD("script", "  Target: (" + std::to_string(target.x) + "," + std::to_string(target.y) + "," + std::to_string(target.z) + ")");
     LOGD("script", "  Distance: " + std::to_string(actual_distance) + "m (expected: " + std::to_string(offset_distance) + "m)");
     LOGD("script", "  Actual direction: " + std::to_string(actual_angle_deg) + "° (normalized)");
-    LOGD("script", "  Road heading: " + std::to_string(node_heading) + "°, expected reverse: " + std::to_string(expected_direction) + "°");
+    LOGD("script", "  Road heading: " + std::to_string(node_heading) + " rad (" + std::to_string(node_heading_deg) + "°), expected reverse: " + std::to_string(expected_direction) + "°");
     LOGD("script", "  Direction error: " + std::to_string(direction_error) + "° (should be close to 0°)");
     LOGD("script", "  Direction vector used: (" + std::to_string(dir_x) + "," + std::to_string(dir_y) + ")");
 
