@@ -764,7 +764,7 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
          ") heading: " + std::to_string(node_heading) + " degrees");
 
     // 使用道路节点朝向计算方向向量
-    // GTA V坐标系：0度 = 北方(Y轴正方向)
+    // GTA V坐标系：0度 = 北方(X轴正方向)
     float heading_rad = node_heading * (3.14159f / 180.0f);
     float dir_x = cosf(heading_rad);  // GTA V中heading的x分量
     float dir_y = sinf(heading_rad);  // GTA V中heading的y分量
@@ -794,15 +794,13 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
         LOGD("script", "Using vehicle node height directly: " + std::to_string(ground_z));
     }
 
-    Position3D start_pos(start_x, start_y, ground_z + 10.0f);
+    Position3D start_pos(start_x, start_y, ground_z + 15.0f);
 
     LOGD("script", "Calculated start position: (" + std::to_string(start_pos.x) + "," + std::to_string(start_pos.y) + "," + std::to_string(start_pos.z) +
          ") offset=" + std::to_string(offset_distance) + "m from road node (heading=" + std::to_string(node_heading) + "° GTA V: 0°=North)");
 
     return start_pos;
 }
-
-
 
 
 static void run_auto_collect(AutoCollectEvent event_type) {
@@ -827,7 +825,7 @@ static void run_auto_collect(AutoCollectEvent event_type) {
         create_accident_near_camera();
         center.x = g_accidentPos[0]; center.y = g_accidentPos[1]; center.z = g_accidentPos[2];
     }
-    Position3D target(center.x, center.y, center.z + 5.0f);
+    Position3D target(center.x, center.y, center.z);
 
     // 使用基于道路节点的起始位置选择算法
     Position3D start_pos = find_good_start_position(target, 50.0f);
@@ -945,6 +943,8 @@ static Position3D get_random_road_node() {
     const float MAP_MIN_Y = -2000.0f;
     const float MAP_MAX_Y = 6000.0f;
     const float MAP_Z = 100.0f; // 起始高度
+
+    srand(time(0));
 
     // 最多尝试50次找到有效的道路节点
     for (int attempts = 0; attempts < 50; attempts++) {
