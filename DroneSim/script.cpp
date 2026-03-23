@@ -948,10 +948,27 @@ static Position3D get_random_road_node() {
             LOGD("script", "Found vehicle node at (" + std::to_string(node_pos.x) + "," +
                  std::to_string(node_pos.y) + "," + std::to_string(node_pos.z) + ")");
 
-            // 获取地面高度
+            // 获取地面高度，尝试多种方法
             float ground_z = node_pos.z;
-            bool ground_found = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(node_pos.x, node_pos.y, node_pos.z + 50.0f, &ground_z, false);
-
+            bool ground_found = false;
+            
+            // 方法1: 直接使用节点高度附近查找
+            if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(node_pos.x, node_pos.y, node_pos.z + 10.0f, &ground_z, false)) {
+                ground_found = true;
+                LOGD("script", "Ground height found using node height: " + std::to_string(ground_z));
+            }
+            // 方法2: 尝试从更高位置查找
+            else if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(node_pos.x, node_pos.y, 1000.0f, &ground_z, false)) {
+                ground_found = true;
+                LOGD("script", "Ground height found from high altitude: " + std::to_string(ground_z));
+            }
+            // 方法3: 直接使用道路节点的高度
+            else {
+                ground_z = node_pos.z;
+                ground_found = true;
+                LOGD("script", "Using vehicle node height directly: " + std::to_string(ground_z));
+            }
+            
             if (ground_found) {
                 Position3D road_node(node_pos.x, node_pos.y, ground_z + 1.0f);
                 LOGD("script", "Found valid road node: (" + std::to_string(road_node.x) + "," +
@@ -959,7 +976,7 @@ static Position3D get_random_road_node() {
                      std::to_string(attempts + 1) + " attempts");
                 return road_node;
             } else {
-                LOGD("script", "Vehicle node found but ground height failed");
+                LOGD("script", "All ground height methods failed");
             }
         } else {
             LOGD("script", "No vehicle node found within 100m radius");
