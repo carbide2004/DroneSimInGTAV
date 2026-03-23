@@ -156,7 +156,7 @@ void hook_function(T* inst, void* hook, bool unhook = false)
         // 1. 检查是否检测到目标改变，并清除旧状态
         if (targets<offset, T> != nullptr && targets<offset, T> != *vtbl)
         {
-            LOGW("main", "detected target change, someone else is screwing with our functions. Re-hooking.");
+            LOGT("main", "detected target change, someone else is screwing with our functions. Re-hooking.");
             
             // 尝试禁用和移除 (如果失败，就忽略，MinHook 状态优先)
             MH_DisableHook(targets<offset, T>);

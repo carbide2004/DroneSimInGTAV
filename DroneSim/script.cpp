@@ -1111,9 +1111,9 @@ void scriptMain()
                 rotateCameraDelta(0.0f, 0.0f, -YAW_STEPSIZE);
                 if (g_verificationMode) g_verificationSteps++;
             }
-            if (F3.isKeyDown())
+            if (F12.isKeyDown())
             {
-                LOGI("script", "F3 pressed - Starting automated batch collection (10 samples)");
+                LOGD("script", "F12 pressed - Starting automated batch collection (10 samples)");
                 run_automated_collection(10);
             }
             if (F5.isKeyDown())
