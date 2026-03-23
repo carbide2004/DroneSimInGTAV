@@ -440,8 +440,8 @@ static void create_accident_near_pos(float ox, float oy, float oz) {
     VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v1);
     VEHICLE::SET_VEHICLE_HANDBRAKE(v1, true);
 
-    float xr = nodePos.x + cos(nodeHeading * 3.14159f / 180.0f) * offset;
-    float yr = nodePos.y + sin(nodeHeading * 3.14159f / 180.0f) * offset;
+    float xr = nodePos.x - sin(nodeHeading * 3.14159f / 180.0f) * offset;
+    float yr = nodePos.y + cos(nodeHeading * 3.14159f / 180.0f) * offset;
     v2 = VEHICLE::CREATE_VEHICLE(h2, xr, yr, gz, nodeHeading + 180.0f, true, false);
     STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(h2);
     VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v2);
@@ -759,17 +759,16 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
         return fallback;
     }
 
-    // 转换到数学坐标系角度
-    float math_angle = 90.0f - node_heading;
-    float angle_rad = math_angle * (3.14159f / 180.0f);
+    // 转换到弧度
+    float angle_rad = node_heading * (3.14159f / 180.0f);
     
-    // 使用数学坐标系计算方向向量
-    float dir_x = cosf(angle_rad);
-    float dir_y = sinf(angle_rad);
+    // 计算方向向量
+    float dir_x = -sinf(angle_rad);
+    float dir_y = cosf(angle_rad);
 
     // 从道路节点沿着道路朝向的反方向偏移指定距离
-    float start_x = node_pos.x - dir_x * offset_distance;
-    float start_y = node_pos.y - dir_y * offset_distance;
+    float start_x = target.x - dir_x * offset_distance;
+    float start_y = target.y - dir_y * offset_distance;
 
     // 获取地面高度
     float ground_z = node_pos.z;
@@ -788,6 +787,7 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
 
     LOGD("script", "Target: (" + std::to_string(target.x) + "," + std::to_string(target.y) + "," + std::to_string(target.z) + ")");
     LOGD("script", "Start:  (" + std::to_string(start_pos.x) + "," + std::to_string(start_pos.y) + "," + std::to_string(start_pos.z) + ")");
+    LOGD("script", "Direction: (" + std::to_string(dir_x) + "," + std::to_string(dir_y) + ")");
 
     return start_pos;
 }
