@@ -761,13 +761,31 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
 
     Position3D node(node_pos.x, node_pos.y, node_pos.z);
     LOGD("script", "Found closest node: (" + std::to_string(node.x) + "," + std::to_string(node.y) + "," + std::to_string(node.z) +
-         ") heading: " + std::to_string(node_heading) + " degrees");
+         ") raw_heading: " + std::to_string(node_heading));
 
-    // 使用道路节点朝向计算方向向量
-    // GTA V坐标系：0度 = 北方(Y轴正方向)
-    float heading_rad = node_heading * (3.14159f / 180.0f);
-    float dir_x = sinf(heading_rad);  // GTA V中heading的x分量
-    float dir_y = cosf(heading_rad);  // GTA V中heading的y分量
+    // 测试不同的角度单位和坐标系假设
+    // 假设1: heading是角度制，0度=北方(Y轴正方向)
+    float heading_rad_deg = node_heading * (3.14159f / 180.0f);
+    float dir_x_deg = sinf(heading_rad_deg);
+    float dir_y_deg = cosf(heading_rad_deg);
+    
+    // 假设2: heading已经是弧度制，0度=北方(Y轴正方向)
+    float dir_x_rad = sinf(node_heading);
+    float dir_y_rad = cosf(node_heading);
+    
+    // 假设3: heading是角度制，0度=东方(X轴正方向)
+    float heading_rad_east = node_heading * (3.14159f / 180.0f);
+    float dir_x_east = cosf(heading_rad_east);
+    float dir_y_east = sinf(heading_rad_east);
+    
+    LOGD("script", "Direction vectors test:");
+    LOGD("script", "  Deg+North: dir_x=" + std::to_string(dir_x_deg) + ", dir_y=" + std::to_string(dir_y_deg));
+    LOGD("script", "  Rad+North: dir_x=" + std::to_string(dir_x_rad) + ", dir_y=" + std::to_string(dir_y_rad));
+    LOGD("script", "  Deg+East:  dir_x=" + std::to_string(dir_x_east) + ", dir_y=" + std::to_string(dir_y_east));
+
+    // 暂时使用假设1（原来的方法）
+    float dir_x = dir_x_deg;
+    float dir_y = dir_y_deg;
 
     // 从道路节点沿着道路朝向的反方向偏移指定距离（确保起始点在道路上）
     float start_x = node_pos.x - dir_x * offset_distance;
@@ -796,8 +814,17 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
 
     Position3D start_pos(start_x, start_y, ground_z + 15.0f);
 
-    LOGD("script", "Calculated start position: (" + std::to_string(start_pos.x) + "," + std::to_string(start_pos.y) + "," + std::to_string(start_pos.z) +
-         ") offset=" + std::to_string(offset_distance) + "m from road node (heading=" + std::to_string(node_heading) + "° GTA V: 0°=North)");
+    // 计算起始点到目标点的距离和方向，用于验证
+    float actual_distance = sqrt(pow(target.x - start_pos.x, 2) + pow(target.y - start_pos.y, 2));
+    float actual_angle_rad = atan2(target.y - start_pos.y, target.x - start_pos.x);
+    float actual_angle_deg = actual_angle_rad * (180.0f / 3.14159f);
+
+    LOGD("script", "Final result:");
+    LOGD("script", "  Start: (" + std::to_string(start_pos.x) + "," + std::to_string(start_pos.y) + "," + std::to_string(start_pos.z) + ")");
+    LOGD("script", "  Target: (" + std::to_string(target.x) + "," + std::to_string(target.y) + "," + std::to_string(target.z) + ")");
+    LOGD("script", "  Distance: " + std::to_string(actual_distance) + "m (expected: " + std::to_string(offset_distance) + "m)");
+    LOGD("script", "  Actual direction: " + std::to_string(actual_angle_deg) + "° (road heading: " + std::to_string(node_heading) + ")");
+    LOGD("script", "  Direction vector used: (" + std::to_string(dir_x) + "," + std::to_string(dir_y) + ")");
 
     return start_pos;
 }
