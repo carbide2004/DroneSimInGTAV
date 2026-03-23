@@ -1025,7 +1025,9 @@ static void run_automated_collection(int collection_count = 10) {
         // 2. 切换到玩家视角
         if (scriptStatus == cameraMode) {
             StopCamera();
+            scriptStatus = scriptStop;
             WAIT(500); // 等待视角切换完成
+            LOGI("script", "Switched to player view");
         }
 
         // 3. 传送玩家到目标节点
@@ -1039,7 +1041,9 @@ static void run_automated_collection(int collection_count = 10) {
         // 4. 切换回相机视角
         if (scriptStatus != cameraMode) {
             startNewCamera();
+            scriptStatus = cameraMode;
             WAIT(500); // 等待相机启动
+            LOGI("script", "Switched back to camera mode");
         }
 
         // 5. 在目标位置创建火灾事件
