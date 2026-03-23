@@ -689,42 +689,32 @@ static float yaw_to_target_deg(Position3D from, Position3D to) {
     return yaw;
 }
 
-// 基于道路节点的起始位置选择函数
+// 基于道路节点朝向的起始位置选择函数
 static Position3D find_good_start_position(Position3D target, float offset_distance = 50.0f) {
-    // 找到离目标点最近的道路节点
+    // 找到离目标点最近的道路节点及其朝向
     Vector3 node_pos;
-    bool found_node = PATHFIND::GET_CLOSEST_VEHICLE_NODE(target.x, target.y, target.z, &node_pos, 1, 3.0f, 0);
-    
+    float node_heading = 0.0f;
+    bool found_node = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(target.x, target.y, target.z, &node_pos, &node_heading, 1, 3.0f, 0);
+
     if (!found_node) {
-        LOGW("script", "Could not find closest vehicle node, using fallback position");
+        LOGW("script", "Could not find closest vehicle node with heading, using fallback position");
         Position3D fallback(target.x + offset_distance, target.y, target.z + 20.0f);
         return fallback;
     }
-    
+
     Position3D node(node_pos.x, node_pos.y, node_pos.z);
-    LOGD("script", "Found closest node: (" + std::to_string(node.x) + "," + std::to_string(node.y) + "," + std::to_string(node.z) + ")");
-    
-    // 计算从节点到目标的方向向量
-    float dx = target.x - node.x;
-    float dy = target.y - node.y;
-    float distance_to_target = sqrtf(dx * dx + dy * dy);
-    
-    if (distance_to_target < 1.0f) {
-        // 如果节点离目标太近，使用默认方向
-        dx = 1.0f;
-        dy = 0.0f;
-        distance_to_target = 1.0f;
-        LOGW("script", "Node too close to target, using default direction");
-    }
-    
-    // 归一化方向向量
-    float norm_dx = dx / distance_to_target;
-    float norm_dy = dy / distance_to_target;
-    
-    // 在反方向上偏移指定距离
-    float start_x = node.x - norm_dx * offset_distance;
-    float start_y = node.y - norm_dy * offset_distance;
-    
+    LOGD("script", "Found closest node: (" + std::to_string(node.x) + "," + std::to_string(node.y) + "," + std::to_string(node.z) +
+         ") heading: " + std::to_string(node_heading) + " degrees");
+
+    // 将朝向转换为弧度，并计算方向向量
+    float heading_rad = node_heading * (3.14159f / 180.0f);
+    float dir_x = sinf(heading_rad);  // GTA V中heading的x分量
+    float dir_y = cosf(heading_rad);  // GTA V中heading的y分量
+
+    // 在道路朝向的反方向上偏移指定距离（这样相机会面向目标方向）
+    float start_x = target.x - dir_x * offset_distance;
+    float start_y = target.y - dir_y * offset_distance;
+
     // 获取地面高度
     float ground_z = target.z;
     if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(start_x, start_y, target.z + 50.0f, &ground_z, false)) {
@@ -733,14 +723,15 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
         ground_z = target.z + 10.0f; // 如果获取地面高度失败，使用目标高度加10m
         LOGW("script", "Could not get ground height, using target height + 10m");
     }
-    
+
     Position3D start_pos(start_x, start_y, ground_z);
-    
-    LOGD("script", "Calculated start position: (" + std::to_string(start_pos.x) + "," + std::to_string(start_pos.y) + "," + std::to_string(start_pos.z) + 
-         ") offset=" + std::to_string(offset_distance) + "m from node");
-    
+
+    LOGD("script", "Calculated start position: (" + std::to_string(start_pos.x) + "," + std::to_string(start_pos.y) + "," + std::to_string(start_pos.z) +
+         ") offset=" + std::to_string(offset_distance) + "m in direction " + std::to_string(node_heading) + "°");
+
     return start_pos;
 }
+
 
 static void run_auto_collect(AutoCollectEvent event_type) {
     static bool active = false;
