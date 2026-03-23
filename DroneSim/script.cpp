@@ -1034,8 +1034,7 @@ static void run_automated_collection(int collection_count = 10) {
     int successful_collections = 0;
     int total_attempts = 0;
 
-    while (successful_collections < collection_count && total_attempts < collection_count * 3) {
-        total_attempts++;
+    for (total_attempts = 0; total_attempts < collection_count; total_attempts++) {
         LOGI("script", "Starting collection attempt " + std::to_string(total_attempts) +
             " (successful: " + std::to_string(successful_collections) + "/" + std::to_string(collection_count) + ")");
 
