@@ -746,139 +746,6 @@ static void delete_recording_session() {
     LOGI("script", "Recording session deleted due to collision");
 }
 
-// 获取随机道路节点位置
-static Position3D get_random_road_node() {
-    // GTA V地图的大致范围
-    const float MAP_MIN_X = -4000.0f;
-    const float MAP_MAX_X = 4000.0f;
-    const float MAP_MIN_Y = -4000.0f;
-    const float MAP_MAX_Y = 8000.0f;
-    const float MAP_Z = 100.0f; // 起始高度
-    
-    // 最多尝试50次找到有效的道路节点
-    for (int attempts = 0; attempts < 50; attempts++) {
-        // 生成随机坐标
-        float random_x = MAP_MIN_X + (rand() / (float)RAND_MAX) * (MAP_MAX_X - MAP_MIN_X);
-        float random_y = MAP_MIN_Y + (rand() / (float)RAND_MAX) * (MAP_MAX_Y - MAP_MIN_Y);
-        
-        // 查找最近的道路节点
-        Vector3 node_pos;
-        bool found = PATHFIND::GET_CLOSEST_VEHICLE_NODE(random_x, random_y, MAP_Z, &node_pos, 1, 50.0f, 0);
-        
-        if (found) {
-            // 获取地面高度
-            float ground_z = node_pos.z;
-            if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(node_pos.x, node_pos.y, node_pos.z + 50.0f, &ground_z, false)) {
-                Position3D road_node(node_pos.x, node_pos.y, ground_z + 1.0f);
-                LOGD("script", "Found random road node: (" + std::to_string(road_node.x) + "," + 
-                     std::to_string(road_node.y) + "," + std::to_string(road_node.z) + ") after " + 
-                     std::to_string(attempts + 1) + " attempts");
-                return road_node;
-            }
-        }
-    }
-    
-    // 如果找不到有效节点，返回默认位置
-    LOGW("script", "Could not find valid random road node after 50 attempts, using default position");
-    return Position3D(0.0f, 0.0f, 30.0f);
-}
-
-// 自动化采集流程
-static void run_automated_collection(int collection_count = 10) {
-    static bool automated_active = false;
-    if (automated_active) {
-        LOGW("script", "Automated collection already running");
-        return;
-    }
-    
-    automated_active = true;
-    LOGI("script", "Starting automated collection: " + std::to_string(collection_count) + " samples");
-    
-    // 获取玩家并设置无敌和不可见
-    Ped player = PLAYER::PLAYER_PED_ID();
-    if (player) {
-        ENTITY::SET_ENTITY_INVINCIBLE(player, true);
-        ENTITY::SET_ENTITY_VISIBLE(player, false, false);
-        LOGI("script", "Player set to invincible and invisible");
-    }
-    
-    // 随机种子
-    srand(static_cast<unsigned int>(time(nullptr)));
-    
-    int successful_collections = 0;
-    int total_attempts = 0;
-    
-    while (successful_collections < collection_count && total_attempts < collection_count * 3) {
-        total_attempts++;
-        LOGI("script", "Starting collection attempt " + std::to_string(total_attempts) + 
-             " (successful: " + std::to_string(successful_collections) + "/" + std::to_string(collection_count) + ")");
-        
-        // 1. 获取随机道路节点
-        Position3D target_node = get_random_road_node();
-        
-        // 2. 切换到玩家视角
-        if (scriptStatus == cameraMode) {
-            StopCamera();
-            WAIT(500); // 等待视角切换完成
-        }
-        
-        // 3. 传送玩家到目标节点
-        if (player) {
-            ENTITY::SET_ENTITY_COORDS(player, target_node.x, target_node.y, target_node.z, true, false, false, true);
-            WAIT(1000); // 等待传送完成
-            LOGI("script", "Player teleported to (" + std::to_string(target_node.x) + "," + 
-                 std::to_string(target_node.y) + "," + std::to_string(target_node.z) + ")");
-        }
-        
-        // 4. 切换回相机视角
-        if (scriptStatus != cameraMode) {
-            StartCamera();
-            WAIT(500); // 等待相机启动
-        }
-        
-        // 5. 在目标位置创建火灾事件
-        create_fire_near_pos(target_node.x, target_node.y, target_node.z);
-        WAIT(1000); // 等待火灾创建完成
-        
-        // 6. 检查火灾是否创建成功
-        if (!g_fireReady) {
-            LOGW("script", "Fire creation failed, skipping this attempt");
-            continue;
-        }
-        
-        // 7. 执行自动采集
-        LOGI("script", "Starting auto_collect for fire at (" + std::to_string(g_firePos[0]) + "," + 
-             std::to_string(g_firePos[1]) + "," + std::to_string(g_firePos[2]) + ")");
-        
-        run_auto_collect(AUTO_EVENT_FIRE);
-        
-        // 8. 等待采集完成
-        WAIT(2000);
-        
-        // 9. 检查采集是否成功（通过检查是否还有录制会话目录）
-        if (g_recordingSessionDir[0] != '\0') {
-            successful_collections++;
-            LOGI("script", "Collection " + std::to_string(successful_collections) + " completed successfully");
-        } else {
-            LOGW("script", "Collection failed (likely due to collision), attempt " + std::to_string(total_attempts));
-        }
-        
-        // 10. 短暂休息
-        WAIT(1000);
-    }
-    
-    // 恢复玩家状态
-    if (player) {
-        ENTITY::SET_ENTITY_INVINCIBLE(player, false);
-        ENTITY::SET_ENTITY_VISIBLE(player, true, false);
-        LOGI("script", "Player visibility and invincibility restored");
-    }
-    
-    automated_active = false;
-    LOGI("script", "Automated collection completed: " + std::to_string(successful_collections) + 
-         " successful out of " + std::to_string(total_attempts) + " attempts");
-}
-
 // 基于道路节点朝向的起始位置选择函数
 static Position3D find_good_start_position(Position3D target, float offset_distance = 50.0f) {
     // 找到离目标点最近的道路节点及其朝向
@@ -1053,6 +920,140 @@ static void run_auto_collect(AutoCollectEvent event_type) {
     record_step(reached ? "AUTO_STOP_REACHED" : "AUTO_STOP_MAXSTEPS", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
     stop_recording_session();
     active = false;
+}
+
+// 获取随机道路节点位置
+static Position3D get_random_road_node() {
+    // GTA V地图的大致范围
+    const float MAP_MIN_X = -4000.0f;
+    const float MAP_MAX_X = 4000.0f;
+    const float MAP_MIN_Y = -4000.0f;
+    const float MAP_MAX_Y = 8000.0f;
+    const float MAP_Z = 100.0f; // 起始高度
+
+    // 最多尝试50次找到有效的道路节点
+    for (int attempts = 0; attempts < 50; attempts++) {
+        // 生成随机坐标
+        float random_x = MAP_MIN_X + (rand() / (float)RAND_MAX) * (MAP_MAX_X - MAP_MIN_X);
+        float random_y = MAP_MIN_Y + (rand() / (float)RAND_MAX) * (MAP_MAX_Y - MAP_MIN_Y);
+
+        // 查找最近的道路节点
+        Vector3 node_pos;
+        bool found = PATHFIND::GET_CLOSEST_VEHICLE_NODE(random_x, random_y, MAP_Z, &node_pos, 1, 50.0f, 0);
+
+        if (found) {
+            // 获取地面高度
+            float ground_z = node_pos.z;
+            if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(node_pos.x, node_pos.y, node_pos.z + 50.0f, &ground_z, false)) {
+                Position3D road_node(node_pos.x, node_pos.y, ground_z + 1.0f);
+                LOGD("script", "Found random road node: (" + std::to_string(road_node.x) + "," +
+                    std::to_string(road_node.y) + "," + std::to_string(road_node.z) + ") after " +
+                    std::to_string(attempts + 1) + " attempts");
+                return road_node;
+            }
+        }
+    }
+
+    // 如果找不到有效节点，返回默认位置
+    LOGW("script", "Could not find valid random road node after 50 attempts, using default position");
+    return Position3D(0.0f, 0.0f, 30.0f);
+}
+
+// 自动化采集流程
+static void run_automated_collection(int collection_count = 10) {
+    static bool automated_active = false;
+    if (automated_active) {
+        LOGW("script", "Automated collection already running");
+        return;
+    }
+
+    automated_active = true;
+    LOGI("script", "Starting automated collection: " + std::to_string(collection_count) + " samples");
+
+    // 获取玩家并设置无敌和不可见
+    Ped player = PLAYER::PLAYER_PED_ID();
+    if (player) {
+        ENTITY::SET_ENTITY_INVINCIBLE(player, true);
+        ENTITY::SET_ENTITY_VISIBLE(player, false, false);
+        LOGI("script", "Player set to invincible and invisible");
+    }
+
+    // 随机种子
+    srand(static_cast<unsigned int>(time(nullptr)));
+
+    int successful_collections = 0;
+    int total_attempts = 0;
+
+    while (successful_collections < collection_count && total_attempts < collection_count * 3) {
+        total_attempts++;
+        LOGI("script", "Starting collection attempt " + std::to_string(total_attempts) +
+            " (successful: " + std::to_string(successful_collections) + "/" + std::to_string(collection_count) + ")");
+
+        // 1. 获取随机道路节点
+        Position3D target_node = get_random_road_node();
+
+        // 2. 切换到玩家视角
+        if (scriptStatus == cameraMode) {
+            StopCamera();
+            WAIT(500); // 等待视角切换完成
+        }
+
+        // 3. 传送玩家到目标节点
+        if (player) {
+            ENTITY::SET_ENTITY_COORDS(player, target_node.x, target_node.y, target_node.z, true, false, false, true);
+            WAIT(1000); // 等待传送完成
+            LOGI("script", "Player teleported to (" + std::to_string(target_node.x) + "," +
+                std::to_string(target_node.y) + "," + std::to_string(target_node.z) + ")");
+        }
+
+        // 4. 切换回相机视角
+        if (scriptStatus != cameraMode) {
+            startNewCamera();
+            WAIT(500); // 等待相机启动
+        }
+
+        // 5. 在目标位置创建火灾事件
+        create_fire_near_pos(target_node.x, target_node.y, target_node.z);
+        WAIT(1000); // 等待火灾创建完成
+
+        // 6. 检查火灾是否创建成功
+        if (!g_fireReady) {
+            LOGW("script", "Fire creation failed, skipping this attempt");
+            continue;
+        }
+
+        // 7. 执行自动采集
+        LOGI("script", "Starting auto_collect for fire at (" + std::to_string(g_firePos[0]) + "," +
+            std::to_string(g_firePos[1]) + "," + std::to_string(g_firePos[2]) + ")");
+
+        run_auto_collect(AUTO_EVENT_FIRE);
+
+        // 8. 等待采集完成
+        WAIT(2000);
+
+        // 9. 检查采集是否成功（通过检查是否还有录制会话目录）
+        if (g_recordingSessionDir[0] != '\0') {
+            successful_collections++;
+            LOGI("script", "Collection " + std::to_string(successful_collections) + " completed successfully");
+        }
+        else {
+            LOGW("script", "Collection failed (likely due to collision), attempt " + std::to_string(total_attempts));
+        }
+
+        // 10. 短暂休息
+        WAIT(1000);
+    }
+
+    // 恢复玩家状态
+    if (player) {
+        ENTITY::SET_ENTITY_INVINCIBLE(player, false);
+        ENTITY::SET_ENTITY_VISIBLE(player, true, false);
+        LOGI("script", "Player visibility and invincibility restored");
+    }
+
+    automated_active = false;
+    LOGI("script", "Automated collection completed: " + std::to_string(successful_collections) +
+        " successful out of " + std::to_string(total_attempts) + " attempts");
 }
 
 void scriptMain()
