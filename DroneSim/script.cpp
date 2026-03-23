@@ -747,6 +747,7 @@ static void delete_recording_session() {
 }
 
 // 基于道路节点朝向的起始位置选择函数
+// 基于道路节点朝向的起始位置选择函数
 static Position3D find_good_start_position(Position3D target, float offset_distance = 50.0f) {
     // 找到离目标点最近的道路节点及其朝向
     Vector3 node_pos;
@@ -763,31 +764,67 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
     LOGD("script", "Found closest node: (" + std::to_string(node.x) + "," + std::to_string(node.y) + "," + std::to_string(node.z) +
          ") heading: " + std::to_string(node_heading) + " degrees");
 
-    // 将朝向转换为弧度，并计算方向向量
-    float heading_rad = node_heading * (3.14159f / 180.0f);
-    float dir_x = sinf(heading_rad);  // GTA V中heading的x分量
-    float dir_y = cosf(heading_rad);  // GTA V中heading的y分量
+    // 方法1: 尝试找到相邻的道路节点来确定真实的道路方向
+    Vector3 next_node_pos;
+    float next_heading = 0.0f;
 
-    // 在道路朝向的反方向上偏移指定距离（这样相机会面向目标方向）
-    float start_x = target.x - dir_x * offset_distance;
-    float start_y = target.y - dir_y * offset_distance;
+    // 沿着节点朝向寻找下一个节点
+    float search_x = node_pos.x + sinf(node_heading * 3.14159f / 180.0f) * 30.0f;
+    float search_y = node_pos.y + cosf(node_heading * 3.14159f / 180.0f) * 30.0f;
+    bool found_next = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(search_x, search_y, node_pos.z, &next_node_pos, &next_heading, 1, 50.0f, 0);
 
-    // 获取地面高度
-    float ground_z = target.z;
-    if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(start_x, start_y, target.z + 50.0f, &ground_z, false)) {
-        ground_z += 10.0f; // 地面高度加10m
+    float dir_x, dir_y;
+
+    if (found_next && (fabsf(next_node_pos.x - node_pos.x) > 5.0f || fabsf(next_node_pos.y - node_pos.y) > 5.0f)) {
+        // 使用两个节点之间的实际方向
+        float dx = next_node_pos.x - node_pos.x;
+        float dy = next_node_pos.y - node_pos.y;
+        float dist = sqrtf(dx * dx + dy * dy);
+        dir_x = dx / dist;
+        dir_y = dy / dist;
+        LOGD("script", "Using direction from two road nodes: next node at (" +
+             std::to_string(next_node_pos.x) + "," + std::to_string(next_node_pos.y) + ")");
     } else {
-        ground_z = target.z + 10.0f; // 如果获取地面高度失败，使用目标高度加10m
-        LOGW("script", "Could not get ground height, using target height + 10m");
+        // 回退到使用节点朝向
+        float heading_rad = node_heading * (3.14159f / 180.0f);
+        dir_x = sinf(heading_rad);
+        dir_y = cosf(heading_rad);
+        LOGD("script", "Using node heading direction: " + std::to_string(node_heading) + " degrees");
     }
 
-    Position3D start_pos(start_x, start_y, ground_z);
+    // 从道路节点沿着道路方向的反方向偏移指定距离
+    float start_x = node_pos.x - dir_x * offset_distance;
+    float start_y = node_pos.y - dir_y * offset_distance;
+
+    // 获取地面高度，尝试多种方法
+    float ground_z = node_pos.z;
+    bool ground_found = false;
+
+    // 方法1: 直接使用节点高度附近查找
+    if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(start_x, start_y, node_pos.z + 10.0f, &ground_z, false)) {
+        ground_found = true;
+        LOGD("script", "Ground height found using node height: " + std::to_string(ground_z));
+    }
+    // 方法2: 尝试从更高位置查找
+    else if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(start_x, start_y, 1000.0f, &ground_z, false)) {
+        ground_found = true;
+        LOGD("script", "Ground height found from high altitude: " + std::to_string(ground_z));
+    }
+    // 方法3: 直接使用道路节点的高度
+    else {
+        ground_z = node_pos.z;
+        ground_found = true;
+        LOGD("script", "Using vehicle node height directly: " + std::to_string(ground_z));
+    }
+
+    Position3D start_pos(start_x, start_y, ground_z + 10.0f);
 
     LOGD("script", "Calculated start position: (" + std::to_string(start_pos.x) + "," + std::to_string(start_pos.y) + "," + std::to_string(start_pos.z) +
-         ") offset=" + std::to_string(offset_distance) + "m in direction " + std::to_string(node_heading) + "°");
+         ") offset=" + std::to_string(offset_distance) + "m from road node");
 
     return start_pos;
 }
+
 
 
 static void run_auto_collect(AutoCollectEvent event_type) {
