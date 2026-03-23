@@ -1094,6 +1094,19 @@ static void run_automated_collection(int collection_count = 10) {
     }
 
     // 恢复玩家状态
+    Position3D target_node = get_random_road_node();
+    if (scriptStatus == cameraMode) {
+        StopCamera();
+        scriptStatus = scriptStop;
+        WAIT(500); // 等待视角切换完成
+        LOGI("script", "Switched to player view");
+    }
+    if (player) {
+        ENTITY::SET_ENTITY_COORDS(player, target_node.x, target_node.y, target_node.z, true, false, false, true);
+        WAIT(1000); // 等待传送完成
+        LOGI("script", "Player teleported to (" + std::to_string(target_node.x) + "," +
+            std::to_string(target_node.y) + "," + std::to_string(target_node.z) + ")");
+    }
     if (player) {
         ENTITY::SET_ENTITY_INVINCIBLE(player, false);
         ENTITY::SET_ENTITY_VISIBLE(player, true, false);
