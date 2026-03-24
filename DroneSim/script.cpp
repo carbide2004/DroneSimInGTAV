@@ -1022,6 +1022,7 @@ static void run_automated_collection(int collection_count = 10) {
         ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, false);
         ENTITY::SET_ENTITY_PROOFS(player, true, true, true, true, true, true, true, true);
         PLAYER::SET_MAX_WANTED_LEVEL(0);
+        PLAYER::SET_POLICE_IGNORE_PLAYER(player, true);
         
         LOGI("script", "Player set to maximum protection mode (invincible, invisible, underground)");
     }
