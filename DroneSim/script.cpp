@@ -114,12 +114,41 @@ static std::string json_escape(const std::string& s) {
     return out;
 }
 
-static void write_metadata(const std::string& base, const std::string& task) {
+static void write_metadata(const std::string& base, AutoCollectEvent event_type, const Position3D& target, 
+                          const Position3D& start_pos, float start_yaw, int final_steps, const std::string& task) {
     if (base.empty()) return;
     std::ofstream f(base + "\\metadata.jsonl", std::ios::out | std::ios::binary);
     if (!f.is_open()) return;
-    std::string t = task;
-    f << "{\"task\":\"" << json_escape(t) << "\"}\n";
+    
+    // 获取当前时间戳
+    char timestamp[32];
+    time_t rawtime;
+    struct tm timeinfo;
+    time(&rawtime);
+    localtime_s(&timeinfo, &rawtime);
+    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", &timeinfo);
+    
+    // 根据事件类型确定异常类型
+    std::string anomaly_type;
+    if (event_type == AUTO_EVENT_FIRE) {
+        anomaly_type = "fire";
+    } else if (event_type == AUTO_EVENT_FIGHT) {
+        anomaly_type = "fight";
+    } else if (event_type == AUTO_EVENT_ACCIDENT) {
+        anomaly_type = "accident";
+    }
+    
+    // 构建JSON条目
+    std::string json_entry = "{";
+    json_entry += "\"anomaly_type\": \"" + anomaly_type + "\",";
+    json_entry += "\"anomaly_position\": {\"x\": " + std::to_string(target.x) + ", \"y\": " + std::to_string(target.y) + ", \"z\": " + std::to_string(target.z) + "},";
+    json_entry += "\"start_pose\": {\"x\": " + std::to_string(start_pos.x) + ", \"y\": " + std::to_string(start_pos.y) + ", \"z\": " + std::to_string(start_pos.z) + ", \"rx\": 0.0, \"ry\": 0.0, \"rz\": " + std::to_string(start_yaw) + "},";
+    json_entry += "\"expected_steps\": " + std::to_string(final_steps) + ",";
+    json_entry += "\"task_description\": \"" + json_escape(task) + "\",";
+    json_entry += "\"created_time\": \"" + std::string(timestamp) + "\"";
+    json_entry += "}";
+    
+    f << json_entry << "\n";
     f.flush();
 }
 
@@ -139,16 +168,29 @@ static void start_recording_session(const char* task) {
     if (g_recordingStepsFile.is_open()) g_recordingStepsFile.close();
     g_recordingStepsFile.open(base + "\\steps.jsonl", std::ios::out | std::ios::binary);
     g_recordingEnabled = g_recordingStepsFile.is_open();
-    if (g_recordingEnabled) {
-        std::string task_str;
-        if (task && task[0] != '\0') task_str = std::string(task);
-        else if (g_recordingRequestedTask[0] != '\0') task_str = std::string(g_recordingRequestedTask);
-        write_metadata(base, task_str);
-    }
     if (g_recordingEnabled) LOGI("script", std::string("Recording started: ") + g_recordingSessionDir);
     else LOGE("script", "Recording start failed");
 }
 
+static void stop_recording_session(AutoCollectEvent event_type, const Position3D& target, 
+                                   const Position3D& start_pos, float start_yaw, int final_steps, const std::string& task) {
+    if (!g_recordingEnabled) return;
+    g_recordingEnabled = false;
+    if (g_recordingStepsFile.is_open()) {
+        g_recordingStepsFile.flush();
+        g_recordingStepsFile.close();
+    }
+    
+    // 写入元数据
+    if (g_recordingSessionDir[0] != '\0') {
+        std::string base(g_recordingSessionDir);
+        write_metadata(base, event_type, target, start_pos, start_yaw, final_steps, task);
+    }
+    
+    LOGI("script", "Recording stopped");
+}
+
+// 保持向后兼容的重载函数
 static void stop_recording_session() {
     if (!g_recordingEnabled) return;
     g_recordingEnabled = false;
@@ -868,7 +910,8 @@ static void run_auto_collect(AutoCollectEvent event_type) {
     
     int maxSteps = 50;
     bool reached = false;
-    for (int step = 0; step < maxSteps; step++) {
+    int step;
+    for (step = 0; step < maxSteps; step++) {
         cam = CAM::GET_RENDERING_CAM();
         Vector3 cam_pos = CAM::GET_CAM_COORD(cam);
         Vector3 rot = CAM::GET_CAM_ROT(cam, 2);
@@ -958,7 +1001,10 @@ static void run_auto_collect(AutoCollectEvent event_type) {
     }
 
     record_step(reached ? "AUTO_STOP_REACHED" : "AUTO_STOP_MAXSTEPS", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-    stop_recording_session();
+    step++;
+
+    // 调用带参数的stop_recording_session
+    stop_recording_session(event_type, target, actual_start_pos, yaw, step, std::string(task));
     stop_fire_maintenance();
     clear_spawned_entities();
     active = false;
