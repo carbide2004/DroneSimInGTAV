@@ -140,6 +140,7 @@ static void write_metadata(const std::string& base, AutoCollectEvent event_type,
     
     // 构建JSON条目
     std::string json_entry = "{";
+    json_entry += "\"scenario_id\": \"manual_" + std::string(timestamp) + "\",";
     json_entry += "\"anomaly_type\": \"" + anomaly_type + "\",";
     json_entry += "\"anomaly_position\": {\"x\": " + std::to_string(target.x) + ", \"y\": " + std::to_string(target.y) + ", \"z\": " + std::to_string(target.z) + "},";
     json_entry += "\"start_pose\": {\"x\": " + std::to_string(start_pos.x) + ", \"y\": " + std::to_string(start_pos.y) + ", \"z\": " + std::to_string(start_pos.z) + ", \"rx\": 0.0, \"ry\": 0.0, \"rz\": " + std::to_string(start_yaw) + "},";
