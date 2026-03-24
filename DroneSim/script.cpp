@@ -59,6 +59,12 @@ public:
     }
 };
 
+enum AutoCollectEvent {
+    AUTO_EVENT_ACCIDENT = 1,
+    AUTO_EVENT_FIRE = 2,
+    AUTO_EVENT_FIGHT = 3
+};
+
 // Verification mode variables
 static bool g_verificationMode = false;
 static int g_verificationSteps = 0;
@@ -715,12 +721,6 @@ static float quantize_deg(float a, float step) {
     if (step <= 0.0f) return a;
     return roundf(a / step) * step;
 }
-
-enum AutoCollectEvent {
-    AUTO_EVENT_ACCIDENT = 1,
-    AUTO_EVENT_FIRE = 2,
-    AUTO_EVENT_FIGHT = 3
-};
 
 static void run_manual_collect(AutoCollectEvent event_type) {
     if (g_recordingEnabled) return;
