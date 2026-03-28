@@ -1454,6 +1454,10 @@ void scriptMain()
                 // Make player invincible and invisible for verification
                 PLAYER::SET_PLAYER_INVINCIBLE(PLAYER::PLAYER_ID(), true);
                 ENTITY::SET_ENTITY_VISIBLE(player, false, false);
+                ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, false);
+                ENTITY::SET_ENTITY_PROOFS(player, true, true, true, true, true, true, true, true);
+                PLAYER::SET_MAX_WANTED_LEVEL(0);
+                PLAYER::SET_POLICE_IGNORE_PLAYER(player, true);
                 
                 // Teleport player directly to anomaly position
                 ENTITY::SET_ENTITY_COORDS(player, x, y, z, true, false, false, true);
