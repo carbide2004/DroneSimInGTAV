@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import AutoModel, AutoTokenizer
 
+from hf_auth import load_hf_token_from_env_file
 from stage1_model import Stage1Config, Stage1GRUModel
 from trajectory_dataset import build_stage1_dataloaders
 
@@ -235,6 +236,9 @@ def main():
     parser.add_argument("--device", default="cuda", help="Training device")
     args = parser.parse_args()
 
+    repo_root = _repo_root()
+    hf_token = load_hf_token_from_env_file(repo_root)
+
     torch.manual_seed(int(args.seed))
     np.random.seed(int(args.seed))
 
@@ -253,8 +257,8 @@ def main():
 
     feature_store = DINOFeatureStore(Path(args.cache_dir))
 
-    tokenizer = AutoTokenizer.from_pretrained(args.text_model_name)
-    text_encoder = AutoModel.from_pretrained(args.text_model_name).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(args.text_model_name, token=hf_token)
+    text_encoder = AutoModel.from_pretrained(args.text_model_name, token=hf_token).to(device)
     text_encoder.eval()
 
     text_dim = int(getattr(text_encoder.config, "hidden_size", 384))

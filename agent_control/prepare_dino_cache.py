@@ -7,6 +7,8 @@ import torch
 from PIL import Image
 from transformers import AutoImageProcessor, AutoModel
 
+from hf_auth import load_hf_token_from_env_file
+
 
 def _repo_root():
     return Path(__file__).resolve().parent.parent
@@ -71,6 +73,9 @@ def main():
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing cache")
     args = parser.parse_args()
 
+    repo_root = _repo_root()
+    hf_token = load_hf_token_from_env_file(repo_root)
+
     dataset_path = Path(args.dataset_json)
     if not dataset_path.exists():
         raise FileNotFoundError(f"Dataset file not found: {dataset_path}")
@@ -85,8 +90,8 @@ def main():
         raise RuntimeError("Dataset JSON must be a list.")
 
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
-    processor = AutoImageProcessor.from_pretrained(args.model_name)
-    model = AutoModel.from_pretrained(args.model_name).to(device)
+    processor = AutoImageProcessor.from_pretrained(args.model_name, use_fast=True, token=hf_token)
+    model = AutoModel.from_pretrained(args.model_name, token=hf_token).to(device)
     model.eval()
 
     pairs = []
