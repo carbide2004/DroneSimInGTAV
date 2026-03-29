@@ -10,17 +10,33 @@ def _read_json(path: Path):
 
 
 def _step_index(entry: Dict) -> int:
-    step = entry.get("step_index")
-    if step is None:
-        return 0
-    return int(step)
+    if "step_index" not in entry:
+        raise KeyError("Missing required field: step_index")
+    return int(entry["step_index"])
 
 
 def _trajectory_id(entry: Dict, fallback_index: int) -> str:
-    value = entry.get("trajectory_id")
-    if value is None:
-        return f"__unknown_{fallback_index}__"
-    return str(value)
+    del fallback_index
+    if "trajectory_id" not in entry:
+        raise KeyError("Missing required field: trajectory_id")
+    value = str(entry["trajectory_id"]).strip()
+    if not value:
+        raise ValueError("trajectory_id must be non-empty")
+    return value
+
+
+def _pose_dict(entry: Dict) -> Dict[str, float]:
+    pose = entry.get("pose")
+    if not isinstance(pose, dict):
+        raise KeyError("Missing required field: pose")
+    return {
+        "x": float(pose["x"]),
+        "y": float(pose["y"]),
+        "z": float(pose["z"]),
+        "rx": float(pose["rx"]),
+        "ry": float(pose["ry"]),
+        "rz": float(pose["rz"]),
+    }
 
 
 def group_by_trajectory(entries: Sequence[Dict]) -> Dict[str, List[Dict]]:
@@ -50,39 +66,28 @@ def split_trajectory_ids(trajectory_ids: Sequence[str], val_ratio: float, seed: 
 
 def _resolve_image_paths(entry: Dict) -> Tuple[Optional[str], Optional[str]]:
     observations = entry.get("observations")
-    if isinstance(observations, dict):
-        rgb = observations.get("rgb") or {}
-        depth = observations.get("depth") or {}
-        rgb_path = rgb.get("path")
-        depth_path = depth.get("path")
-        if rgb_path and depth_path:
-            return str(rgb_path), str(depth_path)
-    images = entry.get("images") or []
-    if len(images) < 2:
-        return None, None
-    return str(images[0]), str(images[1])
+    if not isinstance(observations, dict):
+        raise KeyError("Missing required field: observations")
+    rgb = observations.get("rgb")
+    depth = observations.get("depth")
+    if not isinstance(rgb, dict) or not isinstance(depth, dict):
+        raise KeyError("Missing required field: observations.rgb/depth")
+    rgb_path = str(rgb["path"]).strip()
+    depth_path = str(depth["path"]).strip()
+    if not rgb_path or not depth_path:
+        raise ValueError("observations.rgb.path/depth.path must be non-empty")
+    return rgb_path, depth_path
 
 
 def _extract_action(entry: Dict) -> Tuple[Optional[str], int]:
     action = entry.get("action")
-    if isinstance(action, dict):
-        name = action.get("name")
-    else:
-        name = action
-
+    if not isinstance(action, dict):
+        raise KeyError("Missing required field: action")
+    name = str(action["name"]).strip()
     if not name:
-        messages = entry.get("messages") or []
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant":
-                raw = str(msg.get("content", "")).strip()
-                if raw:
-                    name = raw
-                    break
-
-    action_id = entry.get("action_id")
-    if action_id is None:
-        action_id = -1
-    return (str(name) if name else None), int(action_id)
+        raise ValueError("action.name must be non-empty")
+    action_id = int(entry["action_id"])
+    return name, action_id
 
 
 class TrajectoryStepDataset:
@@ -99,21 +104,14 @@ class TrajectoryStepDataset:
             for entry in trajectory_entries:
                 rgb_path, depth_path = _resolve_image_paths(entry)
                 action_name, action_id = _extract_action(entry)
-                pose = entry.get("pose") or {}
+                pose = _pose_dict(entry)
                 samples.append({
                     "trajectory_id": tid,
                     "step_index": _step_index(entry),
                     "trajectory_length": int(entry.get("trajectory_length", len(trajectory_entries))),
                     "sample_id": str(entry.get("sample_id", f"{tid}:{_step_index(entry):06d}")),
                     "task": entry.get("task"),
-                    "pose": {
-                        "x": float(pose.get("x", 0.0)),
-                        "y": float(pose.get("y", 0.0)),
-                        "z": float(pose.get("z", 0.0)),
-                        "rx": float(pose.get("rx", 0.0)),
-                        "ry": float(pose.get("ry", 0.0)),
-                        "rz": float(pose.get("rz", 0.0)),
-                    },
+                    "pose": pose,
                     "action_name": action_name,
                     "action_id": int(action_id),
                     "rgb_path": rgb_path,
@@ -149,18 +147,11 @@ class TrajectorySequenceDataset:
         for entry in entries:
             rgb_path, depth_path = _resolve_image_paths(entry)
             action_name, action_id = _extract_action(entry)
-            pose = entry.get("pose") or {}
+            pose = _pose_dict(entry)
             steps.append({
                 "step_index": _step_index(entry),
                 "sample_id": str(entry.get("sample_id", f"{trajectory_id}:{_step_index(entry):06d}")),
-                "pose": {
-                    "x": float(pose.get("x", 0.0)),
-                    "y": float(pose.get("y", 0.0)),
-                    "z": float(pose.get("z", 0.0)),
-                    "rx": float(pose.get("rx", 0.0)),
-                    "ry": float(pose.get("ry", 0.0)),
-                    "rz": float(pose.get("rz", 0.0)),
-                },
+                "pose": pose,
                 "action_name": action_name,
                 "action_id": int(action_id),
                 "rgb_path": rgb_path,
@@ -220,6 +211,17 @@ def load_dataset_entries(dataset_json: Path) -> List[Dict]:
     data = _read_json(Path(dataset_json))
     if not isinstance(data, list):
         raise RuntimeError("数据集 JSON 必须是 list。")
+    for i, entry in enumerate(data):
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"第 {i} 条样本不是对象")
+        schema_version = entry.get("schema_version")
+        if int(schema_version) != 2:
+            raise RuntimeError(f"第 {i} 条样本 schema_version 不是 2")
+        _trajectory_id(entry, i)
+        _step_index(entry)
+        _resolve_image_paths(entry)
+        _extract_action(entry)
+        _pose_dict(entry)
     return data
 
 

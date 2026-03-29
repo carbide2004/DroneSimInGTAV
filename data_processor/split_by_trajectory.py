@@ -18,17 +18,19 @@ def _write_json(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
-def _trajectory_id(entry, fallback_index):
-    value = entry.get("trajectory_id")
-    if value is None:
-        return f"__unknown_{fallback_index}__"
-    return str(value)
+def _trajectory_id(entry):
+    if "trajectory_id" not in entry:
+        raise KeyError("Missing required field: trajectory_id")
+    value = str(entry["trajectory_id"]).strip()
+    if not value:
+        raise ValueError("trajectory_id must be non-empty")
+    return value
 
 
 def _group_by_trajectory(entries):
     groups = {}
-    for i, entry in enumerate(entries):
-        tid = _trajectory_id(entry, i)
+    for entry in entries:
+        tid = _trajectory_id(entry)
         groups.setdefault(tid, []).append(entry)
     return groups
 

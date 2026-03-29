@@ -101,14 +101,16 @@ def _prepare_batch(batch, feature_store: DINOFeatureStore, max_len: int, device:
     for i, item in enumerate(raw_batch):
         steps = item["steps"][:max_len]
         for j, step in enumerate(steps):
-            action_id = int(step.get("action_id", -1))
+            action_id = int(step["action_id"])
+            if action_id < 0 or action_id >= len(ACTION_SET):
+                raise RuntimeError(f"Invalid action_id={action_id} at sample_id={step.get('sample_id')}")
             action_ids[i, j] = action_id
-            feat = feature_store.get(step.get("sample_id"))
+            sample_id = step["sample_id"]
+            feat = feature_store.get(sample_id)
             if feat is None:
-                continue
+                raise RuntimeError(f"Missing DINO feature cache for sample_id={sample_id}")
             features[i, j] = torch.from_numpy(feat).to(device=device)
-            if action_id >= 0:
-                valid_mask[i, j] = True
+            valid_mask[i, j] = True
             awareness = step.get("awareness")
             if valid_mask[i, j] and isinstance(awareness, str) and awareness.strip():
                 align_positions.append((i, j))
