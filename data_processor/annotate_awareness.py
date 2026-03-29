@@ -27,6 +27,14 @@ def _write_json(path, obj):
 
 
 def _parse_traj_step(entry):
+    trajectory_id = entry.get("trajectory_id")
+    step_index = entry.get("step_index")
+    if trajectory_id is not None and step_index is not None:
+        try:
+            return str(trajectory_id), int(step_index)
+        except (TypeError, ValueError):
+            pass
+
     images = entry.get("images") or []
     if not images:
         return None, None
@@ -41,6 +49,16 @@ def _parse_traj_step(entry):
 
 
 def _get_action(entry):
+    action = entry.get("action")
+    if isinstance(action, dict):
+        name = str(action.get("name", "")).strip()
+        if name:
+            return name
+    elif isinstance(action, str):
+        action = action.strip()
+        if action:
+            return action
+
     msgs = entry.get("messages") or []
     for m in reversed(msgs):
         if m.get("role") == "assistant":
@@ -51,6 +69,18 @@ def _get_action(entry):
 
 
 def _pose_text(entry):
+    pose = entry.get("pose")
+    if isinstance(pose, dict):
+        try:
+            return (
+                f"x={float(pose.get('x', 0.0)):.2f}, "
+                f"y={float(pose.get('y', 0.0)):.2f}, "
+                f"z={float(pose.get('z', 0.0)):.2f}, "
+                f"rz={float(pose.get('rz', 0.0))}°."
+            )
+        except (TypeError, ValueError):
+            pass
+
     msgs = entry.get("messages") or []
     if not msgs:
         return ""
@@ -112,6 +142,22 @@ def _extract_task_desc(entry):
         if mm:
             return mm.group(1).strip().rstrip(".")
     return "find the closest burning car"
+
+
+def _resolve_image_paths(root, entry):
+    observations = entry.get("observations")
+    if isinstance(observations, dict):
+        rgb_info = observations.get("rgb") or {}
+        depth_info = observations.get("depth") or {}
+        rgb_path = rgb_info.get("path")
+        depth_path = depth_info.get("path")
+        if rgb_path and depth_path:
+            return root / "dataset" / str(rgb_path), root / "dataset" / str(depth_path)
+
+    images = entry.get("images") or []
+    if len(images) < 2:
+        return None, None
+    return root / "dataset" / str(images[0]), root / "dataset" / str(images[1])
 
 
 def _awareness_prompt(task_line, context_text, current_action):
@@ -263,13 +309,11 @@ def main():
                     pbar.update(1)
                     continue
 
-                images = entry.get("images") or []
-                if len(images) < 2:
+                rgb_path, depth_path = _resolve_image_paths(root, entry)
+                if rgb_path is None or depth_path is None:
                     pbar.update(1)
                     continue
 
-                rgb_path = root / "dataset" / str(images[0])
-                depth_path = root / "dataset" / str(images[1])
                 if not rgb_path.exists() or not depth_path.exists():
                     pbar.update(1)
                     continue
