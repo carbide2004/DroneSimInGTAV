@@ -19,3 +19,4 @@ reference/
 imgs/
 dataset/
 agent_control/models/
+.env
