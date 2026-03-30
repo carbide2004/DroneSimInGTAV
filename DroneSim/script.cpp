@@ -925,8 +925,8 @@ static void run_auto_collect(AutoCollectEvent event_type) {
         LOGD("script", std::string("Step ") + std::to_string(step) + ": pos(" + std::to_string(pos.x) + "," + std::to_string(pos.y) + "," + std::to_string(pos.z) + 
              ") target(" + std::to_string(target.x) + "," + std::to_string(target.y) + "," + std::to_string(target.z) + ") dist=" + std::to_string(dist));
         
-        if (dist <= STEPSIZE * 3.0f) { 
-            LOGD("script", std::string("Reached target! Distance ") + std::to_string(dist) + " <= " + std::to_string(STEPSIZE * 2.0f));
+        if (dist <= STEPSIZE * 4.0f) { 
+            LOGD("script", std::string("Reached target! Distance ") + std::to_string(dist) + " <= " + std::to_string(STEPSIZE * 4.0f));
             reached = true; 
             break; 
         }
