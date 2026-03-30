@@ -56,7 +56,7 @@ def _encode_texts(texts: List[str], tokenizer, model, device: torch.device):
         return_tensors="pt",
     )
     encoded = {k: v.to(device) for k, v in encoded.items()}
-    with torch.inference_mode():
+    with torch.no_grad():
         out = model(**encoded)
         if getattr(out, "pooler_output", None) is not None:
             emb = out.pooler_output
