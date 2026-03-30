@@ -88,23 +88,25 @@ def _extract_task_desc(entry):
     return t.strip().rstrip(".")
 
 
-def _resolve_rgb_path(root, entry):
+def _resolve_rgbd_paths(root, entry):
     observations = entry.get("observations")
     if not isinstance(observations, dict):
         raise KeyError("Missing required field: observations")
     rgb_info = observations.get("rgb")
-    if not isinstance(rgb_info, dict):
-        raise KeyError("Missing required field: observations.rgb")
+    depth_info = observations.get("depth")
+    if not isinstance(rgb_info, dict) or not isinstance(depth_info, dict):
+        raise KeyError("Missing required field: observations.rgb/depth")
     rgb_path = str(rgb_info.get("path", "")).strip()
-    if not rgb_path:
-        raise ValueError("observations.rgb.path must be non-empty")
-    return root / "dataset" / rgb_path
+    depth_path = str(depth_info.get("path", "")).strip()
+    if not rgb_path or not depth_path:
+        raise ValueError("observations.rgb.path/depth.path must be non-empty")
+    return root / "dataset" / rgb_path, root / "dataset" / depth_path
 
 
 def _awareness_prompt(task_line, context_text, current_action):
     return (
         "You are an autonomous exploration drone operating in a city environment.\n"
-        "You will be given the current RGB image and a short trajectory context.\n"
+        "You will be given the current RGB image, a depth visualization, and a short trajectory context.\n"
         "Write an awareness note that reflects your internal state and reasoning, taking the whole exploration trajectory into account.\n"
         "\n"
         f"Current Action: You are executing '{current_action}' in this frame.\n"
@@ -215,7 +217,7 @@ def main():
         _get_action(entry)
         _pose_text(entry)
         _extract_task_desc(entry)
-        _resolve_rgb_path(root, entry)
+        _resolve_rgbd_paths(root, entry)
 
     # Group entries by trajectory
     groups = {}
@@ -259,11 +261,14 @@ def main():
                     pbar.update(1)
                     continue
 
-                rgb_path = _resolve_rgb_path(root, entry)
+                rgb_path, depth_path = _resolve_rgbd_paths(root, entry)
                 if not rgb_path.exists():
                     raise FileNotFoundError(f"RGB image not found: {rgb_path}")
+                if not depth_path.exists():
+                    raise FileNotFoundError(f"Depth image not found: {depth_path}")
 
                 rgb_img = Image.open(rgb_path).convert("RGB")
+                depth_img = Image.open(depth_path).convert("RGB")
 
                 current_action = _get_action(entry)
 
@@ -276,6 +281,7 @@ def main():
                         "content": [
                             {"type": "text", "text": prompt},
                             {"type": "image"},
+                            {"type": "image"},
                         ],
                     }
                 ]
@@ -283,7 +289,7 @@ def main():
                 if args.extract_vectors:
                     awareness, representation_vector = model.generate_chat_with_representation(
                         messages=messages,
-                        images=[rgb_img],
+                        images=[rgb_img, depth_img],
                         max_new_tokens=int(args.max_new_tokens),
                         do_sample=False,
                         normalize_vector=True,
@@ -296,7 +302,7 @@ def main():
                 else:
                     awareness = model.generate_chat(
                         messages=messages,
-                        images=[rgb_img],
+                        images=[rgb_img, depth_img],
                         max_new_tokens=int(args.max_new_tokens),
                         do_sample=False,
                     )

@@ -33,21 +33,23 @@ def _sample_id(entry, fallback_index):
     return f"{trajectory_id}:{step_index:06d}"
 
 
-def _rgb_path(entry):
+def _rgbd_paths(entry):
     observations = entry.get("observations")
-    if isinstance(observations, dict):
-        rgb = observations.get("rgb") or {}
-        path = rgb.get("path")
-        if path:
-            return str(path)
-    images = entry.get("images") or []
-    if images:
-        return str(images[0])
-    return None
+    if not isinstance(observations, dict):
+        raise KeyError("Missing required field: observations")
+    rgb = observations.get("rgb")
+    depth = observations.get("depth")
+    if not isinstance(rgb, dict) or not isinstance(depth, dict):
+        raise KeyError("Missing required field: observations.rgb/depth")
+    rgb_path = str(rgb.get("path", "")).strip()
+    depth_path = str(depth.get("path", "")).strip()
+    if not rgb_path or not depth_path:
+        raise ValueError("observations.rgb.path/depth.path must be non-empty")
+    return rgb_path, depth_path
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Prepare DINOv2 RGB feature cache")
+    parser = argparse.ArgumentParser(description="Prepare DINOv2 RGB+Depth feature cache")
     parser.add_argument(
         "--dataset_json",
         default=str(_repo_root() / "dataset" / "train_data_all.json"),
@@ -97,10 +99,8 @@ def main():
     pairs = []
     for i, entry in enumerate(data):
         sid = _sample_id(entry, i)
-        rgb_rel = _rgb_path(entry)
-        if not rgb_rel:
-            continue
-        pairs.append((sid, rgb_rel))
+        rgb_rel, depth_rel = _rgbd_paths(entry)
+        pairs.append((sid, rgb_rel, depth_rel))
 
     existing = {}
     if manifest_path.exists() and not args.overwrite:
@@ -109,44 +109,64 @@ def main():
             existing = old
 
     pending = []
-    for sid, rgb_rel in pairs:
-        out_rel = f"{sid.replace(':', '_')}.npy"
-        out_path = cache_dir / out_rel
-        if out_path.exists() and not args.overwrite:
-            existing[sid] = out_rel
+    for sid, rgb_rel, depth_rel in pairs:
+        rgb_out_rel = f"{sid.replace(':', '_')}_rgb.npy"
+        depth_out_rel = f"{sid.replace(':', '_')}_depth.npy"
+        rgb_out_path = cache_dir / rgb_out_rel
+        depth_out_path = cache_dir / depth_out_rel
+        if rgb_out_path.exists() and depth_out_path.exists() and not args.overwrite:
+            existing[sid] = {
+                "rgb": rgb_out_rel,
+                "depth": depth_out_rel,
+                "dim": 768,
+            }
             continue
-        pending.append((sid, rgb_rel, out_rel))
+        pending.append((sid, rgb_rel, depth_rel, rgb_out_rel, depth_out_rel))
 
     total = len(pending)
     print(f"Total entries: {len(pairs)}, pending cache: {total}")
 
     for start in range(0, total, int(args.batch_size)):
         chunk = pending[start:start + int(args.batch_size)]
-        images = []
+        rgb_images = []
+        depth_images = []
         valid = []
-        for sid, rgb_rel, out_rel in chunk:
-            img_path = dataset_root / rgb_rel
-            if not img_path.exists():
+        for sid, rgb_rel, depth_rel, rgb_out_rel, depth_out_rel in chunk:
+            rgb_path = dataset_root / rgb_rel
+            depth_path = dataset_root / depth_rel
+            if not rgb_path.exists() or not depth_path.exists():
                 continue
             try:
-                image = Image.open(img_path).convert("RGB")
+                rgb_image = Image.open(rgb_path).convert("RGB")
+                depth_image = Image.open(depth_path).convert("RGB")
             except Exception:
                 continue
-            images.append(image)
-            valid.append((sid, out_rel))
-        if not images:
+            rgb_images.append(rgb_image)
+            depth_images.append(depth_image)
+            valid.append((sid, rgb_out_rel, depth_out_rel))
+        if not rgb_images:
             continue
 
-        inputs = processor(images=images, return_tensors="pt")
-        inputs = {k: v.to(device) for k, v in inputs.items()}
+        rgb_inputs = processor(images=rgb_images, return_tensors="pt")
+        rgb_inputs = {k: v.to(device) for k, v in rgb_inputs.items()}
+        depth_inputs = processor(images=depth_images, return_tensors="pt")
+        depth_inputs = {k: v.to(device) for k, v in depth_inputs.items()}
         with torch.inference_mode():
-            outputs = model(**inputs)
-            cls_feat = outputs.last_hidden_state[:, 0, :].detach().cpu().numpy().astype(np.float32)
+            rgb_outputs = model(**rgb_inputs)
+            depth_outputs = model(**depth_inputs)
+            rgb_cls_feat = rgb_outputs.last_hidden_state[:, 0, :].detach().cpu().numpy().astype(np.float32)
+            depth_cls_feat = depth_outputs.last_hidden_state[:, 0, :].detach().cpu().numpy().astype(np.float32)
 
-        for idx, (sid, out_rel) in enumerate(valid):
-            out_path = cache_dir / out_rel
-            np.save(out_path, cls_feat[idx])
-            existing[sid] = out_rel
+        for idx, (sid, rgb_out_rel, depth_out_rel) in enumerate(valid):
+            rgb_out_path = cache_dir / rgb_out_rel
+            depth_out_path = cache_dir / depth_out_rel
+            np.save(rgb_out_path, rgb_cls_feat[idx])
+            np.save(depth_out_path, depth_cls_feat[idx])
+            existing[sid] = {
+                "rgb": rgb_out_rel,
+                "depth": depth_out_rel,
+                "dim": 768,
+            }
 
         end = min(start + int(args.batch_size), total)
         print(f"Processed {end}/{total}")

@@ -75,24 +75,33 @@ class DINOFeatureStore:
         if not isinstance(manifest, dict):
             raise RuntimeError("Invalid cache manifest format.")
         self.manifest = manifest
+        self.feature_dim = 1536
 
     def get(self, sample_id: str):
-        rel = self.manifest.get(str(sample_id))
-        if not rel:
+        meta = self.manifest.get(str(sample_id))
+        if not meta:
             return None
-        path = self.cache_dir / rel
-        if not path.exists():
+        if not isinstance(meta, dict):
+            raise RuntimeError("Invalid cache manifest item format. Please regenerate cache with RGB+Depth mode.")
+        rgb_rel = meta.get("rgb")
+        depth_rel = meta.get("depth")
+        if not rgb_rel or not depth_rel:
             return None
-        arr = np.load(path)
-        if arr.ndim != 1:
+        rgb_path = self.cache_dir / str(rgb_rel)
+        depth_path = self.cache_dir / str(depth_rel)
+        if not rgb_path.exists() or not depth_path.exists():
             return None
-        return arr.astype(np.float32)
+        rgb = np.load(rgb_path)
+        depth = np.load(depth_path)
+        if rgb.ndim != 1 or depth.ndim != 1:
+            return None
+        return np.concatenate([rgb.astype(np.float32), depth.astype(np.float32)], axis=0)
 
 
 def _prepare_batch(batch, feature_store: DINOFeatureStore, max_len: int, device: torch.device):
     raw_batch = batch["raw_batch"]
     bsz = len(raw_batch)
-    features = torch.zeros((bsz, max_len, 768), dtype=torch.float32, device=device)
+    features = torch.zeros((bsz, max_len, feature_store.feature_dim), dtype=torch.float32, device=device)
     action_ids = torch.full((bsz, max_len), fill_value=-1, dtype=torch.long, device=device)
     valid_mask = torch.zeros((bsz, max_len), dtype=torch.bool, device=device)
     align_positions: List[Tuple[int, int]] = []
@@ -204,7 +213,7 @@ def _run_epoch(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Stage1 training: DINOv2 CLS + GRU(512) + InfoNCE")
+    parser = argparse.ArgumentParser(description="Stage1 training: DINOv2 RGB+Depth CLS + GRU(512) + InfoNCE")
     parser.add_argument(
         "--dataset_json",
         default=str(_repo_root() / "dataset" / "train_data_all.json"),
@@ -265,7 +274,7 @@ def main():
 
     text_dim = int(getattr(text_encoder.config, "hidden_size", 384))
     config = Stage1Config(
-        input_dim=768,
+        input_dim=feature_store.feature_dim,
         hidden_dim=512,
         action_dim=len(ACTION_SET),
         align_dim=256,
