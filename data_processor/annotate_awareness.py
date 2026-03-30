@@ -1,15 +1,11 @@
 import argparse
 import json
-import re
 import sys
 import time
 from pathlib import Path
 
 from PIL import Image
 from tqdm import tqdm
-
-
-_IMG_RE = re.compile(r"^(?P<traj>.+?)_step_(?P<step>\d+)_rgb\.(jpg|jpeg|png)$", re.I)
 
 
 def _repo_root():
@@ -27,77 +23,36 @@ def _write_json(path, obj):
 
 
 def _parse_traj_step(entry):
-    trajectory_id = entry.get("trajectory_id")
-    step_index = entry.get("step_index")
-    if trajectory_id is not None and step_index is not None:
-        try:
-            return str(trajectory_id), int(step_index)
-        except (TypeError, ValueError):
-            pass
-
-    images = entry.get("images") or []
-    if not images:
-        return None, None
-    p0 = Path(str(images[0]).replace("\\", "/"))
-    name = p0.name
-    m = _IMG_RE.match(name)
-    if not m:
-        return None, None
-    traj = m.group("traj")
-    step = int(m.group("step"))
-    return traj, step
+    if "trajectory_id" not in entry:
+        raise KeyError("Missing required field: trajectory_id")
+    if "step_index" not in entry:
+        raise KeyError("Missing required field: step_index")
+    traj = str(entry["trajectory_id"]).strip()
+    if not traj:
+        raise ValueError("trajectory_id must be non-empty")
+    return traj, int(entry["step_index"])
 
 
 def _get_action(entry):
     action = entry.get("action")
-    if isinstance(action, dict):
-        name = str(action.get("name", "")).strip()
-        if name:
-            return name
-    elif isinstance(action, str):
-        action = action.strip()
-        if action:
-            return action
-
-    msgs = entry.get("messages") or []
-    for m in reversed(msgs):
-        if m.get("role") == "assistant":
-            s = str(m.get("content", "")).strip()
-            if s:
-                return s
-    return None
+    if not isinstance(action, dict):
+        raise KeyError("Missing required field: action")
+    name = str(action.get("name", "")).strip()
+    if not name:
+        raise ValueError("action.name must be non-empty")
+    return name
 
 
 def _pose_text(entry):
     pose = entry.get("pose")
-    if isinstance(pose, dict):
-        try:
-            return (
-                f"x={float(pose.get('x', 0.0)):.2f}, "
-                f"y={float(pose.get('y', 0.0)):.2f}, "
-                f"z={float(pose.get('z', 0.0)):.2f}, "
-                f"rz={float(pose.get('rz', 0.0))}°."
-            )
-        except (TypeError, ValueError):
-            pass
-
-    msgs = entry.get("messages") or []
-    if not msgs:
-        return ""
-    user = None
-    for m in msgs:
-        if m.get("role") == "user":
-            user = m
-            break
-    if user is None:
-        return ""
-    content = user.get("content", "")
-    if not isinstance(content, str):
-        return ""
-    m = re.search(r"Current Pose:\s*(.+)", content)
-    if not m:
-        return ""
-    return m.group(1).strip()
+    if not isinstance(pose, dict):
+        raise KeyError("Missing required field: pose")
+    return (
+        f"x={float(pose['x']):.2f}, "
+        f"y={float(pose['y']):.2f}, "
+        f"z={float(pose['z']):.2f}, "
+        f"rz={float(pose['rz'])}°."
+    )
 
 
 def _summarize_action_seq(actions, max_items):
@@ -128,34 +83,22 @@ def _build_context_for_step(traj_entries, idx, history_k):
 
 def _extract_task_desc(entry):
     t = entry.get("task")
-    if isinstance(t, str) and t.strip():
-        return t.strip().rstrip(".")
-
-    msgs = entry.get("messages") or []
-    for m in msgs:
-        if m.get("role") != "user":
-            continue
-        content = m.get("content", "")
-        if not isinstance(content, str):
-            continue
-        mm = re.search(r"Your current task is to\s+(.+?)\.\s*$", content, re.MULTILINE)
-        if mm:
-            return mm.group(1).strip().rstrip(".")
-    return "find the closest burning car"
+    if not isinstance(t, str) or not t.strip():
+        raise KeyError("Missing required field: task")
+    return t.strip().rstrip(".")
 
 
 def _resolve_rgb_path(root, entry):
     observations = entry.get("observations")
-    if isinstance(observations, dict):
-        rgb_info = observations.get("rgb") or {}
-        rgb_path = rgb_info.get("path")
-        if rgb_path:
-            return root / "dataset" / str(rgb_path)
-
-    images = entry.get("images") or []
-    if not images:
-        return None
-    return root / "dataset" / str(images[0])
+    if not isinstance(observations, dict):
+        raise KeyError("Missing required field: observations")
+    rgb_info = observations.get("rgb")
+    if not isinstance(rgb_info, dict):
+        raise KeyError("Missing required field: observations.rgb")
+    rgb_path = str(rgb_info.get("path", "")).strip()
+    if not rgb_path:
+        raise ValueError("observations.rgb.path must be non-empty")
+    return root / "dataset" / rgb_path
 
 
 def _awareness_prompt(task_line, context_text, current_action):
@@ -262,13 +205,22 @@ def main():
     if not isinstance(data, list):
         raise RuntimeError("Input JSON must be a list")
 
+    for i, entry in enumerate(data):
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"第 {i} 条样本不是对象")
+        schema_version = entry.get("schema_version")
+        if int(schema_version) != 2:
+            raise RuntimeError(f"第 {i} 条样本 schema_version 不是 2")
+        _parse_traj_step(entry)
+        _get_action(entry)
+        _pose_text(entry)
+        _extract_task_desc(entry)
+        _resolve_rgb_path(root, entry)
+
     # Group entries by trajectory
     groups = {}
     for i, entry in enumerate(data):
         traj, step = _parse_traj_step(entry)
-        if traj is None:
-            traj = f"__unknown_{i}__"
-            step = 0
         groups.setdefault(traj, []).append((step, i))
 
     # Sort trajectories and steps
@@ -308,26 +260,16 @@ def main():
                     continue
 
                 rgb_path = _resolve_rgb_path(root, entry)
-                if rgb_path is None:
-                    pbar.update(1)
-                    continue
-
                 if not rgb_path.exists():
-                    pbar.update(1)
-                    continue
+                    raise FileNotFoundError(f"RGB image not found: {rgb_path}")
 
                 rgb_img = Image.open(rgb_path).convert("RGB")
 
-                # Get current action
                 current_action = _get_action(entry)
-                if not current_action:
-                    current_action = "Unknown action"
 
-                # Build context
                 context = _build_context_for_step(traj_entries, local_idx, int(args.history_k))
                 prompt = _awareness_prompt(task_line, context, current_action)
 
-                # Generate awareness with or without representation vector
                 messages = [
                     {
                         "role": "user",
@@ -348,7 +290,6 @@ def main():
                     )
                     awareness = _coerce_awareness(task_line, awareness, current_action)
 
-                    # Add awareness and representation vector to entry
                     entry["awareness"] = awareness
                     entry["representation_vector"] = representation_vector
                     entry["vector_dim"] = len(representation_vector)
@@ -361,7 +302,6 @@ def main():
                     )
                     awareness = _coerce_awareness(task_line, awareness, current_action)
 
-                    # Add only awareness to entry
                     entry["awareness"] = awareness
                 pbar.update(1)
 
