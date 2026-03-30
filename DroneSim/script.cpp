@@ -891,14 +891,15 @@ static void run_auto_collect(AutoCollectEvent event_type) {
         create_accident_near_camera();
         center.x = g_accidentPos[0]; center.y = g_accidentPos[1]; center.z = g_accidentPos[2];
     }
-    Position3D target(center.x, center.y, center.z + 3.0f);
+    Position3D target(center.x, center.y, center.z + 1.0f);
 
     // 使用基于道路节点的起始位置选择算法
     Position3D start_pos = find_good_start_position(target, 50.0f);
 
     Any cam = CAM::GET_RENDERING_CAM();
     CAM::SET_CAM_COORD(cam, start_pos.x, start_pos.y, start_pos.z);
-    float yaw = quantize_deg(yaw_to_target_deg(start_pos, target), YAW_STEPSIZE);
+    // 随机一个yaw初始角而不是朝向目标点
+    float yaw = quantize_deg((float)rand() / (float)RAND_MAX * 360.0f, YAW_STEPSIZE);
     CAM::SET_CAM_ROT(cam, 0.0f, 0.0f, yaw, 2);
     
     // 等待相机位置稳定，然后获取实际位置
@@ -924,79 +925,58 @@ static void run_auto_collect(AutoCollectEvent event_type) {
         // 添加调试日志
         LOGD("script", std::string("Step ") + std::to_string(step) + ": pos(" + std::to_string(pos.x) + "," + std::to_string(pos.y) + "," + std::to_string(pos.z) + 
              ") target(" + std::to_string(target.x) + "," + std::to_string(target.y) + "," + std::to_string(target.z) + ") dist=" + std::to_string(dist));
-        
-        if (dist <= STEPSIZE * 3.0f) { 
-            LOGD("script", std::string("Reached target! Distance ") + std::to_string(dist) + " <= " + std::to_string(STEPSIZE * 2.0f));
-            reached = true; 
-            break; 
-        }
 
         float dx = target.x - pos.x;
         float dy = target.y - pos.y;
         float dz = target.z - pos.z;
+        
+        // 先判断是否要旋转，再判断是否停止，再判断是否要垂直移动，再前进
+        // 1. 先判断是否要旋转 (Yaw)
+        float desiredYaw = quantize_deg(yaw_to_target_deg(pos, target), YAW_STEPSIZE);
+        float delta = wrap_angle_deg(desiredYaw - rot.z);
 
-        if (fabsf(dz) > STEPSIZE) {
-            Position3D next_pos;
-            if (dz > 0.0f) {
-                next_pos = Position3D(pos.x, pos.y, pos.z + STEPSIZE);
-                // 检测向上移动是否会碰撞
-                if (check_collision_raycast(pos, next_pos)) {
-                    LOGW("script", "Collision detected for UP movement, stopping auto_collect");
-                    delete_recording_session();
-                    active = false;
-                    return;
-                }
-                record_step("AUTO_UP", 0.0f, 0.0f, STEPSIZE, 0.0f, 0.0f, 0.0f);
-                moveCameraDelta(0.0f, 0.0f, STEPSIZE);
-            } 
-            else {
-                next_pos = Position3D(pos.x, pos.y, pos.z - STEPSIZE);
-                // 检测向下移动是否会碰撞
-                if (check_collision_raycast(pos, next_pos)) {
-                    LOGW("script", "Collision detected for DOWN movement, stopping auto_collect");
-                    delete_recording_session();
-                    stop_fire_maintenance();
-                    clear_spawned_entities();
-                    active = false;
-                    return;
-                }
-                record_step("AUTO_DOWN", 0.0f, 0.0f, -STEPSIZE, 0.0f, 0.0f, 0.0f);
-                moveCameraDelta(0.0f, 0.0f, -STEPSIZE);
-            }
+        if (fabsf(delta) > YAW_STEPSIZE) {
+            float step = (delta > 0.0f) ? YAW_STEPSIZE : -YAW_STEPSIZE;
+            const char* label = (delta > 0.0f) ? "AUTO_YAW_LEFT" : "AUTO_YAW_RIGHT";
+            
+            record_step(label, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, step);
+            rotateCameraDelta(0.0f, 0.0f, step);
         } 
-        else {
-            float desiredYaw = quantize_deg(yaw_to_target_deg(pos, target), YAW_STEPSIZE);
-            float delta = wrap_angle_deg(desiredYaw - rot.z);
-            if (fabsf(delta) >= YAW_STEPSIZE) {
-                // 旋转不需要检测碰撞
-                if (delta > 0.0f) {
-                    record_step("AUTO_YAW_LEFT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, YAW_STEPSIZE);
-                    rotateCameraDelta(0.0f, 0.0f, YAW_STEPSIZE);
-                } 
-                else {
-                    record_step("AUTO_YAW_RIGHT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -YAW_STEPSIZE);
-                    rotateCameraDelta(0.0f, 0.0f, -YAW_STEPSIZE);
-                }
-            } 
-            else {
-                // 计算前进的目标位置
-                float forward_rad = rot.z * (3.14159f / 180.0f);
-                float forward_x = pos.x + cosf(forward_rad) * STEPSIZE;
-                float forward_y = pos.y + sinf(forward_rad) * STEPSIZE;
-                Position3D next_pos(forward_x, forward_y, pos.z);
-                
-                // 检测前进移动是否会碰撞
-                if (check_collision_raycast(pos, next_pos)) {
-                    LOGW("script", "Collision detected for FORWARD movement, stopping auto_collect");
-                    delete_recording_session();
-                    stop_fire_maintenance();
-                    clear_spawned_entities();
-                    active = false;
-                    return;
-                }
-                record_step("AUTO_FORWARD", STEPSIZE, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-                moveCameraDelta(STEPSIZE, 0.0f, 0.0f);
+        // 2. 再判断是否停止 (Distance)
+        if (dist <= STEPSIZE * 4.0f) { 
+            LOGD("script", std::string("Reached target! Distance ") + std::to_string(dist) + " <= " + std::to_string(STEPSIZE * 4.0f));
+            reached = true; 
+            break; 
+        }
+        // 3. 再判断是否要垂直移动 (Z)
+        else if (fabsf(dz) > STEPSIZE) {
+            float z_step = (dz > 0.0f) ? STEPSIZE : -STEPSIZE;
+            Position3D next_pos(pos.x, pos.y, pos.z + z_step);
+
+            if (check_collision_raycast(pos, next_pos)) {
+                LOGW("script", "Collision detected for VERTICAL movement, stopping auto_collect");
+                goto STOP_COLLISION;
             }
+
+            record_step(z_step > 0.0f ? "AUTO_UP" : "AUTO_DOWN", 0.0f, 0.0f, z_step, 0.0f, 0.0f, 0.0f);
+            moveCameraDelta(0.0f, 0.0f, z_step);
+        } 
+        // 4. 最后前进 (Forward)
+        else {
+            float forward_rad = rot.z * (3.14159f / 180.0f);
+            Position3D next_pos(
+                pos.x + cosf(forward_rad) * STEPSIZE,
+                pos.y + sinf(forward_rad) * STEPSIZE,
+                pos.z
+            );
+
+            if (check_collision_raycast(pos, next_pos)) {
+                LOGW("script", "Collision detected for FORWARD movement, stopping auto_collect");
+                goto STOP_COLLISION;
+            }
+
+            record_step("AUTO_FORWARD", STEPSIZE, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+            moveCameraDelta(STEPSIZE, 0.0f, 0.0f);
         }
         WAIT(0);
     }
@@ -1006,6 +986,13 @@ static void run_auto_collect(AutoCollectEvent event_type) {
 
     // 调用带参数的stop_recording_session
     stop_recording_session(event_type, target, actual_start_pos, yaw, step, std::string(task));
+    stop_fire_maintenance();
+    clear_spawned_entities();
+    active = false;
+    return;
+
+STOP_COLLISION:
+    delete_recording_session();
     stop_fire_maintenance();
     clear_spawned_entities();
     active = false;
