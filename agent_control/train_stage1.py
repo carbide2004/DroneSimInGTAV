@@ -75,7 +75,25 @@ class DINOFeatureStore:
         if not isinstance(manifest, dict):
             raise RuntimeError("Invalid cache manifest format.")
         self.manifest = manifest
-        self.feature_dim = 1536
+        self.feature_dim = None
+        self.backbone = "unknown"
+        for value in self.manifest.values():
+            if not isinstance(value, dict):
+                continue
+            feature_dim = value.get("feature_dim")
+            if feature_dim is not None:
+                self.feature_dim = int(feature_dim)
+            else:
+                dim = value.get("dim")
+                if dim is not None:
+                    self.feature_dim = int(dim) * 2
+            dim = value.get("dim")
+            backbone = value.get("backbone")
+            if isinstance(backbone, str) and backbone.strip():
+                self.backbone = backbone.strip()
+            break
+        if self.feature_dim is None:
+            self.feature_dim = 1536
 
     def get(self, sample_id: str):
         meta = self.manifest.get(str(sample_id))
@@ -83,6 +101,15 @@ class DINOFeatureStore:
             return None
         if not isinstance(meta, dict):
             raise RuntimeError("Invalid cache manifest item format. Please regenerate cache with RGB+Depth mode.")
+        goal_rel = meta.get("goal")
+        if goal_rel:
+            goal_path = self.cache_dir / str(goal_rel)
+            if not goal_path.exists():
+                return None
+            goal = np.load(goal_path)
+            if goal.ndim != 1:
+                return None
+            return goal.astype(np.float32)
         rgb_rel = meta.get("rgb")
         depth_rel = meta.get("depth")
         if not rgb_rel or not depth_rel:
@@ -213,7 +240,7 @@ def _run_epoch(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Stage1 training: DINOv2 RGB+Depth CLS + GRU(512) + InfoNCE")
+    parser = argparse.ArgumentParser(description="Stage1 training: RGB+Depth features + GRU(512) + InfoNCE")
     parser.add_argument(
         "--dataset_json",
         default=str(_repo_root() / "dataset" / "train_data_all.json"),
@@ -267,6 +294,7 @@ def main():
     )
 
     feature_store = DINOFeatureStore(Path(args.cache_dir))
+    print(f"Feature store backbone: {feature_store.backbone}, input_dim: {feature_store.feature_dim}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.text_model_name, token=hf_token)
     text_encoder = AutoModel.from_pretrained(args.text_model_name, token=hf_token).to(device)
