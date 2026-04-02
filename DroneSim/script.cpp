@@ -986,6 +986,8 @@ static void run_auto_collect(AutoCollectEvent event_type) {
 
     // 调用带参数的stop_recording_session
     stop_recording_session(event_type, target, actual_start_pos, yaw, step, std::string(task));
+    // 先等1秒使RGBD采集完成
+    WAIT(1000);
     stop_fire_maintenance();
     clear_spawned_entities();
     active = false;
