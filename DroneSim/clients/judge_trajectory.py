@@ -43,11 +43,16 @@ class SessionViewer:
     def _load_frame(self, step, session_dir):
         meta = step.get("rgb", {})
         path = session_dir / meta.get("path", "")
-        if not path.exists(): return None
+        if not path.exists(): 
+            raise FileNotFoundError(f"Missing file: {path}")
         
         b = path.read_bytes()
         w, h = int(meta["width"]), int(meta["height"])
-        arr = np.frombuffer(b, dtype=np.uint8)[:w*h*4].reshape((h, w, 4))
+        expected_size = w * h * 4
+        if len(b) < expected_size:
+            raise ValueError(f"Buffer size mismatch: {len(b)} < {expected_size}")
+            
+        arr = np.frombuffer(b, dtype=np.uint8)[:expected_size].reshape((h, w, 4))
         return Image.fromarray(arr[:, :, :3])
 
     def _on_key(self, event):
@@ -89,36 +94,50 @@ class SessionViewer:
         while self.running and self.sessions:
             self.skip_session = False
             curr_session = self.sessions[self.current_idx]
-            steps = self._load_steps(curr_session)
-            self._update_title()
-            self._update_terminal_info()
-            
-            self.ax.cla()
-            self.ax.axis("off")
-            self.im_artist = None
+            try:
+                steps = self._load_steps(curr_session)
+                self._update_title()
+                self._update_terminal_info()
+                
+                self.ax.cla()
+                self.ax.axis("off")
+                self.im_artist = None
 
-            for i, step in enumerate(steps):
-                while self.paused and not self.skip_session:
-                    plt.pause(0.1)
+                for i, step in enumerate(steps):
+                    while self.paused and not self.skip_session:
+                        plt.pause(0.1)
+                    
+                    if self.skip_session: break
+                    
+                    img = self._load_frame(step, curr_session)
+                    if img is None: continue
+                    
+                    # 简单信息标注
+                    draw = ImageDraw.Draw(img)
+                    draw.text((10, 10), f"STEP: {i}/{len(steps)}", fill=(255, 255, 0))
+                    
+                    frame = np.asarray(img)
+                    if self.im_artist is None:
+                        self.im_artist = self.ax.imshow(frame)
+                    else:
+                        self.im_artist.set_data(frame)
+                    
+                    self.fig.canvas.draw_idle()
+                    plt.pause(1.0 / self.fps)
+            except (FileNotFoundError, ValueError, RuntimeError) as e:
+                print(f"\n[错误] 轨迹数据损坏: {curr_session.name}")
+                print(f"原因: {e}")
                 
-                if self.skip_session: break
+                # 执行自动删除逻辑
+                if curr_session.exists():
+                    shutil.rmtree(curr_session)
+                    print(f"已自动清除损坏的本地文件。")
                 
-                img = self._load_frame(step, curr_session)
-                if img is None: continue
-                
-                # 简单信息标注
-                draw = ImageDraw.Draw(img)
-                draw.text((10, 10), f"STEP: {i}/{len(steps)}", fill=(255, 255, 0))
-                
-                frame = np.asarray(img)
-                if self.im_artist is None:
-                    self.im_artist = self.ax.imshow(frame)
-                else:
-                    self.im_artist.set_data(frame)
-                
-                self.fig.canvas.draw_idle()
-                plt.pause(1.0 / self.fps)
-            
+                # 从列表中移除并跳过
+                self.sessions.pop(self.current_idx)
+                if self.sessions:
+                    self.current_idx %= len(self.sessions)
+                self.skip_session = True
             if not self.skip_session and self.sessions:
                 self.current_idx = (self.current_idx + 1) % len(self.sessions)
 

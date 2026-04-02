@@ -156,7 +156,7 @@ def process_all_datasets(base_dir):
                 first = meta_path.read_text(encoding="utf-8", errors="ignore").splitlines()
                 if first:
                     meta = json.loads(first[0])
-                    t = meta.get("task")
+                    t = meta.get("task_description")
                     if isinstance(t, str) and t.strip():
                         task_desc = t.strip().rstrip(".")
             except Exception:
@@ -203,4 +203,4 @@ def process_all_datasets(base_dir):
     print(f"转换完成，共计 {len(all_conversations)} 条数据，跳过 {skipped} 条。")
 
 if __name__ == "__main__":
-    process_all_datasets(r"D:\SteamLibrary\steamapps\common\Grand Theft Auto V\data\manual")
+    process_all_datasets(r"E:\ToolApps\Steam\steamapps\common\Grand Theft Auto V\data\manual\checked")
