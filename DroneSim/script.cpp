@@ -943,7 +943,7 @@ static void run_auto_collect(AutoCollectEvent event_type) {
             rotateCameraDelta(0.0f, 0.0f, step);
         } 
         // 2. 再判断是否停止 (Distance)
-        if (dist <= STEPSIZE * 4.0f) { 
+        else if (dist <= STEPSIZE * 4.0f) { 
             LOGD("script", std::string("Reached target! Distance ") + std::to_string(dist) + " <= " + std::to_string(STEPSIZE * 4.0f));
             reached = true; 
             break; 
