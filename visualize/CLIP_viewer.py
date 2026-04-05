@@ -6,86 +6,6 @@ from PIL import Image
 import torch.nn.functional as F
 from transformers import CLIPModel, CLIPProcessor, AutoTokenizer
 
-def visualize_clip_match(
-    image_path,
-    task_text,
-    model_name="openai/clip-vit-base-patch32",
-    null_weight=1.0,
-    use_pooler=True,
-):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # 1. 加载模型
-    model = CLIPModel.from_pretrained(model_name).to(device)
-    model.eval()
-    processor = CLIPProcessor.from_pretrained(model_name)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-    # 2. 图像预处理
-    image = Image.open(image_path).convert("RGB")
-    inputs = processor(images=image, return_tensors="pt").to(device)
-
-    # 3. 提取文本特征 (目标文本 vs 空文本)
-    texts = [task_text, ""]  # 使用空字符串作为基准来抵消背景偏置
-    text_inputs = tokenizer(texts, padding=True, return_tensors="pt").to(device)
-
-    with torch.no_grad():
-        text_outputs = model.text_model(**text_inputs)
-
-        # 2. 取出语义向量
-        if use_pooler and getattr(text_outputs, 'pooler_output', None) is not None:
-            text_pooled = text_outputs.pooler_output
-        else:
-            # 通常CLIP token 0 是 [EOS]/[CLS]
-            text_pooled = text_outputs.last_hidden_state[:, 0, :]
-
-        text_features = model.text_projection(text_pooled)
-        text_features = F.normalize(text_features, p=2, dim=-1)
-
-        target_text_feat = text_features[0:1]
-        null_text_feat = text_features[1:2]
-
-        vision_outputs = model.vision_model(**inputs)
-        patch_features = vision_outputs.last_hidden_state[:, 1:, :]
-
-        patch_proj = model.visual_projection(patch_features)
-        patch_proj = F.normalize(patch_proj, p=2, dim=-1)
-
-        # 计算相似度，带 logit_scale 与空文本权重
-        logit_scale = model.logit_scale.exp()
-        sim_target = torch.matmul(patch_proj, target_text_feat.t()) * logit_scale
-        sim_null = torch.matmul(patch_proj, null_text_feat.t()) * logit_scale
-
-        rel_sim = sim_target - null_weight * sim_null
-
-        # 将 (batch, num_patches, 1) 之类换成一维 [num_patches]
-        rel_sim = rel_sim.view(-1)
-
-        # 归一化到 [0, 1]
-        rel_sim = (rel_sim - rel_sim.min()) / (rel_sim.max() - rel_sim.min() + 1e-8)
-
-    # 6. 还原为二维网格
-    num_patches = rel_sim.shape[0]
-    grid_size = int(math.sqrt(num_patches))
-    assert grid_size * grid_size == num_patches, f"patch count {num_patches} 不是平方数，无法reshape为grid"
-
-    heatmap = rel_sim.reshape(grid_size, grid_size).cpu().numpy()
-
-    # 7. 可视化
-    fig, ax = plt.subplots(1, 2, figsize=(12, 6))
-    ax[0].imshow(image)
-    ax[0].set_title(f"Input: {task_text}")
-    ax[0].axis('off')
-
-    heatmap_img = Image.fromarray((heatmap * 255).astype(np.uint8)).resize(image.size, resample=Image.BICUBIC)
-    ax[1].imshow(image)
-    im = ax[1].imshow(heatmap_img, alpha=0.6, cmap='jet')
-    ax[1].set_title("Semantic Alignment Heatmap (Bias Removed)")
-    ax[1].axis('off')
-
-    plt.colorbar(im, ax=ax[1], fraction=0.046, pad=0.04)
-    plt.show()
-
 def fast_tiled_clip_match(image_path, task_text, model, processor, window_size=144, stride=48):
     device = next(model.parameters()).device
     img = Image.open(image_path).convert("RGB")
@@ -208,7 +128,3 @@ if __name__ == '__main__':
         window_size=144,
         stride=48
     )
-
-
-# 使用示例
-# visualize_clip_match("path/to/your/image.jpg", "a red cup on the table")
