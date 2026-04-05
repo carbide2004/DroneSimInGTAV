@@ -65,12 +65,12 @@ def _encode_texts(texts: List[str], tokenizer, model, device: torch.device):
     return emb
 
 
-class DINOFeatureStore:
+class FeatureCacheStore:
     def __init__(self, cache_dir: Path):
         self.cache_dir = Path(cache_dir)
         self.manifest_path = self.cache_dir / "manifest.json"
         if not self.manifest_path.exists():
-            raise FileNotFoundError(f"DINO cache manifest not found: {self.manifest_path}")
+            raise FileNotFoundError(f"Feature cache manifest not found: {self.manifest_path}")
         manifest = _read_json(self.manifest_path)
         if not isinstance(manifest, dict):
             raise RuntimeError("Invalid cache manifest format.")
@@ -100,7 +100,16 @@ class DINOFeatureStore:
         if not meta:
             return None
         if not isinstance(meta, dict):
-            raise RuntimeError("Invalid cache manifest item format. Please regenerate cache with RGB+Depth mode.")
+            raise RuntimeError("Invalid cache manifest item format. Please regenerate cache.")
+        heatdepth_rel = meta.get("heatdepth")
+        if heatdepth_rel:
+            heatdepth_path = self.cache_dir / str(heatdepth_rel)
+            if not heatdepth_path.exists():
+                return None
+            heatdepth = np.load(heatdepth_path)
+            if heatdepth.ndim != 1:
+                return None
+            return heatdepth.astype(np.float32)
         goal_rel = meta.get("goal")
         if goal_rel:
             goal_path = self.cache_dir / str(goal_rel)
@@ -125,7 +134,7 @@ class DINOFeatureStore:
         return np.concatenate([rgb.astype(np.float32), depth.astype(np.float32)], axis=0)
 
 
-def _prepare_batch(batch, feature_store: DINOFeatureStore, max_len: int, device: torch.device):
+def _prepare_batch(batch, feature_store: FeatureCacheStore, max_len: int, device: torch.device):
     raw_batch = batch["raw_batch"]
     bsz = len(raw_batch)
     features = torch.zeros((bsz, max_len, feature_store.feature_dim), dtype=torch.float32, device=device)
@@ -144,7 +153,7 @@ def _prepare_batch(batch, feature_store: DINOFeatureStore, max_len: int, device:
             sample_id = step["sample_id"]
             feat = feature_store.get(sample_id)
             if feat is None:
-                raise RuntimeError(f"Missing DINO feature cache for sample_id={sample_id}")
+                raise RuntimeError(f"Missing feature cache for sample_id={sample_id}")
             features[i, j] = torch.from_numpy(feat).to(device=device)
             valid_mask[i, j] = True
             awareness = step.get("awareness")
@@ -174,7 +183,7 @@ def _info_nce_loss(h: torch.Tensor, e: torch.Tensor, temperature: float):
 def _run_epoch(
     model: Stage1GRUModel,
     loader,
-    feature_store: DINOFeatureStore,
+    feature_store: FeatureCacheStore,
     tokenizer,
     text_encoder,
     optimizer,
@@ -248,8 +257,8 @@ def main():
     )
     parser.add_argument(
         "--cache_dir",
-        default=str(_repo_root() / "dataset" / "dino_cache"),
-        help="DINO feature cache directory",
+        default=str(_repo_root() / "dataset" / "clip_cache"),
+        help="Feature cache directory",
     )
     parser.add_argument(
         "--output_dir",
@@ -293,7 +302,7 @@ def main():
         mode="sequence",
     )
 
-    feature_store = DINOFeatureStore(Path(args.cache_dir))
+    feature_store = FeatureCacheStore(Path(args.cache_dir))
     print(f"Feature store backbone: {feature_store.backbone}, input_dim: {feature_store.feature_dim}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.text_model_name, token=hf_token)
