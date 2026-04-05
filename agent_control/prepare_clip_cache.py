@@ -78,12 +78,10 @@ def _resize_float_map(array_2d: np.ndarray, out_size: int):
     return np.array(img, dtype=np.float32)
 
 
-def _normalize_minmax(array_2d: np.ndarray):
-    min_v = float(np.min(array_2d))
-    max_v = float(np.max(array_2d))
-    if max_v - min_v < 1e-8:
-        return np.zeros_like(array_2d, dtype=np.float32)
-    return ((array_2d - min_v) / (max_v - min_v)).astype(np.float32)
+def _process_heatmap_fixed_scale(array_2d: np.ndarray):
+    # 假设你认为 logit 达到 20 是极值
+    scale = 20.0 
+    return np.clip(array_2d / scale, 0.0, 1.0)
 
 
 def _compute_clip_heatmap(
@@ -262,7 +260,7 @@ def main():
                 use_null_text=bool(args.use_null_text_baseline),
             )
             heatmap_resized = _resize_float_map(heatmap, int(args.heatmap_size))
-            heatmap_norm = _normalize_minmax(heatmap_resized)
+            heatmap_norm = _process_heatmap_fixed_scale(heatmap_resized)
 
             depth_gray = np.array(depth_img.convert("L"), dtype=np.float32) / 255.0
             depth_resized = _resize_float_map(depth_gray, int(args.heatmap_size))
