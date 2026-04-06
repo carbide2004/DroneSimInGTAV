@@ -401,13 +401,13 @@ static void create_fight_near_pos(float ox, float oy, float oz) {
         return;
     }
 
-    Hash groupA = 0, groupB = 0;
-    char nameA[] = "FIGHT_A";
-    char nameB[] = "FIGHT_B";
-    PED::ADD_RELATIONSHIP_GROUP(nameA, &groupA);
-    PED::ADD_RELATIONSHIP_GROUP(nameB, &groupB);
-    PED::SET_RELATIONSHIP_BETWEEN_GROUPS(5, groupA, groupB);
-    PED::SET_RELATIONSHIP_BETWEEN_GROUPS(5, groupB, groupA);
+    // Hash groupA = 0, groupB = 0;
+    // char nameA[] = "FIGHT_A";
+    // char nameB[] = "FIGHT_B";
+    // PED::ADD_RELATIONSHIP_GROUP(nameA, &groupA);
+    // PED::ADD_RELATIONSHIP_GROUP(nameB, &groupB);
+    // PED::SET_RELATIONSHIP_BETWEEN_GROUPS(5, groupA, groupB);
+    // PED::SET_RELATIONSHIP_BETWEEN_GROUPS(5, groupB, groupA);
 
     const int n = 6;
     Ped peds[n]{};
@@ -422,7 +422,7 @@ static void create_fight_near_pos(float ox, float oy, float oz) {
             g_spawnedPeds.push_back(peds[i]);
         }
         ENTITY::SET_ENTITY_AS_MISSION_ENTITY(peds[i], true, true);
-        PED::SET_PED_RELATIONSHIP_GROUP_HASH(peds[i], (i < n / 2) ? groupA : groupB);
+        // PED::SET_PED_RELATIONSHIP_GROUP_HASH(peds[i], (i < n / 2) ? groupA : groupB);
         
         // Make fighting NPCs invincible so they don't die during verification
         ENTITY::SET_ENTITY_INVINCIBLE(peds[i], true);
@@ -431,12 +431,12 @@ static void create_fight_near_pos(float ox, float oy, float oz) {
     }
     STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(model);
 
-    for (int i = 0; i < n / 2; i++) {
-        AI::TASK_COMBAT_PED(peds[i], peds[n / 2 + (i % (n / 2))], 0, 16);
-    }
-    for (int i = n / 2; i < n; i++) {
-        AI::TASK_COMBAT_PED(peds[i], peds[i - n / 2], 0, 16);
-    }
+    // for (int i = 0; i < n / 2; i++) {
+    //     AI::TASK_COMBAT_PED(peds[i], peds[n / 2 + (i % (n / 2))], 0, 16);
+    // }
+    // for (int i = n / 2; i < n; i++) {
+    //     AI::TASK_COMBAT_PED(peds[i], peds[i - n / 2], 0, 16);
+    // }
 
     g_fightReady = true;
     LOGI("script", std::string("CREATE_FIGHT at ") + std::to_string(g_fightPos[0]) + "," + std::to_string(g_fightPos[1]) + "," + std::to_string(g_fightPos[2]));
