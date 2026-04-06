@@ -8,14 +8,14 @@ import torch
 from PIL import Image
 from transformers import AutoTokenizer, CLIPImageProcessor, CLIPModel
 
-from action_mapping import dispatch_action, parse_action
+from action_mapping import ACTIONS, dispatch_action, parse_action
 from dronesim_client import DroneSimClient
 from prompting import build_prompt
 from qwen3vl_wrapper import Qwen3VLWrapper
 from rgbd_utils import depth_bytes_to_pil, rgb_bytes_to_pil
 from stage1_model import Stage1Config, Stage1GRUModel
 from stage2_bridge import Stage2BridgeConfig, Stage2BridgeModel
-from stage2_softprompt import generate_action_with_soft_prompt
+from stage2_softprompt import forward_action_ce_with_soft_prompt, generate_action_with_soft_prompt
 from verification_runtime import (
     build_movement_params,
     calculate_distance,
@@ -161,6 +161,25 @@ def _load_stage2_bridge(stage2_ckpt: Path, device: torch.device):
     return bridge
 
 
+def _rank_action_by_ce(processor, model, messages, images, soft_prompt):
+    best_action = None
+    best_loss = None
+    for action_name in ACTIONS:
+        loss = forward_action_ce_with_soft_prompt(
+            processor=processor,
+            model=model,
+            messages=messages,
+            images=images,
+            action_text=action_name,
+            soft_prompt=soft_prompt,
+        )
+        value = float(loss.item())
+        if best_loss is None or value < best_loss:
+            best_loss = value
+            best_action = action_name
+    return best_action, best_loss
+
+
 def run_single_verification_stage2(
     cli,
     qwen: Qwen3VLWrapper,
@@ -170,6 +189,7 @@ def run_single_verification_stage2(
     sample: dict,
     max_steps: int,
     movement_params: dict,
+    action_select_mode: str,
 ):
     scenario_id = sample["scenario_id"]
     anomaly_type = sample["anomaly_type"]
@@ -241,17 +261,28 @@ def run_single_verification_stage2(
                     ],
                 }
             ]
-            raw = generate_action_with_soft_prompt(
-                processor=qwen.processor,
-                model=qwen.model,
-                messages=messages,
-                images=[rgb_pil, depth_pil],
-                soft_prompt=soft_prompt,
-                max_new_tokens=16,
-                do_sample=False,
-            )
-            action = parse_action(raw) or "AUTO_FORWARD"
-            print(f"  [{steps}] {action}")
+            if action_select_mode == "rank_actions":
+                action, best_ce = _rank_action_by_ce(
+                    processor=qwen.processor,
+                    model=qwen.model,
+                    messages=messages,
+                    images=[rgb_pil, depth_pil],
+                    soft_prompt=soft_prompt,
+                )
+                action = action or "AUTO_FORWARD"
+                print(f"  [{steps}] {action} (ce={best_ce:.4f})")
+            else:
+                raw = generate_action_with_soft_prompt(
+                    processor=qwen.processor,
+                    model=qwen.model,
+                    messages=messages,
+                    images=[rgb_pil, depth_pil],
+                    soft_prompt=soft_prompt,
+                    max_new_tokens=16,
+                    do_sample=False,
+                )
+                action = parse_action(raw) or "AUTO_FORWARD"
+                print(f"  [{steps}] {action}")
             if action == "AUTO_STOP_REACHED":
                 stopped_by_model = True
                 break
@@ -297,6 +328,12 @@ def main():
     parser.add_argument("--stride", type=int, default=48)
     parser.add_argument("--tile_batch_size", type=int, default=128)
     parser.add_argument("--use_null_text_baseline", action="store_true")
+    parser.add_argument(
+        "--action_select_mode",
+        choices=["rank_actions", "generate_parse"],
+        default="rank_actions",
+        help="Action selection mode in online verification",
+    )
     parser.add_argument("--max_steps", type=int, default=150)
     parser.add_argument("--sleep_s", type=float, default=3.0)
     parser.add_argument("--fov", type=float, default=None)
@@ -368,6 +405,7 @@ def main():
                 sample=sample,
                 max_steps=int(args.max_steps),
                 movement_params=movement_params,
+                action_select_mode=str(args.action_select_mode),
             )
             results.append(result)
     finally:
