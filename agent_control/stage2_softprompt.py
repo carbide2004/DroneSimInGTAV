@@ -97,6 +97,7 @@ def forward_action_ce_with_soft_prompt(
 
     model_inputs, soft_len, prompt_len = _prepend_soft_prompt(model, extended_inputs, soft_prompt)
     total_len = model_inputs["inputs_embeds"].shape[1]
+    action_len = action_ids.shape[1]
 
     labels = torch.full(
         (1, total_len),
@@ -104,8 +105,8 @@ def forward_action_ce_with_soft_prompt(
         dtype=torch.long,
         device=model_inputs["inputs_embeds"].device,
     )
-    target_start = soft_len + prompt_len
-    target_end = target_start + action_ids.shape[1]
+    target_end = total_len
+    target_start = total_len - action_len
     labels[:, target_start:target_end] = action_ids
     model_inputs["labels"] = labels
 
