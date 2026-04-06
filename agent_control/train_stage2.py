@@ -196,7 +196,7 @@ def main():
     parser.add_argument("--cache_dir", default=str(_repo_root() / "dataset" / "clip_cache"))
     parser.add_argument("--dataset_root", default=str(_repo_root() / "dataset"))
     parser.add_argument("--stage1_ckpt", required=True, help="Path to stage1 best.pt or last.pt")
-    parser.add_argument("--model_dir", default=str(Path(__file__).resolve().parent / "models" / "qwen3_vl_sft_merged"))
+    parser.add_argument("--model_dir", default=str(Path(__file__).resolve().parent / "models" / "qwen3_vl_sft_GTAV_20260403"))
     parser.add_argument("--output_dir", default=str(_repo_root() / "agent_control" / "checkpoints" / "stage2"))
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=1)
@@ -216,7 +216,7 @@ def main():
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--lora_targets", default="q_proj,k_proj,v_proj,o_proj")
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="cuda:3")
     args = parser.parse_args()
 
     repo_root = _repo_root()
@@ -227,6 +227,7 @@ def main():
     torch.manual_seed(int(args.seed))
 
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
+    device_str = str(device)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -260,7 +261,7 @@ def main():
     dataset_root = Path(args.dataset_root)
 
     stage1_model, stage1_cfg = _load_stage1_encoder(Path(args.stage1_ckpt), device=device)
-    qwen = Qwen3VLWrapper(args.model_dir, torch_dtype="auto", device_map="auto").load()
+    qwen = Qwen3VLWrapper(args.model_dir, torch_dtype="auto", device_map={"":device_str}).load()
 
     lora_targets = [x.strip() for x in str(args.lora_targets).split(",") if x.strip()]
     qwen._model = _attach_lora(

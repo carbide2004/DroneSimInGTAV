@@ -123,7 +123,7 @@ def main():
     parser.add_argument("--dataset_root", default=str(_repo_root() / "dataset"))
     parser.add_argument("--stage1_ckpt", required=True)
     parser.add_argument("--stage2_ckpt", required=True)
-    parser.add_argument("--model_dir", default=str(Path(__file__).resolve().parent / "models" / "qwen3_vl_sft_merged"))
+    parser.add_argument("--model_dir", default=str(Path(__file__).resolve().parent / "models" / "qwen3_vl_sft_GTAV_20260403"))
     parser.add_argument("--stage2_lora_dir", default=None, help="Optional LoRA dir, default sibling lora_best")
     parser.add_argument("--split", choices=["train", "val"], default="val")
     parser.add_argument("--sample_limit", type=int, default=-1, help="Limit trajectory batches")
@@ -182,7 +182,7 @@ def main():
     stage1_model = _load_stage1_encoder(Path(args.stage1_ckpt), device=device)
     bridge = _load_stage2_bridge(Path(args.stage2_ckpt), device=device)
 
-    qwen = Qwen3VLWrapper(args.model_dir, torch_dtype="auto", device_map="auto").load()
+    qwen = Qwen3VLWrapper(args.model_dir, torch_dtype="auto", device_map={"":str(device)}).load()
     if args.stage2_lora_dir:
         lora_dir = Path(args.stage2_lora_dir)
     else:

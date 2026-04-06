@@ -274,7 +274,7 @@ def main():
     parser.add_argument("--max_len", type=int, default=100, help="Fixed max trajectory length")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
-    parser.add_argument("--lambda_b1", type=float, default=0.1, help="B1 loss weight")
+    parser.add_argument("--lambda_b1", type=float, default=10, help="B1 loss weight")
     parser.add_argument("--temperature", type=float, default=0.07, help="InfoNCE temperature")
     parser.add_argument("--val_ratio", type=float, default=0.2, help="Validation ratio by trajectories")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")

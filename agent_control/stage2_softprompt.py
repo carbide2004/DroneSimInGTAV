@@ -144,8 +144,17 @@ def generate_action_with_soft_prompt(
     with torch.inference_mode():
         out_ids = model.generate(**model_inputs, **gen_kwargs)
 
-    out_ids = out_ids[:, prompt_len:]
-    text = processor.batch_decode(out_ids, skip_special_tokens=True)
-    if not text:
+    full_text = processor.batch_decode(out_ids, skip_special_tokens=True)
+    if not full_text:
         return ""
-    return str(text[0]).strip()
+    full_text = str(full_text[0]).strip()
+
+    # With inputs_embeds generation, some backends return only generated tokens;
+    # others return prompt+generated tokens. Keep both paths robust.
+    if out_ids.ndim == 2 and out_ids.shape[1] > prompt_len:
+        tail_ids = out_ids[:, prompt_len:]
+        tail_text = processor.batch_decode(tail_ids, skip_special_tokens=True)
+        tail_text = str(tail_text[0]).strip() if tail_text else ""
+        if tail_text:
+            return tail_text
+    return full_text
