@@ -286,7 +286,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run stage2 verification with soft prompt bridge")
     parser.add_argument("--host", default="127.0.0.5")
     parser.add_argument("--port", type=int, default=23456)
-    parser.add_argument("--model_dir", default=str(Path(__file__).resolve().parent / "models" / "qwen3_vl_sft_merged"))
+    parser.add_argument("--model_dir", default=str(Path(__file__).resolve().parent / "models" / "qwen3_vl_sft_GTAV_20260403"))
     parser.add_argument("--stage1_ckpt", required=True)
     parser.add_argument("--stage2_ckpt", required=True)
     parser.add_argument("--stage2_lora_dir", default=None, help="Optional LoRA dir, default is sibling lora_best")
