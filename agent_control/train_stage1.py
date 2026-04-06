@@ -11,7 +11,11 @@ from transformers import AutoModel, AutoTokenizer
 
 from hf_auth import load_hf_token_from_env_file
 from stage1_model import Stage1Config, Stage1GRUModel
-from trajectory_dataset import build_stage1_dataloaders
+from trajectory_dataset import (
+    build_stage1_dataloaders,
+    build_stage1_dataloaders_from_manifest,
+    build_stage1_dataloaders_from_split_json,
+)
 
 
 ACTION_SET = (
@@ -275,6 +279,9 @@ def main():
     parser.add_argument("--val_ratio", type=float, default=0.2, help="Validation ratio by trajectories")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers")
+    parser.add_argument("--split_manifest_json", default=None, help="Fixed split manifest JSON path")
+    parser.add_argument("--train_json", default=None, help="Fixed train split JSON path")
+    parser.add_argument("--val_json", default=None, help="Fixed val split JSON path")
     parser.add_argument(
         "--text_model_name",
         default="sentence-transformers/all-MiniLM-L6-v2",
@@ -293,14 +300,31 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_loader, val_loader, split_meta = build_stage1_dataloaders(
-        dataset_json=Path(args.dataset_json),
-        batch_size=int(args.batch_size),
-        val_ratio=float(args.val_ratio),
-        seed=int(args.seed),
-        num_workers=int(args.num_workers),
-        mode="sequence",
-    )
+    if args.train_json and args.val_json:
+        train_loader, val_loader, split_meta = build_stage1_dataloaders_from_split_json(
+            train_json=Path(args.train_json),
+            val_json=Path(args.val_json),
+            batch_size=int(args.batch_size),
+            num_workers=int(args.num_workers),
+            mode="sequence",
+        )
+    elif args.split_manifest_json:
+        train_loader, val_loader, split_meta = build_stage1_dataloaders_from_manifest(
+            dataset_json=Path(args.dataset_json),
+            split_manifest_json=Path(args.split_manifest_json),
+            batch_size=int(args.batch_size),
+            num_workers=int(args.num_workers),
+            mode="sequence",
+        )
+    else:
+        train_loader, val_loader, split_meta = build_stage1_dataloaders(
+            dataset_json=Path(args.dataset_json),
+            batch_size=int(args.batch_size),
+            val_ratio=float(args.val_ratio),
+            seed=int(args.seed),
+            num_workers=int(args.num_workers),
+            mode="sequence",
+        )
 
     feature_store = FeatureCacheStore(Path(args.cache_dir))
     print(f"Feature store backbone: {feature_store.backbone}, input_dim: {feature_store.feature_dim}")
@@ -339,6 +363,9 @@ def main():
             "text_model_name": str(args.text_model_name),
             "cache_dir": str(Path(args.cache_dir)),
             "dataset_json": str(Path(args.dataset_json)),
+            "split_manifest_json": str(Path(args.split_manifest_json)) if args.split_manifest_json else None,
+            "train_json": str(Path(args.train_json)) if args.train_json else None,
+            "val_json": str(Path(args.val_json)) if args.val_json else None,
         },
         "split_meta": split_meta,
     }

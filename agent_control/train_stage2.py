@@ -14,7 +14,11 @@ from stage1_model import Stage1Config, Stage1GRUModel
 from stage2_bridge import Stage2BridgeConfig, Stage2BridgeModel
 from stage2_softprompt import forward_action_ce_with_soft_prompt
 from train_stage1 import FeatureCacheStore
-from trajectory_dataset import build_stage1_dataloaders
+from trajectory_dataset import (
+    build_stage1_dataloaders,
+    build_stage1_dataloaders_from_manifest,
+    build_stage1_dataloaders_from_split_json,
+)
 
 
 def _repo_root():
@@ -200,6 +204,9 @@ def main():
     parser.add_argument("--val_ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--split_manifest_json", default=None, help="Fixed split manifest JSON path")
+    parser.add_argument("--train_json", default=None, help="Fixed train split JSON path")
+    parser.add_argument("--val_json", default=None, help="Fixed val split JSON path")
     parser.add_argument("--steps_per_batch", type=int, default=4, help="Timesteps sampled per trajectory batch")
     parser.add_argument("--num_soft_tokens", type=int, default=16)
     parser.add_argument("--lr_bridge", type=float, default=1e-4)
@@ -223,14 +230,31 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_loader, val_loader, split_meta = build_stage1_dataloaders(
-        dataset_json=Path(args.dataset_json),
-        batch_size=int(args.batch_size),
-        val_ratio=float(args.val_ratio),
-        seed=int(args.seed),
-        num_workers=int(args.num_workers),
-        mode="sequence",
-    )
+    if args.train_json and args.val_json:
+        train_loader, val_loader, split_meta = build_stage1_dataloaders_from_split_json(
+            train_json=Path(args.train_json),
+            val_json=Path(args.val_json),
+            batch_size=int(args.batch_size),
+            num_workers=int(args.num_workers),
+            mode="sequence",
+        )
+    elif args.split_manifest_json:
+        train_loader, val_loader, split_meta = build_stage1_dataloaders_from_manifest(
+            dataset_json=Path(args.dataset_json),
+            split_manifest_json=Path(args.split_manifest_json),
+            batch_size=int(args.batch_size),
+            num_workers=int(args.num_workers),
+            mode="sequence",
+        )
+    else:
+        train_loader, val_loader, split_meta = build_stage1_dataloaders(
+            dataset_json=Path(args.dataset_json),
+            batch_size=int(args.batch_size),
+            val_ratio=float(args.val_ratio),
+            seed=int(args.seed),
+            num_workers=int(args.num_workers),
+            mode="sequence",
+        )
 
     feature_store = FeatureCacheStore(Path(args.cache_dir))
     dataset_root = Path(args.dataset_root)
@@ -294,6 +318,9 @@ def main():
             "dataset_json": str(Path(args.dataset_json)),
             "cache_dir": str(Path(args.cache_dir)),
             "dataset_root": str(dataset_root),
+            "split_manifest_json": str(Path(args.split_manifest_json)) if args.split_manifest_json else None,
+            "train_json": str(Path(args.train_json)) if args.train_json else None,
+            "val_json": str(Path(args.val_json)) if args.val_json else None,
         },
         "split_meta": split_meta,
     }

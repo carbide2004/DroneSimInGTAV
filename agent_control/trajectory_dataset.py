@@ -225,24 +225,7 @@ def load_dataset_entries(dataset_json: Path) -> List[Dict]:
     return data
 
 
-def build_stage1_dataloaders(
-    dataset_json: Path,
-    batch_size: int = 4,
-    val_ratio: float = 0.2,
-    seed: int = 42,
-    num_workers: int = 0,
-    mode: str = "sequence",
-):
-    try:
-        from torch.utils.data import DataLoader
-    except Exception as e:
-        raise RuntimeError("无法导入 torch.utils.data.DataLoader，请先安装 PyTorch。") from e
-
-    entries = load_dataset_entries(Path(dataset_json))
-    groups = group_by_trajectory(entries)
-    all_ids = sorted(groups.keys())
-    train_ids, val_ids = split_trajectory_ids(all_ids, val_ratio=val_ratio, seed=seed)
-
+def _build_datasets(entries: List[Dict], train_ids: List[str], val_ids: List[str], mode: str):
     if mode == "sequence":
         train_dataset = TrajectorySequenceDataset(entries, train_ids)
         val_dataset = TrajectorySequenceDataset(entries, val_ids)
@@ -253,7 +236,14 @@ def build_stage1_dataloaders(
         collate_fn = None
     else:
         raise ValueError(f"Unsupported mode: {mode}")
+    return train_dataset, val_dataset, collate_fn
 
+
+def _build_loaders(train_dataset, val_dataset, collate_fn, batch_size: int, num_workers: int):
+    try:
+        from torch.utils.data import DataLoader
+    except Exception as e:
+        raise RuntimeError("无法导入 torch.utils.data.DataLoader，请先安装 PyTorch。") from e
     train_loader = DataLoader(
         train_dataset,
         batch_size=int(batch_size),
@@ -267,6 +257,106 @@ def build_stage1_dataloaders(
         shuffle=False,
         num_workers=int(num_workers),
         collate_fn=collate_fn,
+    )
+    return train_loader, val_loader
+
+
+def build_stage1_dataloaders_from_manifest(
+    dataset_json: Path,
+    split_manifest_json: Path,
+    batch_size: int = 4,
+    num_workers: int = 0,
+    mode: str = "sequence",
+):
+    entries = load_dataset_entries(Path(dataset_json))
+    manifest = _read_json(Path(split_manifest_json))
+    if not isinstance(manifest, dict):
+        raise RuntimeError("split manifest 必须是对象。")
+    train_ids = [str(x) for x in manifest.get("train_trajectory_ids", [])]
+    val_ids = [str(x) for x in manifest.get("val_trajectory_ids", [])]
+    train_dataset, val_dataset, collate_fn = _build_datasets(entries, train_ids, val_ids, mode=mode)
+    train_loader, val_loader = _build_loaders(
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        collate_fn=collate_fn,
+        batch_size=int(batch_size),
+        num_workers=int(num_workers),
+    )
+    split_meta = {
+        "source": str(Path(dataset_json)),
+        "manifest": str(Path(split_manifest_json)),
+        "total_trajectories": int(manifest.get("total_trajectories", len(train_ids) + len(val_ids))),
+        "train_trajectories": len(train_ids),
+        "val_trajectories": len(val_ids),
+        "train_ids": train_ids,
+        "val_ids": val_ids,
+        "mode": mode,
+        "batch_size": int(batch_size),
+        "split_strategy": "fixed_manifest",
+    }
+    return train_loader, val_loader, split_meta
+
+
+def build_stage1_dataloaders_from_split_json(
+    train_json: Path,
+    val_json: Path,
+    batch_size: int = 4,
+    num_workers: int = 0,
+    mode: str = "sequence",
+):
+    train_entries = load_dataset_entries(Path(train_json))
+    val_entries = load_dataset_entries(Path(val_json))
+    merged_entries = list(train_entries) + list(val_entries)
+    train_groups = group_by_trajectory(train_entries)
+    val_groups = group_by_trajectory(val_entries)
+    train_ids = sorted(train_groups.keys())
+    val_ids = sorted(val_groups.keys())
+    train_dataset, val_dataset, collate_fn = _build_datasets(
+        entries=merged_entries,
+        train_ids=train_ids,
+        val_ids=val_ids,
+        mode=mode,
+    )
+    train_loader, val_loader = _build_loaders(
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        collate_fn=collate_fn,
+        batch_size=int(batch_size),
+        num_workers=int(num_workers),
+    )
+    split_meta = {
+        "train_json": str(Path(train_json)),
+        "val_json": str(Path(val_json)),
+        "train_trajectories": len(train_ids),
+        "val_trajectories": len(val_ids),
+        "train_ids": train_ids,
+        "val_ids": val_ids,
+        "mode": mode,
+        "batch_size": int(batch_size),
+        "split_strategy": "fixed_json",
+    }
+    return train_loader, val_loader, split_meta
+
+
+def build_stage1_dataloaders(
+    dataset_json: Path,
+    batch_size: int = 4,
+    val_ratio: float = 0.2,
+    seed: int = 42,
+    num_workers: int = 0,
+    mode: str = "sequence",
+):
+    entries = load_dataset_entries(Path(dataset_json))
+    groups = group_by_trajectory(entries)
+    all_ids = sorted(groups.keys())
+    train_ids, val_ids = split_trajectory_ids(all_ids, val_ratio=val_ratio, seed=seed)
+    train_dataset, val_dataset, collate_fn = _build_datasets(entries, train_ids, val_ids, mode=mode)
+    train_loader, val_loader = _build_loaders(
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        collate_fn=collate_fn,
+        batch_size=int(batch_size),
+        num_workers=int(num_workers),
     )
     split_meta = {
         "total_trajectories": len(all_ids),
