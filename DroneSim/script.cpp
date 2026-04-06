@@ -898,13 +898,14 @@ static void run_auto_collect(AutoCollectEvent event_type) {
 
     Any cam = CAM::GET_RENDERING_CAM();
     CAM::SET_CAM_COORD(cam, start_pos.x, start_pos.y, start_pos.z);
+    float yaw;
     if (false) {
         // 随机一个yaw初始角而不是朝向目标点
-        float yaw = quantize_deg((float)rand() / (float)RAND_MAX * 360.0f, YAW_STEPSIZE);    
+        yaw = quantize_deg((float)rand() / (float)RAND_MAX * 360.0f, YAW_STEPSIZE);    
     }
     else {
         // 朝向目标点
-        float yaw = quantize_deg(yaw_to_target_deg(start_pos, target), YAW_STEPSIZE);
+        yaw = quantize_deg(yaw_to_target_deg(start_pos, target), YAW_STEPSIZE);
     }
     CAM::SET_CAM_ROT(cam, 0.0f, 0.0f, yaw, 2);
     
