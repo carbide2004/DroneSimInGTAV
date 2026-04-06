@@ -116,6 +116,25 @@ def _safe_action_index(action_name: str):
         return None
 
 
+def _rank_action_by_ce(processor, model, messages, images, soft_prompt):
+    best_action = None
+    best_loss = None
+    for action_name in ACTIONS:
+        loss = forward_action_ce_with_soft_prompt(
+            processor=processor,
+            model=model,
+            messages=messages,
+            images=images,
+            action_text=action_name,
+            soft_prompt=soft_prompt,
+        )
+        value = float(loss.item())
+        if best_loss is None or value < best_loss:
+            best_loss = value
+            best_action = action_name
+    return best_action, best_loss
+
+
 def main():
     parser = argparse.ArgumentParser(description="Offline evaluation for stage2 soft prompt model")
     parser.add_argument("--dataset_json", default=str(_repo_root() / "dataset" / "train_data_all_with_awareness.json"))
@@ -137,6 +156,12 @@ def main():
     parser.add_argument("--val_json", default=None, help="Fixed val split JSON path")
     parser.add_argument("--steps_per_batch", type=int, default=4)
     parser.add_argument("--max_new_tokens", type=int, default=16)
+    parser.add_argument(
+        "--eval_mode",
+        choices=["rank_actions", "generate_parse"],
+        default="rank_actions",
+        help="rank_actions: CE ranking over ACTIONS; generate_parse: free generation + parse_action",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output_json", default=str(_repo_root() / "agent_control" / "checkpoints" / "stage2" / "offline_eval.json"))
     args = parser.parse_args()
@@ -245,17 +270,29 @@ def main():
 
                 h_t = h_seq[i, j].unsqueeze(0)
                 soft_prompt = bridge(h_t)
-                raw_pred = generate_action_with_soft_prompt(
-                    processor=qwen.processor,
-                    model=qwen.model,
-                    messages=messages,
-                    images=[rgb_img, depth_img],
-                    soft_prompt=soft_prompt,
-                    max_new_tokens=int(args.max_new_tokens),
-                    do_sample=False,
-                )
-                pred_action = parse_action(raw_pred)
-                pred_idx = _safe_action_index(pred_action) if pred_action else None
+                raw_pred = None
+                if args.eval_mode == "rank_actions":
+                    pred_action, pred_ce = _rank_action_by_ce(
+                        processor=qwen.processor,
+                        model=qwen.model,
+                        messages=messages,
+                        images=[rgb_img, depth_img],
+                        soft_prompt=soft_prompt,
+                    )
+                    pred_idx = _safe_action_index(pred_action)
+                    raw_pred = f"[rank_actions] {pred_action} (ce={pred_ce:.4f})"
+                else:
+                    raw_pred = generate_action_with_soft_prompt(
+                        processor=qwen.processor,
+                        model=qwen.model,
+                        messages=messages,
+                        images=[rgb_img, depth_img],
+                        soft_prompt=soft_prompt,
+                        max_new_tokens=int(args.max_new_tokens),
+                        do_sample=False,
+                    )
+                    pred_action = parse_action(raw_pred)
+                    pred_idx = _safe_action_index(pred_action) if pred_action else None
 
                 ce_loss = forward_action_ce_with_soft_prompt(
                     processor=qwen.processor,
@@ -333,6 +370,7 @@ def main():
             "steps_per_batch": int(args.steps_per_batch),
             "max_len": int(args.max_len),
             "max_new_tokens": int(args.max_new_tokens),
+            "eval_mode": str(args.eval_mode),
             "seed": int(args.seed),
             "split_manifest_json": str(Path(args.split_manifest_json)) if args.split_manifest_json else None,
             "train_json": str(Path(args.train_json)) if args.train_json else None,
