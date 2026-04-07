@@ -198,6 +198,7 @@ def run_single_verification_stage2(
     movement_params: dict,
     action_select_mode: str,
     expected_feature_dim: int,
+    policy_mode: str,
 ):
     scenario_id = sample["scenario_id"]
     anomaly_type = sample["anomaly_type"]
@@ -250,17 +251,19 @@ def run_single_verification_stage2(
             rgb_pil = rgb_bytes_to_pil(w, h, rgb_bytes)
             depth_pil = depth_bytes_to_pil(w, h, depth_bytes)
 
-            feat = extractor.extract(rgb_pil, depth_pil, task_desc)
-            if int(feat.shape[0]) != int(expected_feature_dim):
-                raise RuntimeError(
-                    f"Feature dim mismatch in online verification: got {int(feat.shape[0])}, "
-                    f"expected {int(expected_feature_dim)} from stage1 input_proj."
-                )
-            feat_t = torch.from_numpy(feat).to(next(stage1_model.parameters()).device).unsqueeze(0).unsqueeze(0)
-            x = stage1_model.input_proj(feat_t)
-            out, h_prev = stage1_model.gru(x, h_prev)
-            h_t = out[:, 0, :]
-            soft_prompt = bridge(h_t.to(next(bridge.parameters()).device))
+            soft_prompt = None
+            if policy_mode == "stage2_softprompt":
+                feat = extractor.extract(rgb_pil, depth_pil, task_desc)
+                if int(feat.shape[0]) != int(expected_feature_dim):
+                    raise RuntimeError(
+                        f"Feature dim mismatch in online verification: got {int(feat.shape[0])}, "
+                        f"expected {int(expected_feature_dim)} from stage1 input_proj."
+                    )
+                feat_t = torch.from_numpy(feat).to(next(stage1_model.parameters()).device).unsqueeze(0).unsqueeze(0)
+                x = stage1_model.input_proj(feat_t)
+                out, h_prev = stage1_model.gru(x, h_prev)
+                h_t = out[:, 0, :]
+                soft_prompt = bridge(h_t.to(next(bridge.parameters()).device))
 
             x0, y0, z0, _, _, rz0 = pose
             prompt = build_prompt(x0, y0, z0, rz0, task=task_desc)
@@ -274,7 +277,7 @@ def run_single_verification_stage2(
                     ],
                 }
             ]
-            if action_select_mode == "rank_actions":
+            if policy_mode == "stage2_softprompt" and action_select_mode == "rank_actions":
                 action, best_ce = _rank_action_by_ce(
                     processor=qwen.processor,
                     model=qwen.model,
@@ -284,13 +287,24 @@ def run_single_verification_stage2(
                 )
                 action = action or "AUTO_FORWARD"
                 print(f"  [{steps}] {action} (ce={best_ce:.4f})")
-            else:
+            elif policy_mode == "stage2_softprompt":
                 raw = generate_action_with_soft_prompt(
                     processor=qwen.processor,
                     model=qwen.model,
                     messages=messages,
                     images=[rgb_pil, depth_pil],
                     soft_prompt=soft_prompt,
+                    max_new_tokens=16,
+                    do_sample=False,
+                )
+                action = parse_action(raw) or "AUTO_FORWARD"
+                print(f"  [{steps}] {action}")
+            else:
+                # Baseline policy: direct VLA action generation without GRU soft prompt.
+                raw = qwen.generate_action(
+                    prompt_text=prompt,
+                    rgb_pil=rgb_pil,
+                    depth_pil=depth_pil,
                     max_new_tokens=16,
                     do_sample=False,
                 )
@@ -331,9 +345,15 @@ def main():
     parser.add_argument("--host", default="127.0.0.5")
     parser.add_argument("--port", type=int, default=23456)
     parser.add_argument("--model_dir", default=str(Path(__file__).resolve().parent / "models" / "qwen3_vl_sft_GTAV_20260403"))
-    parser.add_argument("--stage1_ckpt", required=True)
-    parser.add_argument("--stage2_ckpt", required=True)
+    parser.add_argument("--stage1_ckpt", default=None)
+    parser.add_argument("--stage2_ckpt", default=None)
     parser.add_argument("--stage2_lora_dir", default=None, help="Optional LoRA dir, default is sibling lora_best")
+    parser.add_argument(
+        "--policy_mode",
+        choices=["stage2_softprompt", "vla_direct"],
+        default="stage2_softprompt",
+        help="Policy to run in online verification",
+    )
     parser.add_argument("--clip_model_name", default="openai/clip-vit-base-patch32")
     parser.add_argument("--clip_device", default="cpu")
     parser.add_argument("--heatmap_size", type=int, default=48)
@@ -361,6 +381,12 @@ def main():
     parser.add_argument("--no_resume_from_output", dest="resume_from_output", action="store_false", help="Disable resume from output JSON")
     parser.set_defaults(resume_from_output=True)
     args = parser.parse_args()
+    if args.policy_mode == "stage2_softprompt":
+        if not args.stage1_ckpt or not args.stage2_ckpt:
+            raise RuntimeError("policy_mode=stage2_softprompt requires --stage1_ckpt and --stage2_ckpt")
+    if args.policy_mode == "vla_direct" and args.action_select_mode == "rank_actions":
+        print("Warning: policy_mode=vla_direct does not support rank_actions; switching to generate_parse.")
+        args.action_select_mode = "generate_parse"
 
     root_path = Path(args.root_path) if args.root_path else _repo_root()
     if args.verification_file is None:
@@ -378,9 +404,11 @@ def main():
     qwen = Qwen3VLWrapper(args.model_dir).load()
     if args.stage2_lora_dir:
         lora_dir = Path(args.stage2_lora_dir)
-    else:
+    elif args.stage2_ckpt:
         lora_dir = Path(args.stage2_ckpt).resolve().parent / "lora_best"
-    if lora_dir.exists():
+    else:
+        lora_dir = None
+    if lora_dir is not None and lora_dir.exists():
         try:
             from peft import PeftModel
             qwen._model = PeftModel.from_pretrained(qwen.model, lora_dir)
@@ -388,32 +416,37 @@ def main():
             print(f"Warning: failed to load LoRA adapter from {lora_dir}: {e}")
 
     stage1_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    stage1_model = _load_stage1_encoder(Path(args.stage1_ckpt), stage1_device)
-    expected_feature_dim = int(stage1_model.input_proj.in_features)
-    inferred_heatmap_size = int(round(math.sqrt(max(expected_feature_dim // 2, 1))))
-    if inferred_heatmap_size * inferred_heatmap_size * 2 == expected_feature_dim:
-        if int(args.heatmap_size) != inferred_heatmap_size:
+    stage1_model = None
+    bridge = None
+    extractor = None
+    expected_feature_dim = -1
+    if args.policy_mode == "stage2_softprompt":
+        stage1_model = _load_stage1_encoder(Path(args.stage1_ckpt), stage1_device)
+        expected_feature_dim = int(stage1_model.input_proj.in_features)
+        inferred_heatmap_size = int(round(math.sqrt(max(expected_feature_dim // 2, 1))))
+        if inferred_heatmap_size * inferred_heatmap_size * 2 == expected_feature_dim:
+            if int(args.heatmap_size) != inferred_heatmap_size:
+                print(
+                    f"Warning: --heatmap_size={int(args.heatmap_size)} mismatches stage1 expected dim={expected_feature_dim}. "
+                    f"Auto-adjusting heatmap_size to {inferred_heatmap_size}."
+                )
+                args.heatmap_size = inferred_heatmap_size
+        else:
             print(
-                f"Warning: --heatmap_size={int(args.heatmap_size)} mismatches stage1 expected dim={expected_feature_dim}. "
-                f"Auto-adjusting heatmap_size to {inferred_heatmap_size}."
+                f"Warning: cannot infer heatmap_size from expected_feature_dim={expected_feature_dim}; "
+                f"using user-provided heatmap_size={int(args.heatmap_size)}."
             )
-            args.heatmap_size = inferred_heatmap_size
-    else:
-        print(
-            f"Warning: cannot infer heatmap_size from expected_feature_dim={expected_feature_dim}; "
-            f"using user-provided heatmap_size={int(args.heatmap_size)}."
-        )
 
-    bridge = _load_stage2_bridge(Path(args.stage2_ckpt), stage1_device)
-    extractor = ClipHeatDepthExtractor(
-        model_name=args.clip_model_name,
-        heatmap_size=int(args.heatmap_size),
-        window_size=int(args.window_size),
-        stride=int(args.stride),
-        tile_batch_size=int(args.tile_batch_size),
-        use_null_text_baseline=bool(args.use_null_text_baseline),
-        device=args.clip_device,
-    )
+        bridge = _load_stage2_bridge(Path(args.stage2_ckpt), stage1_device)
+        extractor = ClipHeatDepthExtractor(
+            model_name=args.clip_model_name,
+            heatmap_size=int(args.heatmap_size),
+            window_size=int(args.window_size),
+            stride=int(args.stride),
+            tile_batch_size=int(args.tile_batch_size),
+            use_null_text_baseline=bool(args.use_null_text_baseline),
+            device=args.clip_device,
+        )
 
     cli = DroneSimClient(host=args.host, port=int(args.port))
     time.sleep(float(args.sleep_s))
@@ -476,6 +509,7 @@ def main():
                 movement_params=movement_params,
                 action_select_mode=str(args.action_select_mode),
                 expected_feature_dim=expected_feature_dim,
+                policy_mode=str(args.policy_mode),
             )
             results.append(result)
             # Save progress after every completed sample to avoid losing finished results.
