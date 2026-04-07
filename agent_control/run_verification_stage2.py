@@ -1,4 +1,5 @@
 import argparse
+import json
 import math
 import os
 import time
@@ -26,6 +27,11 @@ from verification_runtime import (
     read_jsonl,
     write_json,
 )
+
+
+def _read_json(path: Path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _repo_root():
@@ -351,6 +357,9 @@ def main():
     parser.add_argument("--root_path", default=None)
     parser.add_argument("--verification_file", default=None)
     parser.add_argument("--output_file", default=None)
+    parser.add_argument("--resume_from_output", dest="resume_from_output", action="store_true", help="Resume from existing output JSON")
+    parser.add_argument("--no_resume_from_output", dest="resume_from_output", action="store_false", help="Disable resume from output JSON")
+    parser.set_defaults(resume_from_output=True)
     args = parser.parse_args()
 
     root_path = Path(args.root_path) if args.root_path else _repo_root()
@@ -412,6 +421,7 @@ def main():
     results = []
     output_file = Path(args.output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
+    start_index = 0
 
     def _save_progress(status: str, current_index: int, error_message: str = None):
         payload = {
@@ -427,6 +437,23 @@ def main():
             payload["error"] = str(error_message)
         write_json(output_file, payload)
 
+    if bool(args.resume_from_output) and output_file.exists():
+        try:
+            previous = _read_json(output_file)
+            if isinstance(previous, dict):
+                previous_results = previous.get("results")
+                previous_completed = int(previous.get("completed_samples", 0))
+                if isinstance(previous_results, list):
+                    results = previous_results
+                    previous_completed = min(previous_completed, len(results))
+                    start_index = min(max(previous_completed, 0), len(samples))
+                else:
+                    start_index = min(max(previous_completed, 0), len(samples))
+                if start_index > 0:
+                    print(f"Resuming from sample index {start_index}/{len(samples)} using {output_file}")
+        except Exception as e:
+            print(f"Warning: failed to load resume state from {output_file}: {e}")
+
     current_index = 0
     run_error = None
     try:
@@ -434,7 +461,8 @@ def main():
         cli.create_camera()
         if args.fov is not None:
             cli.set_fov(float(args.fov))
-        for i, sample in enumerate(samples):
+        for i in range(start_index, len(samples)):
+            sample = samples[i]
             current_index = i
             print(f"\nProgress: {i+1}/{len(samples)}")
             result = run_single_verification_stage2(
