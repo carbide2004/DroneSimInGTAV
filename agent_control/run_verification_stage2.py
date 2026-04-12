@@ -21,9 +21,7 @@ from stage2_softprompt import forward_action_ce_with_soft_prompt, generate_actio
 from verification_runtime import (
     build_movement_params,
     calculate_distance,
-    calculate_summary_stats,
     create_anomaly_at_position,
-    print_summary,
     read_jsonl,
     write_json,
 )
@@ -193,6 +191,69 @@ def _rank_action_by_ce(processor, model, messages, images, soft_prompt):
     return best_action, best_loss
 
 
+def _calculate_stage2_metrics(results):
+    if not results:
+        return {
+            "total_samples": 0,
+            "successful_samples": 0,
+            "failed_samples": 0,
+            "sr": 0.0,
+            "spl": 0.0,
+            "avg_stop_distance": 0.0,
+        }
+
+    total = len(results)
+    successful = sum(1 for r in results if bool(r.get("success")))
+    sr = successful / total if total > 0 else 0.0
+
+    spl_values = []
+    for r in results:
+        expected = float(r.get("expected_steps", 0))
+        actual = float(r.get("actual_steps", 0))
+        success = bool(r.get("success"))
+        if expected <= 0:
+            spl = 0.0
+        else:
+            spl = (expected / max(expected, actual, 1.0)) if success else 0.0
+        spl_values.append(float(spl))
+    spl = float(sum(spl_values) / total) if total > 0 else 0.0
+
+    finite_distances = []
+    for r in results:
+        d = float(r.get("final_distance", float("inf")))
+        if math.isfinite(d):
+            finite_distances.append(d)
+    avg_stop_distance = (
+        float(sum(finite_distances) / len(finite_distances)) if finite_distances else float("inf")
+    )
+
+    return {
+        "total_samples": total,
+        "successful_samples": successful,
+        "failed_samples": total - successful,
+        "sr": sr,
+        "spl": spl,
+        "avg_stop_distance": avg_stop_distance,
+    }
+
+
+def _print_stage2_summary(results):
+    metrics = _calculate_stage2_metrics(results)
+    print(f"\n{'=' * 50}")
+    print("STAGE2 VERIFICATION SUMMARY")
+    print(f"{'=' * 50}")
+    print(f"Total samples: {metrics['total_samples']}")
+    print(f"Successful: {metrics['successful_samples']}")
+    print(f"Failed: {metrics['failed_samples']}")
+    print(f"SR: {metrics['sr']:.4f}")
+    print(f"SPL: {metrics['spl']:.4f}")
+    if math.isfinite(metrics["avg_stop_distance"]):
+        print(f"Avg stop distance: {metrics['avg_stop_distance']:.2f}m")
+    else:
+        print("Avg stop distance: inf")
+    print(f"{'=' * 50}")
+
+
 def run_single_verification_stage2(
     cli,
     qwen: Qwen3VLWrapper,
@@ -339,7 +400,10 @@ def run_single_verification_stage2(
     }
 
     success = stopped_by_model and final_distance <= 25.0
-    path_efficiency = min(1.0, expected_steps / max(1, steps)) if steps > 0 else 0.0
+    if expected_steps > 0:
+        spl = (expected_steps / max(float(expected_steps), float(max(steps, 1)))) if success else 0.0
+    else:
+        spl = 0.0
     if final_position is None:
         print(
             "  Final: drone=(unknown), "
@@ -361,7 +425,7 @@ def run_single_verification_stage2(
         "final_distance": final_distance,
         "final_position": final_position,
         "target_position": target_position,
-        "path_efficiency": path_efficiency,
+        "spl": float(spl),
         "anomaly_type": anomaly_type,
         "task_description": task_desc,
     }
@@ -496,7 +560,7 @@ def main():
             "total_samples": len(samples),
             "completed_samples": len(results),
             "current_index": int(current_index),
-            "summary_statistics": calculate_summary_stats(results) if results else {},
+            "summary_statistics": _calculate_stage2_metrics(results),
             "results": results,
         }
         if error_message is not None:
@@ -567,7 +631,7 @@ def main():
     if results:
         _save_progress(status="completed" if run_error is None else "partial", current_index=len(results))
         print(f"Results saved to: {output_file}")
-        print_summary(results)
+        _print_stage2_summary(results)
     if run_error is not None:
         return 1
     return 0
