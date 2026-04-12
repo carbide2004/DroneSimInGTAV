@@ -367,7 +367,7 @@ def main():
         default="rank_actions",
         help="Action selection mode in online verification",
     )
-    parser.add_argument("--max_steps", type=int, default=150)
+    parser.add_argument("--max_steps", type=int, default=30)
     parser.add_argument("--sleep_s", type=float, default=3.0)
     parser.add_argument("--fov", type=float, default=None)
     parser.add_argument("--forward_step", type=float, default=5.0)
