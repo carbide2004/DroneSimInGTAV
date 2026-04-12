@@ -324,15 +324,34 @@ def run_single_verification_stage2(
 
     if final_pose is None:
         final_distance = float("inf")
+        final_position = None
     else:
         fx, fy, fz = final_pose[:3]
+        final_position = {"x": float(fx), "y": float(fy), "z": float(fz)}
         final_distance = calculate_distance(
             (fx, fy, fz),
             (anomaly_pos["x"], anomaly_pos["y"], anomaly_pos["z"]),
         )
+    target_position = {
+        "x": float(anomaly_pos["x"]),
+        "y": float(anomaly_pos["y"]),
+        "z": float(anomaly_pos["z"]),
+    }
 
     success = stopped_by_model and final_distance <= 20.0
     path_efficiency = min(1.0, expected_steps / max(1, steps)) if steps > 0 else 0.0
+    if final_position is None:
+        print(
+            "  Final: drone=(unknown), "
+            f"target=({target_position['x']:.2f}, {target_position['y']:.2f}, {target_position['z']:.2f}), "
+            "distance=inf"
+        )
+    else:
+        print(
+            f"  Final: drone=({final_position['x']:.2f}, {final_position['y']:.2f}, {final_position['z']:.2f}), "
+            f"target=({target_position['x']:.2f}, {target_position['y']:.2f}, {target_position['z']:.2f}), "
+            f"distance={final_distance:.2f}"
+        )
     return {
         "scenario_id": scenario_id,
         "success": success,
@@ -340,6 +359,8 @@ def run_single_verification_stage2(
         "actual_steps": steps,
         "expected_steps": expected_steps,
         "final_distance": final_distance,
+        "final_position": final_position,
+        "target_position": target_position,
         "path_efficiency": path_efficiency,
         "anomaly_type": anomaly_type,
         "task_description": task_desc,
