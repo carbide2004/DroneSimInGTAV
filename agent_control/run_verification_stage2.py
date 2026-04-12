@@ -135,7 +135,13 @@ class ClipHeatDepthExtractor:
         depth_gray = np.array(depth_img.convert("L"), dtype=np.float32) / 255.0
         depth_resized = _resize_float_map(depth_gray, self.heatmap_size)
         depth_norm = np.clip(depth_resized, 0.0, 1.0).astype(np.float32)
-        return np.concatenate([heatmap_norm.reshape(-1), depth_norm.reshape(-1)], axis=0).astype(np.float32)
+        rgb_gray = np.array(rgb_img.convert("L"), dtype=np.float32) / 255.0
+        rgb_resized = _resize_float_map(rgb_gray, self.heatmap_size)
+        rgb_norm = np.clip(rgb_resized, 0.0, 1.0).astype(np.float32)
+        return np.concatenate(
+            [heatmap_norm.reshape(-1), depth_norm.reshape(-1), rgb_norm.reshape(-1)],
+            axis=0,
+        ).astype(np.float32)
 
 
 def _load_stage1_encoder(stage1_ckpt: Path, device: torch.device):
@@ -423,12 +429,18 @@ def main():
     if args.policy_mode == "stage2_softprompt":
         stage1_model = _load_stage1_encoder(Path(args.stage1_ckpt), stage1_device)
         expected_feature_dim = int(stage1_model.input_proj.in_features)
-        inferred_heatmap_size = int(round(math.sqrt(max(expected_feature_dim // 2, 1))))
-        if inferred_heatmap_size * inferred_heatmap_size * 2 == expected_feature_dim:
+        inferred = None
+        for channels in (3, 2):
+            size = int(round(math.sqrt(max(expected_feature_dim // channels, 1))))
+            if size * size * channels == expected_feature_dim:
+                inferred = (size, channels)
+                break
+        if inferred is not None:
+            inferred_heatmap_size, inferred_channels = inferred
             if int(args.heatmap_size) != inferred_heatmap_size:
                 print(
-                    f"Warning: --heatmap_size={int(args.heatmap_size)} mismatches stage1 expected dim={expected_feature_dim}. "
-                    f"Auto-adjusting heatmap_size to {inferred_heatmap_size}."
+                    f"Warning: --heatmap_size={int(args.heatmap_size)} mismatches stage1 expected dim={expected_feature_dim} "
+                    f"(channels={inferred_channels}). Auto-adjusting heatmap_size to {inferred_heatmap_size}."
                 )
                 args.heatmap_size = inferred_heatmap_size
         else:

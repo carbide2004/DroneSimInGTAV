@@ -143,7 +143,7 @@ def _compute_clip_heatmap(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Prepare CLIP tiled heatmap + depth cache")
+    parser = argparse.ArgumentParser(description="Prepare CLIP tiled heatmap + depth + rgb cache")
     parser.add_argument(
         "--dataset_json",
         default=str(_repo_root() / "dataset" / "train_data_all.json"),
@@ -164,7 +164,7 @@ def main():
         default="openai/clip-vit-base-patch32",
         help="CLIP model name",
     )
-    parser.add_argument("--heatmap_size", type=int, default=48, help="Heatmap/depth resize size")
+    parser.add_argument("--heatmap_size", type=int, default=24, help="Heatmap/depth/rgb resize size")
     parser.add_argument("--window_size", type=int, default=144, help="Tiled CLIP window size")
     parser.add_argument("--stride", type=int, default=48, help="Tiled CLIP stride")
     parser.add_argument("--tile_batch_size", type=int, default=128, help="Tiles per batch for CLIP heatmap")
@@ -220,8 +220,9 @@ def main():
         if out_path.exists() and not args.overwrite:
             existing[sid] = {
                 "heatdepth": out_rel,
-                "feature_dim": int(args.heatmap_size) * int(args.heatmap_size) * 2,
+                "feature_dim": int(args.heatmap_size) * int(args.heatmap_size) * 3,
                 "heatmap_size": int(args.heatmap_size),
+                "feature_components": ["clip_heatmap", "depth", "rgb_gray"],
                 "backbone": "clip",
                 "mode": "heatmap_depth",
                 "window_size": int(args.window_size),
@@ -266,15 +267,20 @@ def main():
             depth_resized = _resize_float_map(depth_gray, int(args.heatmap_size))
             depth_norm = np.clip(depth_resized, 0.0, 1.0).astype(np.float32)
 
+            rgb_gray = np.array(rgb_img.convert("L"), dtype=np.float32) / 255.0
+            rgb_resized = _resize_float_map(rgb_gray, int(args.heatmap_size))
+            rgb_norm = np.clip(rgb_resized, 0.0, 1.0).astype(np.float32)
+
             feature = np.concatenate(
-                [heatmap_norm.reshape(-1), depth_norm.reshape(-1)],
+                [heatmap_norm.reshape(-1), depth_norm.reshape(-1), rgb_norm.reshape(-1)],
                 axis=0,
             ).astype(np.float32)
             np.save(cache_dir / out_rel, feature)
             existing[sid] = {
                 "heatdepth": out_rel,
-                "feature_dim": int(args.heatmap_size) * int(args.heatmap_size) * 2,
+                "feature_dim": int(args.heatmap_size) * int(args.heatmap_size) * 3,
                 "heatmap_size": int(args.heatmap_size),
+                "feature_components": ["clip_heatmap", "depth", "rgb_gray"],
                 "backbone": "clip",
                 "mode": "heatmap_depth",
                 "window_size": int(args.window_size),
