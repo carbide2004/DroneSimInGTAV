@@ -199,7 +199,8 @@ def _calculate_stage2_metrics(results):
             "failed_samples": 0,
             "sr": 0.0,
             "spl": 0.0,
-            "avg_stop_distance": 0.0,
+            "avg_stop_distance_overall": 0.0,
+            "avg_stop_distance_success": 0.0,
         }
 
     total = len(results)
@@ -219,12 +220,20 @@ def _calculate_stage2_metrics(results):
     spl = float(sum(spl_values) / total) if total > 0 else 0.0
 
     finite_distances = []
+    finite_success_distances = []
     for r in results:
         d = float(r.get("final_distance", float("inf")))
         if math.isfinite(d):
             finite_distances.append(d)
-    avg_stop_distance = (
+            if bool(r.get("success")):
+                finite_success_distances.append(d)
+    avg_stop_distance_overall = (
         float(sum(finite_distances) / len(finite_distances)) if finite_distances else float("inf")
+    )
+    avg_stop_distance_success = (
+        float(sum(finite_success_distances) / len(finite_success_distances))
+        if finite_success_distances
+        else float("inf")
     )
 
     return {
@@ -233,7 +242,8 @@ def _calculate_stage2_metrics(results):
         "failed_samples": total - successful,
         "sr": sr,
         "spl": spl,
-        "avg_stop_distance": avg_stop_distance,
+        "avg_stop_distance_overall": avg_stop_distance_overall,
+        "avg_stop_distance_success": avg_stop_distance_success,
     }
 
 
@@ -247,10 +257,14 @@ def _print_stage2_summary(results):
     print(f"Failed: {metrics['failed_samples']}")
     print(f"SR: {metrics['sr']:.4f}")
     print(f"SPL: {metrics['spl']:.4f}")
-    if math.isfinite(metrics["avg_stop_distance"]):
-        print(f"Avg stop distance: {metrics['avg_stop_distance']:.2f}m")
+    if math.isfinite(metrics["avg_stop_distance_success"]):
+        print(f"Avg stop distance (success): {metrics['avg_stop_distance_success']:.2f}m")
     else:
-        print("Avg stop distance: inf")
+        print("Avg stop distance (success): inf")
+    if math.isfinite(metrics["avg_stop_distance_overall"]):
+        print(f"Avg stop distance (overall): {metrics['avg_stop_distance_overall']:.2f}m")
+    else:
+        print("Avg stop distance (overall): inf")
     print(f"{'=' * 50}")
 
 
