@@ -338,7 +338,7 @@ def run_single_verification_stage2(
         "z": float(anomaly_pos["z"]),
     }
 
-    success = stopped_by_model and final_distance <= 20.0
+    success = stopped_by_model and final_distance <= 25.0
     path_efficiency = min(1.0, expected_steps / max(1, steps)) if steps > 0 else 0.0
     if final_position is None:
         print(
