@@ -286,6 +286,13 @@ def main():
             current_idx += 1
         elif key == ord('b'):
             current_idx = max(start_idx, current_idx - 1)
+        elif key == ord('s'):
+            # Save current frame to current directory
+            import os
+            current_dir = os.getcwd()
+            frame_filename = os.path.join(current_dir, f"frame_{current_idx:06d}.png")
+            combined_img.save(frame_filename)
+            print(f"Saved frame {current_idx} to {frame_filename}")
         else:
             if not paused:
                 current_idx += 1

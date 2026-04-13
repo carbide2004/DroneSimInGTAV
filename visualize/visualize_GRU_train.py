@@ -1,6 +1,10 @@
 import json
 import matplotlib.pyplot as plt
 
+# 配置全局参数以支持中文字符和负号的正确渲染
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
+plt.rcParams['axes.unicode_minus'] = False
+
 def plot_history(file_path):
     # 加载数据
     try:
@@ -23,20 +27,20 @@ def plot_history(file_path):
 
     # 绘图
     plt.figure(figsize=(10, 6))
-    plt.plot(epochs, train_act, label='train_act')
-    plt.plot(epochs, train_b1, label='train_b1')
-    plt.plot(epochs, val_act, label='val_act')
-    plt.plot(epochs, val_b1, label='val_b1')
+    plt.plot(epochs, train_act, label='训练集动作预测损失(L_action)')
+    plt.plot(epochs, train_b1, label='训练集语义对齐损失(L_align)')
+    plt.plot(epochs, val_act, label='验证集动作预测损失(L_action)')
+    plt.plot(epochs, val_b1, label='验证集语义对齐损失(L_align)')
 
     # 图表装饰
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
+    plt.title('阶段一训练历史曲线')
     plt.legend()
     plt.grid(True)
     
     plt.show()
 
 if __name__ == "__main__":
-    path = 'agent_control/checkpoints/stage1_heatmap_depth/history.json'
+    path = 'agent_control/checkpoints/stage1_rgbdheat/history.json'
     plot_history(path)
