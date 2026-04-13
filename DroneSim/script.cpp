@@ -458,109 +458,92 @@ static void create_accident_near_pos(float ox, float oy, float oz) {
         return;
     }
 
-    Hash h1 = GAMEPLAY::GET_HASH_KEY("adder");
-    Hash h2 = GAMEPLAY::GET_HASH_KEY("zentorno");
-    bool ok1 = STREAMING::IS_MODEL_VALID(h1) && STREAMING::IS_MODEL_A_VEHICLE(h1);
-    bool ok2 = STREAMING::IS_MODEL_VALID(h2) && STREAMING::IS_MODEL_A_VEHICLE(h2);
-    Vehicle v1 = 0, v2 = 0;
-    bool proceed = ok1 && ok2;
-    if (proceed && !STREAMING::HAS_MODEL_LOADED(h1)) {
-        STREAMING::REQUEST_MODEL(h1);
-        int tries = 0;
-        while (!STREAMING::HAS_MODEL_LOADED(h1) && tries < 200) { WAIT(0); tries++; }
-    }
-    if (proceed && !STREAMING::HAS_MODEL_LOADED(h1)) {
-        proceed = false;
-        LOGW("script", "CREATE_ACCIDENT model h1 not loaded");
-    }
-    if (proceed && !STREAMING::HAS_MODEL_LOADED(h2)) {
-        STREAMING::REQUEST_MODEL(h2);
-        int tries2 = 0;
-        while (!STREAMING::HAS_MODEL_LOADED(h2) && tries2 < 200) { WAIT(0); tries2++; }
-    }
-    if (proceed && !STREAMING::HAS_MODEL_LOADED(h2)) {
-        proceed = false;
-        LOGW("script", "CREATE_ACCIDENT model h2 not loaded");
+    // Clustered multi-vehicle crash scene: spawn several cars near anomaly center and
+    // apply heavy body damage to mimic post-collision deformation.
+    const Hash vehicle_models[] = {
+        GAMEPLAY::GET_HASH_KEY("adder"),
+        GAMEPLAY::GET_HASH_KEY("zentorno"),
+        GAMEPLAY::GET_HASH_KEY("sultan"),
+        GAMEPLAY::GET_HASH_KEY("oracle"),
+    };
+    const int model_count = static_cast<int>(sizeof(vehicle_models) / sizeof(vehicle_models[0]));
+
+    bool any_model_ready = false;
+    for (int i = 0; i < model_count; ++i) {
+        Hash h = vehicle_models[i];
+        if (!STREAMING::IS_MODEL_VALID(h) || !STREAMING::IS_MODEL_A_VEHICLE(h)) continue;
+        if (!STREAMING::HAS_MODEL_LOADED(h)) {
+            STREAMING::REQUEST_MODEL(h);
+            int tries = 0;
+            while (!STREAMING::HAS_MODEL_LOADED(h) && tries < 200) { WAIT(0); tries++; }
+        }
+        if (STREAMING::HAS_MODEL_LOADED(h)) any_model_ready = true;
     }
 
-    if (!proceed) {
+    if (!any_model_ready) {
         g_accidentPos[0] = nodePos.x; g_accidentPos[1] = nodePos.y; g_accidentPos[2] = nodePos.z;
         g_accidentReady = true;
-        LOGW("script", "CREATE_ACCIDENT model invalid or not loaded, reporting node position");
+        LOGW("script", "CREATE_ACCIDENT no valid vehicle model loaded");
         return;
     }
 
     float gz = nodePos.z;
     GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(nodePos.x, nodePos.y, nodePos.z, &gz, false);
-    float offset = 80.0f;
-    v1 = VEHICLE::CREATE_VEHICLE(h1, nodePos.x, nodePos.y, gz, nodeHeading, true, false);
-    STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(h1);
-    VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v1);
-    VEHICLE::SET_VEHICLE_HANDBRAKE(v1, true);
+    g_accidentPos[0] = nodePos.x; g_accidentPos[1] = nodePos.y; g_accidentPos[2] = gz;
 
-    float xr = nodePos.x - sin(nodeHeading * 3.14159f / 180.0f) * offset;
-    float yr = nodePos.y + cos(nodeHeading * 3.14159f / 180.0f) * offset;
-    v2 = VEHICLE::CREATE_VEHICLE(h2, xr, yr, gz, nodeHeading + 180.0f, true, false);
-    STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(h2);
-    VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v2);
+    // Relative offsets (meters) to form a dense crash cluster.
+    const float offsets[][2] = {
+        { 0.0f,  0.0f},
+        { 2.8f,  1.0f},
+        {-2.6f,  1.2f},
+        { 1.2f, -2.8f},
+    };
+    const float heading_offsets[] = {0.0f, 35.0f, -40.0f, 95.0f};
+    const int spawn_count = 4;
 
-    Hash ph = GAMEPLAY::GET_HASH_KEY("a_m_m_skidrow_01");
-    bool pok = STREAMING::IS_MODEL_VALID(ph);
-    if (pok && !STREAMING::HAS_MODEL_LOADED(ph)) {
-        STREAMING::REQUEST_MODEL(ph);
-        int ptries = 0;
-        while (!STREAMING::HAS_MODEL_LOADED(ph) && ptries < 200) { WAIT(0); ptries++; }
+    int created = 0;
+    for (int i = 0; i < spawn_count; ++i) {
+        Hash model = vehicle_models[i % model_count];
+        if (!STREAMING::HAS_MODEL_LOADED(model)) continue;
+
+        float x = nodePos.x + offsets[i][0];
+        float y = nodePos.y + offsets[i][1];
+        float h = nodeHeading + heading_offsets[i];
+        Vehicle v = VEHICLE::CREATE_VEHICLE(model, x, y, gz, h, true, false);
+        if (v == 0) continue;
+        created++;
+        g_spawnedVehicles.push_back(v);
+
+        ENTITY::SET_ENTITY_AS_MISSION_ENTITY(v, true, true);
+        VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v);
+        VEHICLE::SET_VEHICLE_HANDBRAKE(v, true);
+        VEHICLE::SET_VEHICLE_ENGINE_ON(v, false, true, false);
+
+        // Simulate damaged shells: multiple impact points + broken windows/doors + dead engine.
+        VEHICLE::SET_VEHICLE_ENGINE_HEALTH(v, -2500.0f);
+        VEHICLE::SET_VEHICLE_BODY_HEALTH(v, 120.0f);
+        VEHICLE::SET_VEHICLE_PETROL_TANK_HEALTH(v, 50.0f);
+        VEHICLE::SET_VEHICLE_DAMAGE(v,  1.6f,  0.0f, 0.0f, 1800.0f, 6.0f, true);
+        VEHICLE::SET_VEHICLE_DAMAGE(v, -1.4f,  0.4f, 0.0f, 1600.0f, 5.0f, true);
+        VEHICLE::SET_VEHICLE_DAMAGE(v,  0.0f, -1.2f, 0.0f, 1400.0f, 5.0f, true);
+        VEHICLE::SET_VEHICLE_TYRE_BURST(v, 0, true, 1000.0f);
+        VEHICLE::SET_VEHICLE_TYRE_BURST(v, 1, true, 1000.0f);
+        VEHICLE::SMASH_VEHICLE_WINDOW(v, 0);
+        VEHICLE::SMASH_VEHICLE_WINDOW(v, 1);
+        VEHICLE::SET_VEHICLE_DOOR_BROKEN(v, 0, true);
+        VEHICLE::SET_VEHICLE_DOOR_BROKEN(v, 1, true);
     }
-    if (STREAMING::HAS_MODEL_LOADED(ph)) {
-        Ped d = PED::CREATE_PED(26, ph, xr, yr, gz, nodeHeading + 180.0f, true, true);
-        STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(ph);
-        PED::SET_PED_INTO_VEHICLE(d, v2, -1);
-        VEHICLE::SET_VEHICLE_ENGINE_ON(v2, true, true, false);
-        AI::TASK_VEHICLE_DRIVE_TO_COORD(d, v2, nodePos.x, nodePos.y, gz, 90.0f, 0, h2, 787004, 1.0f, true);
+
+    for (int i = 0; i < model_count; ++i) {
+        Hash h = vehicle_models[i];
+        if (STREAMING::HAS_MODEL_LOADED(h)) STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(h);
+    }
+
+    g_accidentReady = true;
+    if (created > 0) {
+        LOGI("script", std::string("CREATE_ACCIDENT clustered vehicles created: ") + std::to_string(created));
     } else {
-        VEHICLE::SET_VEHICLE_FORWARD_SPEED(v2, 70.0f);
-    }
-
-    int frames = 0;
-    bool collided = false;
-    while (frames < 300) {
-        if (ENTITY::IS_ENTITY_TOUCHING_ENTITY(v1, v2) || ENTITY::GET_ENTITY_HEALTH(v1) < 900 || ENTITY::GET_ENTITY_HEALTH(v2) < 900) {
-            collided = true;
-            break;
-        }
-        Vector3 p1_coords = ENTITY::GET_ENTITY_COORDS(v1, true);
-        Vector3 p2_coords = ENTITY::GET_ENTITY_COORDS(v2, true);
-        
-        // 转换为Position3D进行计算
-        Position3D p1(p1_coords.x, p1_coords.y, p1_coords.z);
-        Position3D p2(p2_coords.x, p2_coords.y, p2_coords.z);
-        
-        float dist = p1.distance_to(p2);
-        if (dist < 4.0f) {
-            collided = true;
-            break;
-        }
-        WAIT(0);
-        frames++;
-    }
-
-    if (collided) {
-        Vector3 p1_coords = ENTITY::GET_ENTITY_COORDS(v1, true);
-        Vector3 p2_coords = ENTITY::GET_ENTITY_COORDS(v2, true);
-        
-        // 转换为Position3D进行计算
-        Position3D p1(p1_coords.x, p1_coords.y, p1_coords.z);
-        Position3D p2(p2_coords.x, p2_coords.y, p2_coords.z);
-        
-        g_accidentPos[0] = (p1.x + p2.x) / 2.0f;
-        g_accidentPos[1] = (p1.y + p2.y) / 2.0f;
-        g_accidentPos[2] = (p1.z + p2.z) / 2.0f;
-        g_accidentReady = true;
-        LOGI("script", "CREATE_ACCIDENT detected and reported");
-    } else {
-        g_accidentPos[0] = nodePos.x; g_accidentPos[1] = nodePos.y; g_accidentPos[2] = nodePos.z;
-        g_accidentReady = true;
-        LOGW("script", "CREATE_ACCIDENT setup but collision not detected");
+        LOGW("script", "CREATE_ACCIDENT failed to create vehicles, reporting node position only");
     }
 }
 
