@@ -75,9 +75,9 @@ def _create_info_panel(action, pose, awareness, panel_width=600, panel_height=40
     
     try:
         # Try to load a font, fallback to default if not available
-        font_large = ImageFont.truetype("arial.ttf", 16)
-        font_medium = ImageFont.truetype("arial.ttf", 14)
-        font_small = ImageFont.truetype("arial.ttf", 12)
+        font_large = ImageFont.truetype("arial.ttf", 24)
+        font_medium = ImageFont.truetype("arial.ttf", 22)
+        font_small = ImageFont.truetype("arial.ttf", 20)
     except:
         font_large = ImageFont.load_default()
         font_medium = ImageFont.load_default()
@@ -88,19 +88,19 @@ def _create_info_panel(action, pose, awareness, panel_width=600, panel_height=40
     
     # Draw Action
     draw.text((margin, y_offset), "Action:", fill='black', font=font_large)
-    y_offset += 25
+    y_offset += 30
     draw.text((margin, y_offset), action, fill='blue', font=font_medium)
-    y_offset += 35
+    y_offset += 40
     
     # Draw Pose
     draw.text((margin, y_offset), "Pose:", fill='black', font=font_large)
-    y_offset += 25
+    y_offset += 30
     draw.text((margin, y_offset), pose, fill='green', font=font_small)
-    y_offset += 35
+    y_offset += 40
     
     # Draw Awareness
     draw.text((margin, y_offset), "Awareness:", fill='black', font=font_large)
-    y_offset += 25
+    y_offset += 30
     
     # Split awareness into lines and wrap them
     awareness_lines = awareness.split('\n')
@@ -110,7 +110,7 @@ def _create_info_panel(action, pose, awareness, panel_width=600, panel_height=40
             for wrapped_line in wrapped_lines:
                 if y_offset < panel_height - 20:
                     draw.text((margin, y_offset), wrapped_line, fill='red', font=font_small)
-                    y_offset += 18
+                    y_offset += 24
     
     return panel
 
