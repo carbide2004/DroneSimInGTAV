@@ -959,7 +959,7 @@ static void run_auto_collect(AutoCollectEvent event_type) {
             record_step(delta > 0.0f ? "AUTO_YAW_LEFT" : "AUTO_YAW_RIGHT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, step_val);
             rotateCameraDelta(0.0f, 0.0f, step_val);
         } 
-        else if (dist <= STEPSIZE * 3.0f && fabsf(dz) <= STEPSIZE) { 
+        else if (dist <= STEPSIZE * 4.0f && fabsf(dz) <= STEPSIZE) { 
             reached = true; 
             break; 
         }
@@ -1092,7 +1092,7 @@ static void run_continuous_manual_collection(AutoCollectEvent event_type, int co
                 Vector3 pos = CAM::GET_CAM_COORD(cam);
                 float dist = Position3D(pos.x, pos.y, pos.z).distance_to(target);
                 float dz = target.z - pos.z;
-                if (dist <= STEPSIZE * 3.0f && fabsf(dz) <= STEPSIZE) {
+                if (dist <= STEPSIZE * 4.0f && fabsf(dz) <= STEPSIZE) {
                     reached = true;
                     record_step("AUTO_STOP_REACHED", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
                     LOGI("script", "Target reached manually!");
