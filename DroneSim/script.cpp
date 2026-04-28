@@ -39,6 +39,7 @@ int g_fireId = -1;
 volatile bool g_fightReady = false;
 float g_fightPos[3] = {0};
 
+static std::vector<int> g_spawnedFireIds;
 static std::vector<Vehicle> g_spawnedVehicles;
 static std::vector<Ped> g_spawnedPeds;
 
@@ -254,48 +255,6 @@ static void record_step(const char* action, float dx, float dy, float dz, float 
     g_recordingStep = step + 1;
 }
 
-static void maintain_fire() {
-    if (!g_fireMaintenanceActive) return;
-    
-    g_fireMaintenanceTimer++;
-    
-    // Check and restart fires every 5 seconds (300 frames at 60fps)
-    if (g_fireMaintenanceTimer % 300 == 0) {
-        // Restart vehicle fire if vehicle exists and is not on fire
-        if (g_fireVehicle != 0 && ENTITY::DOES_ENTITY_EXIST(g_fireVehicle)) {
-            if (!FIRE::IS_ENTITY_ON_FIRE(g_fireVehicle)) {
-                FIRE::START_ENTITY_FIRE(g_fireVehicle);
-                LOGI("script", "Restarted vehicle fire");
-            }
-        }
-        
-        // Restart script fires at maintenance position
-        FIRE::START_SCRIPT_FIRE(g_fireMaintenancePos.x, g_fireMaintenancePos.y, g_fireMaintenancePos.z, 25, true);
-        FIRE::START_SCRIPT_FIRE(g_fireMaintenancePos.x + 1.0f, g_fireMaintenancePos.y, g_fireMaintenancePos.z, 20, true);
-        FIRE::START_SCRIPT_FIRE(g_fireMaintenancePos.x - 1.0f, g_fireMaintenancePos.y, g_fireMaintenancePos.z, 20, true);
-        FIRE::START_SCRIPT_FIRE(g_fireMaintenancePos.x, g_fireMaintenancePos.y + 1.0f, g_fireMaintenancePos.z, 20, true);
-        FIRE::START_SCRIPT_FIRE(g_fireMaintenancePos.x, g_fireMaintenancePos.y - 1.0f, g_fireMaintenancePos.z, 20, true);
-        
-        LOGD("script", "Fire maintenance cycle completed");
-    }
-}
-
-static void start_fire_maintenance(float x, float y, float z, Vehicle vehicle = 0) {
-    g_fireMaintenanceActive = true;
-    g_fireMaintenancePos.x = x;
-    g_fireMaintenancePos.y = y;
-    g_fireMaintenancePos.z = z;
-    g_fireVehicle = vehicle;
-    g_fireMaintenanceTimer = 0;
-    LOGI("script", std::string("Started fire maintenance at (") + std::to_string(x) + "," + std::to_string(y) + "," + std::to_string(z) + ")");
-}
-
-static void stop_fire_maintenance() {
-    g_fireMaintenanceActive = false;
-    g_fireVehicle = 0;
-    g_fireMaintenanceTimer = 0;
-    LOGI("script", "Stopped fire maintenance");
-}
 static void create_fire_near_pos(float ox, float oy, float oz) {
     g_fireReady = false;
     Vector3 nodePos; float nodeHeading = 0.0f;
@@ -306,8 +265,7 @@ static void create_fire_near_pos(float ox, float oy, float oz) {
     float gz = pz;
     bool hasGround = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(px, py, pz, &gz, false);
     if (!hasGround) gz = pz;
-    
-    // Use exact position instead of vehicle position to avoid offset
+
     g_firePos[0] = px;
     g_firePos[1] = py;
     g_firePos[2] = gz;
@@ -324,45 +282,61 @@ static void create_fire_near_pos(float ox, float oy, float oz) {
     if (v_ok && STREAMING::HAS_MODEL_LOADED(vh)) {
         float heading = ok ? nodeHeading : 0.0f;
         created_vehicle = VEHICLE::CREATE_VEHICLE(vh, g_firePos[0], g_firePos[1], g_firePos[2], heading, true, false);
+        
         if (created_vehicle != 0) {
-            g_spawnedVehicles.push_back(created_vehicle); 
+            g_spawnedVehicles.push_back(created_vehicle);
+            STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(vh);
+            ENTITY::SET_ENTITY_AS_MISSION_ENTITY(created_vehicle, true, true);
+
+            // Step 1: 定位，此时不冻结
+            ENTITY::SET_ENTITY_COORDS(created_vehicle, g_firePos[0], g_firePos[1], g_firePos[2], true, false, false, true);
+            VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(created_vehicle);
+
+            // Step 2: 引擎必须开启，起火链路才能激活
+            VEHICLE::SET_VEHICLE_ENGINE_ON(created_vehicle, true, true, false);
+            VEHICLE::SET_VEHICLE_HANDBRAKE(created_vehicle, true);
+
+            // Step 3: 施加致命伤害
+            VEHICLE::SET_VEHICLE_PETROL_TANK_HEALTH(created_vehicle, -1000.0f);
+            VEHICLE::SET_VEHICLE_ENGINE_HEALTH(created_vehicle, -1000.0f);
+            VEHICLE::SET_VEHICLE_DAMAGE(created_vehicle, 0.0f, 0.0f, 0.0f, 2000.0f, 5.0f, true);
+
+            // Step 4: 等待伤害状态生效（关键）
+            WAIT(500);
+
+            // Step 5: 点火
+            g_fireId = static_cast<int>(FIRE::START_ENTITY_FIRE(created_vehicle));
+            int fid;
+            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1], g_firePos[2], 25, true);
+            g_spawnedFireIds.push_back(fid);
+            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0] + 1.0f, g_firePos[1], g_firePos[2], 20, true);
+            g_spawnedFireIds.push_back(fid);
+            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0] - 1.0f, g_firePos[1], g_firePos[2], 20, true);
+            g_spawnedFireIds.push_back(fid);
+            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1] + 1.0f, g_firePos[2], 20, true);
+            g_spawnedFireIds.push_back(fid);
+            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1] - 1.0f, g_firePos[2], 20, true);
+            g_spawnedFireIds.push_back(fid);
+
+            // Step 6: 等待确认起火，最多等约1秒
+            int burn_tries = 0;
+            while (!FIRE::IS_ENTITY_ON_FIRE(created_vehicle) && burn_tries < 100) {
+                WAIT(10);
+                burn_tries++;
+            }
+
+            // Step 8: 确认起火后再冻结位置
+            ENTITY::FREEZE_ENTITY_POSITION(created_vehicle, true);
+
+            LOGI("script", std::string("CREATE_FIRE vehicle fire at ") +
+                std::to_string(g_firePos[0]) + "," +
+                std::to_string(g_firePos[1]) + "," +
+                std::to_string(g_firePos[2]) +
+                (FIRE::IS_ENTITY_ON_FIRE(created_vehicle) ? " [ON FIRE]" : " [FIRE FAILED]"));
+        } else {
+            STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(vh);
         }
-        STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(vh);
-        ENTITY::SET_ENTITY_AS_MISSION_ENTITY(created_vehicle, true, true);
-        
-        // Ensure vehicle stays at exact position
-        ENTITY::FREEZE_ENTITY_POSITION(created_vehicle, true);
-        VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(created_vehicle);
-        VEHICLE::SET_VEHICLE_HANDBRAKE(created_vehicle, true);
-        VEHICLE::SET_VEHICLE_ENGINE_ON(created_vehicle, false, true, false);
-        
-        // Force vehicle to exact coordinates to prevent offset
-        ENTITY::SET_ENTITY_COORDS(created_vehicle, g_firePos[0], g_firePos[1], g_firePos[2], true, false, false, true);
-        
-        // Damage vehicle to make it burn
-        VEHICLE::SET_VEHICLE_PETROL_TANK_HEALTH(created_vehicle, -1000.0f);
-        VEHICLE::SET_VEHICLE_ENGINE_HEALTH(created_vehicle, -1000.0f);
-        VEHICLE::SET_VEHICLE_DAMAGE(created_vehicle, 0.0f, 0.0f, 0.0f, 2000.0f, 5.0f, true);
-        
-        // Create initial fire effects
-        g_fireId = static_cast<int>(FIRE::START_ENTITY_FIRE(created_vehicle));
-        
-        // Add explosion for visual effect
-        FIRE::ADD_EXPLOSION(g_firePos[0], g_firePos[1], g_firePos[2] + 0.5f, 2, 10.0f, true, false, 1.0f);
-        
-        // Wait for fire to start
-        int burn_tries = 0;
-        while (!FIRE::IS_ENTITY_ON_FIRE(created_vehicle) && burn_tries < 60) { WAIT(0); burn_tries++; }
-        
-        LOGI("script", std::string("CREATE_FIRE vehicle fire with maintenance at ") + std::to_string(g_firePos[0]) + "," + std::to_string(g_firePos[1]) + "," + std::to_string(g_firePos[2]));
-    } else {
-        // Fallback: create script fires
-        g_fireId = static_cast<int>(FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1], g_firePos[2], 25, true));
-        LOGW("script", "CREATE_FIRE vehicle model unavailable, using script fires with maintenance");
     }
-    
-    // Start fire maintenance system
-    start_fire_maintenance(g_firePos[0], g_firePos[1], g_firePos[2], created_vehicle);
     
     g_fireReady = true;
 }
@@ -706,17 +680,6 @@ static float quantize_deg(float a, float step) {
     return roundf(a / step) * step;
 }
 
-static void run_manual_collect(AutoCollectEvent event_type) {
-    if (g_recordingEnabled) return;
-    if (event_type == AUTO_EVENT_FIRE) start_recording_session("find the exploded car");
-    else if (event_type == AUTO_EVENT_FIGHT) start_recording_session("find the street fight");
-    else start_recording_session("find crashed cars");
-
-    if (event_type == AUTO_EVENT_FIRE) create_fire_near_camera();
-    else if (event_type == AUTO_EVENT_FIGHT) create_fight_near_camera();
-    else create_accident_near_camera();
-}
-
 static float yaw_to_target_deg(Position3D from, Position3D to) {
     float dx = to.x - from.x;
     float dy = to.y - from.y;
@@ -783,6 +746,14 @@ static void delete_recording_session() {
 
 static void clear_spawned_entities() {
     LOGI("script", "Clearing spawned vehicles and peds...");
+
+    FIRE::STOP_ENTITY_FIRE(g_fireId);
+
+    for (int fireId : g_spawnedFireIds) {
+        FIRE::REMOVE_SCRIPT_FIRE(fireId);
+    }
+    g_spawnedFireIds.clear();
+
 
     // 1. 清理车辆
     for (Vehicle veh : g_spawnedVehicles) {
@@ -852,119 +823,157 @@ static Position3D find_good_start_position(Position3D target, float offset_dista
 }
 
 
-static void run_auto_collect(AutoCollectEvent event_type) {
-    static bool active = false;
-    if (active) return;
-    active = true;
-
-    const char* task = nullptr;
-    if (event_type == AUTO_EVENT_FIRE) task = "find the exploded car";
-    else if (event_type == AUTO_EVENT_ACCIDENT) task = "find crashed cars";
-    else if (event_type == AUTO_EVENT_FIGHT) task = "find the street fight";
-    if (!g_recordingEnabled) start_recording_session(task);
-
-    Position3D center;
-    if (event_type == AUTO_EVENT_FIRE) {
-        create_fire_near_camera();
-        center.x = g_firePos[0]; center.y = g_firePos[1]; center.z = g_firePos[2];
-    } else if (event_type == AUTO_EVENT_FIGHT) {
-        create_fight_near_camera();
-        center.x = g_fightPos[0]; center.y = g_fightPos[1]; center.z = g_fightPos[2];
+static void setup_player_for_collection(bool protect) {
+    Ped player = PLAYER::PLAYER_PED_ID();
+    if (!player) return;
+    if (protect) {
+        ENTITY::SET_ENTITY_INVINCIBLE(player, true);
+        ENTITY::SET_ENTITY_VISIBLE(player, false, false);
+        ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, false);
+        ENTITY::SET_ENTITY_PROOFS(player, true, true, true, true, true, true, true, true);
+        PLAYER::SET_MAX_WANTED_LEVEL(0);
+        PLAYER::SET_POLICE_IGNORE_PLAYER(player, true);
     } else {
-        create_accident_near_camera();
-        center.x = g_accidentPos[0]; center.y = g_accidentPos[1]; center.z = g_accidentPos[2];
+        ENTITY::SET_ENTITY_INVINCIBLE(player, false);
+        ENTITY::SET_ENTITY_VISIBLE(player, true, false);
+        ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, true);
+        PLAYER::SET_POLICE_IGNORE_PLAYER(player, false);
     }
-    Position3D target(center.x, center.y, center.z + 1.0f);
+}
 
-    // 使用基于道路节点的起始位置选择算法
-    Position3D start_pos = find_good_start_position(target, 50.0f);
+static Position3D get_random_road_node() {
+    Entity playerPed = PLAYER::PLAYER_PED_ID();
+    Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, true);
+    const float MIN_RADIUS = 100.0f;
+    const float MAX_RADIUS = 400.0f;
+
+    for (int attempts = 0; attempts < 20; attempts++) {
+        float rnd_r = (float)rand() / (float)RAND_MAX;
+        float rnd_a = (float)rand() / (float)RAND_MAX;
+        float radius = MIN_RADIUS + rnd_r * (MAX_RADIUS - MIN_RADIUS);
+        float angle = rnd_a * 6.2831853f;
+        float target_x = playerPos.x + radius * cosf(angle);
+        float target_y = playerPos.y + radius * sinf(angle);
+        int nth = (rand() % 4) + 1;
+
+        Vector3 node_pos;
+        if (PATHFIND::GET_NTH_CLOSEST_VEHICLE_NODE(target_x, target_y, playerPos.z, nth, &node_pos, 1, 3.0f, 0)) {
+            if (node_pos.x != 0.0f && node_pos.y != 0.0f) {
+                return Position3D(node_pos.x, node_pos.y, node_pos.z + 1.0f);
+            }
+        }
+    }
+    LOGW("script", "Fallback to player pos");
+    return Position3D(playerPos.x, playerPos.y, playerPos.z);
+}
+
+static bool generate_scenario(AutoCollectEvent event_type, Position3D& out_target, Position3D& out_start, float& out_yaw) {
+    clear_spawned_entities();
+
+    Position3D target_node = get_random_road_node();
+
+    bool was_camera = (scriptStatus == cameraMode);
+    if (was_camera) { StopCamera(); scriptStatus = scriptStop; WAIT(500); }
+
+    Ped player = PLAYER::PLAYER_PED_ID();
+    if (player) {
+        ENTITY::SET_ENTITY_COORDS(player, target_node.x, target_node.y, target_node.z, true, false, false, true);
+        WAIT(1000);
+    }
+    
+    // 等待地图资源和碰撞网格流式加载完成，防止异常事件生成时穿模或找不到路网节点
+    WAIT(5000); 
+
+    if (was_camera) { startNewCamera(); scriptStatus = cameraMode; WAIT(500); }
+
+    if (event_type == AUTO_EVENT_FIRE) {
+        create_fire_near_pos(target_node.x, target_node.y, target_node.z);
+        WAIT(1000);
+        if (!g_fireReady) return false;
+        out_target = Position3D(g_firePos[0], g_firePos[1], g_firePos[2] + 1.0f);
+    } else if (event_type == AUTO_EVENT_FIGHT) {
+        create_fight_near_pos(target_node.x, target_node.y, target_node.z);
+        WAIT(1000);
+        if (!g_fightReady) return false;
+        out_target = Position3D(g_fightPos[0], g_fightPos[1], g_fightPos[2] + 1.0f);
+    } else {
+        create_accident_near_pos(target_node.x, target_node.y, target_node.z);
+        WAIT(1000);
+        if (!g_accidentReady) return false;
+        out_target = Position3D(g_accidentPos[0], g_accidentPos[1], g_accidentPos[2] + 1.0f);
+    }
+
+    out_start = find_good_start_position(out_target, 50.0f);
 
     Any cam = CAM::GET_RENDERING_CAM();
-    CAM::SET_CAM_COORD(cam, start_pos.x, start_pos.y, start_pos.z);
-    float yaw;
+    CAM::SET_CAM_COORD(cam, out_start.x, out_start.y, out_start.z);
     if (false) {
-        // 随机一个yaw初始角而不是朝向目标点
-        yaw = quantize_deg((float)rand() / (float)RAND_MAX * 360.0f, YAW_STEPSIZE);    
+        out_yaw = quantize_deg(yaw_to_target_deg(out_start, out_target), YAW_STEPSIZE);
     }
     else {
-        // 朝向目标点
-        yaw = quantize_deg(yaw_to_target_deg(start_pos, target), YAW_STEPSIZE);
+        out_yaw = quantize_deg((float)rand() / (float)RAND_MAX * 360.0f, YAW_STEPSIZE);
     }
-    CAM::SET_CAM_ROT(cam, 0.0f, 0.0f, yaw, 2);
-    
-    // 等待相机位置稳定，然后获取实际位置
+    CAM::SET_CAM_ROT(cam, 0.0f, 0.0f, out_yaw, 2);
+
     WAIT(100);
     Vector3 actual_cam_pos = CAM::GET_CAM_COORD(cam);
-    Position3D actual_start_pos(actual_cam_pos.x, actual_cam_pos.y, actual_cam_pos.z);
-    
-    LOGD("script", "Intended start: (" + std::to_string(start_pos.x) + "," + std::to_string(start_pos.y) + "," + std::to_string(start_pos.z) + 
-         ") Actual start: (" + std::to_string(actual_start_pos.x) + "," + std::to_string(actual_start_pos.y) + "," + std::to_string(actual_start_pos.z) + ")");
-    
-    int maxSteps = 50;
+    out_start = Position3D(actual_cam_pos.x, actual_cam_pos.y, actual_cam_pos.z);
+
+    return true;
+}
+
+static void run_auto_collect(AutoCollectEvent event_type) {
+    Position3D target, start;
+    float yaw;
+
+    if (!generate_scenario(event_type, target, start, yaw)) {
+        LOGW("script", "Failed to generate scenario");
+        return;
+    }
+
+    const char* task = "";
+    if (event_type == AUTO_EVENT_FIRE) task = "find the exploded car";
+    else if (event_type == AUTO_EVENT_FIGHT) task = "find the street fight";
+    else task = "find crashed cars";
+
+    start_recording_session(task);
+
+    int maxSteps = 100;
     bool reached = false;
-    int step;
-    for (step = 0; step < maxSteps; step++) {
-        cam = CAM::GET_RENDERING_CAM();
+    int step = 0;
+
+    for (; step < maxSteps; step++) {
+        Any cam = CAM::GET_RENDERING_CAM();
         Vector3 cam_pos = CAM::GET_CAM_COORD(cam);
         Vector3 rot = CAM::GET_CAM_ROT(cam, 2);
-        
-        // 转换为Position3D进行计算
+
         Position3D pos(cam_pos.x, cam_pos.y, cam_pos.z);
         float dist = pos.distance_to(target);
-        
-        // 添加调试日志
-        LOGD("script", std::string("Step ") + std::to_string(step) + ": pos(" + std::to_string(pos.x) + "," + std::to_string(pos.y) + "," + std::to_string(pos.z) + 
-             ") target(" + std::to_string(target.x) + "," + std::to_string(target.y) + "," + std::to_string(target.z) + ") dist=" + std::to_string(dist));
-
-        float dx = target.x - pos.x;
-        float dy = target.y - pos.y;
         float dz = target.z - pos.z;
-        
-        // 先判断是否要旋转，再判断是否停止，再判断是否要垂直移动，再前进
-        // 1. 先判断是否要旋转 (Yaw)
+
         float desiredYaw = quantize_deg(yaw_to_target_deg(pos, target), YAW_STEPSIZE);
         float delta = wrap_angle_deg(desiredYaw - rot.z);
 
         if (fabsf(delta) > YAW_STEPSIZE) {
-            float step = (delta > 0.0f) ? YAW_STEPSIZE : -YAW_STEPSIZE;
-            const char* label = (delta > 0.0f) ? "AUTO_YAW_LEFT" : "AUTO_YAW_RIGHT";
-            
-            record_step(label, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, step);
-            rotateCameraDelta(0.0f, 0.0f, step);
+            float step_val = (delta > 0.0f) ? YAW_STEPSIZE : -YAW_STEPSIZE;
+            record_step(delta > 0.0f ? "AUTO_YAW_LEFT" : "AUTO_YAW_RIGHT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, step_val);
+            rotateCameraDelta(0.0f, 0.0f, step_val);
         } 
-        // 2. 再判断是否停止 (Distance)
-        else if (dist <= STEPSIZE * 4.0f) { 
-            LOGD("script", std::string("Reached target! Distance ") + std::to_string(dist) + " <= " + std::to_string(STEPSIZE * 4.0f));
+        else if (dist <= STEPSIZE * 4.0f && fabsf(dz) <= STEPSIZE) { 
             reached = true; 
             break; 
         }
-        // 3. 再判断是否要垂直移动 (Z)
         else if (fabsf(dz) > STEPSIZE) {
             float z_step = (dz > 0.0f) ? STEPSIZE : -STEPSIZE;
             Position3D next_pos(pos.x, pos.y, pos.z + z_step);
-
-            if (check_collision_raycast(pos, next_pos)) {
-                LOGW("script", "Collision detected for VERTICAL movement, stopping auto_collect");
-                goto STOP_COLLISION;
-            }
-
+            if (check_collision_raycast(pos, next_pos)) goto STOP_COLLISION;
             record_step(z_step > 0.0f ? "AUTO_UP" : "AUTO_DOWN", 0.0f, 0.0f, z_step, 0.0f, 0.0f, 0.0f);
             moveCameraDelta(0.0f, 0.0f, z_step);
         } 
-        // 4. 最后前进 (Forward)
         else {
             float forward_rad = rot.z * (3.14159f / 180.0f);
-            Position3D next_pos(
-                pos.x + cosf(forward_rad) * STEPSIZE,
-                pos.y + sinf(forward_rad) * STEPSIZE,
-                pos.z
-            );
-
-            if (check_collision_raycast(pos, next_pos)) {
-                LOGW("script", "Collision detected for FORWARD movement, stopping auto_collect");
-                goto STOP_COLLISION;
-            }
-
+            Position3D next_pos(pos.x + cosf(forward_rad) * STEPSIZE, pos.y + sinf(forward_rad) * STEPSIZE, pos.z);
+            if (check_collision_raycast(pos, next_pos)) goto STOP_COLLISION;
             record_step("AUTO_FORWARD", STEPSIZE, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
             moveCameraDelta(STEPSIZE, 0.0f, 0.0f);
         }
@@ -972,209 +981,149 @@ static void run_auto_collect(AutoCollectEvent event_type) {
     }
 
     record_step(reached ? "AUTO_STOP_REACHED" : "AUTO_STOP_MAXSTEPS", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-    step++;
-
-    // 调用带参数的stop_recording_session
-    stop_recording_session(event_type, target, actual_start_pos, yaw, step, std::string(task));
-    // 先等1秒使RGBD采集完成
+    stop_recording_session(event_type, target, start, yaw, step + 1, task);
     WAIT(1000);
-    stop_fire_maintenance();
-    clear_spawned_entities();
-    active = false;
     return;
 
 STOP_COLLISION:
     delete_recording_session();
-    stop_fire_maintenance();
-    clear_spawned_entities();
-    active = false;
 }
 
-static Position3D get_random_road_node() {
-    Entity playerPed = PLAYER::PLAYER_PED_ID();
-    Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, true);
-
-    const float MIN_RADIUS = 100.0f;
-    const float MAX_RADIUS = 400.0f;
-
-    for (int attempts = 0; attempts < 20; attempts++) {
-        // 1. 生成 0.0 到 1.0 之间的随机浮点数
-        float rnd_r = (float)rand() / (float)RAND_MAX;
-        float rnd_a = (float)rand() / (float)RAND_MAX;
-
-        // 2. 映射到圆形的半径和弧度 (极坐标撒点)
-        float radius = MIN_RADIUS + rnd_r * (MAX_RADIUS - MIN_RADIUS);
-        float angle = rnd_a * 6.2831853f; // 2 * PI
-
-        float target_x = playerPos.x + radius * cosf(angle);
-        float target_y = playerPos.y + radius * sinf(angle);
-
-        // 3. 随机选择第 N 近的节点（1 到 4），打破“总是吸附到同一个最近点”的魔咒
-        int nth = (rand() % 4) + 1;
-
-        Vector3 node_pos;
-        // 参数 1：只找车辆网格节点
-        // 参数 3.0f：高度权重（防止错误吸附到立交桥下）
-        // 参数 0：无特定标志，但结合 Nth 搜寻能有效拉开路网距离
-        if (PATHFIND::GET_NTH_CLOSEST_VEHICLE_NODE(target_x, target_y, playerPos.z, nth, &node_pos, 1, 3.0f, 0)) {
-            if (node_pos.x != 0.0f && node_pos.y != 0.0f) {
-                return Position3D(node_pos.x, node_pos.y, node_pos.z + 1.0f);
-            }
-        }
-    }
-
-    LOGW("script", "Fallback to player pos");
-    return Position3D(playerPos.x, playerPos.y, playerPos.z);
-}
-
-
-// 自动化采集流程
-static void run_automated_collection(int collection_count = 10) {
+static void run_automated_collection(AutoCollectEvent event_type, int collection_count = 10) {
     static bool automated_active = false;
     if (automated_active) {
         LOGW("script", "Automated collection already running");
         return;
     }
-
     automated_active = true;
     LOGI("script", "Starting automated collection: " + std::to_string(collection_count) + " samples");
 
-    // 获取玩家并设置全面保护
-    Ped player = PLAYER::PLAYER_PED_ID();
-    if (player) {
-        // 基础保护
-        ENTITY::SET_ENTITY_INVINCIBLE(player, true);
-        ENTITY::SET_ENTITY_VISIBLE(player, false, false);
-        ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, false);
-        ENTITY::SET_ENTITY_PROOFS(player, true, true, true, true, true, true, true, true);
-        PLAYER::SET_MAX_WANTED_LEVEL(0);
-        PLAYER::SET_POLICE_IGNORE_PLAYER(player, true);
-        
-        LOGI("script", "Player set to maximum protection mode (invincible, invisible, underground)");
-    }
-
-    // 随机种子
+    setup_player_for_collection(true);
     srand(static_cast<unsigned int>(time(nullptr)));
 
-    int successful_collections = 0;
-    int total_attempts = 0;
-
-    for (total_attempts = 0; total_attempts < collection_count; total_attempts++) {
-        LOGI("script", "Starting collection attempt " + std::to_string(total_attempts) +
-            " (successful: " + std::to_string(successful_collections) + "/" + std::to_string(collection_count) + ")");
-
-        // 1. 获取随机道路节点
-        Position3D target_node = get_random_road_node();
-
-        // 2. 切换到玩家视角
-        if (scriptStatus == cameraMode) {
-            StopCamera();
-            scriptStatus = scriptStop;
-            WAIT(500); // 等待视角切换完成
-            LOGI("script", "Switched to player view");
-        }
-
-        // 3. 传送玩家到目标节点
-        if (player) {
-            ENTITY::SET_ENTITY_COORDS(player, target_node.x, target_node.y, target_node.z, true, false, false, true);
-            WAIT(1000); // 等待传送完成
-            LOGI("script", "Player teleported to (" + std::to_string(target_node.x) + "," +
-                std::to_string(target_node.y) + "," + std::to_string(target_node.z) + ")");
-        }
-
-        WAIT(10000);
-
-        // 4. 切换回相机视角
-        if (scriptStatus != cameraMode) {
-            startNewCamera();
-            scriptStatus = cameraMode;
-            WAIT(500); // 等待相机启动
-            LOGI("script", "Switched back to camera mode");
-        }
-
-        // 5. 随机选择事件类型并在目标位置创建事件
-        AutoCollectEvent event_type;
-        int event_choice = rand() % 2; // 0或1
-        
-        if (event_choice == 0) {
-            // 创建火灾事件
-            event_type = AUTO_EVENT_FIRE;
-            create_fire_near_pos(target_node.x, target_node.y, target_node.z);
-            WAIT(1000); // 等待火灾创建完成
-            LOGI("script", "Created fire event at target location");
-            
-            // 6. 检查火灾是否创建成功
-            if (!g_fireReady) {
-                LOGW("script", "Fire creation failed, skipping this attempt");
-                continue;
-            }
-            
-            // 7. 执行自动采集
-            LOGI("script", "Starting auto_collect for fire at (" + std::to_string(g_firePos[0]) + "," +
-                std::to_string(g_firePos[1]) + "," + std::to_string(g_firePos[2]) + ")");
-        } else {
-            // 创建群架事件
-            event_type = AUTO_EVENT_FIGHT;
-            create_fight_near_pos(target_node.x, target_node.y, target_node.z);
-            WAIT(1000); // 等待群架创建完成
-            LOGI("script", "Created fight event at target location");
-            
-            // 6. 检查群架是否创建成功
-            if (!g_fightReady) {
-                LOGW("script", "Fight creation failed, skipping this attempt");
-                continue;
-            }
-            
-            // 7. 执行自动采集
-            LOGI("script", "Starting auto_collect for fight at (" + std::to_string(g_fightPos[0]) + "," +
-                std::to_string(g_fightPos[1]) + "," + std::to_string(g_fightPos[2]) + ")");
-        }
-        
+    for (int i = 0; i < collection_count; i++) {
+        LOGI("script", "Starting automated collection attempt " + std::to_string(i + 1) + "/" + std::to_string(collection_count));
         run_auto_collect(event_type);
-
-        // 8. 等待采集完成
-        WAIT(2000);
-
-        // 9. 检查采集是否成功（通过检查是否还有录制会话目录）
-        if (g_recordingSessionDir[0] != '\0') {
-            successful_collections++;
-            LOGI("script", "Collection " + std::to_string(successful_collections) + " completed successfully");
-        }
-        else {
-            LOGW("script", "Collection failed (likely due to collision), attempt " + std::to_string(total_attempts));
-        }
-
-        // 10. 短暂休息
+        clear_spawned_entities();
         WAIT(1000);
     }
 
-    // 恢复玩家状态
-    Position3D target_node = get_random_road_node();
-    if (scriptStatus == cameraMode) {
-        StopCamera();
-        scriptStatus = scriptStop;
-        WAIT(500); // 等待视角切换完成
-        LOGI("script", "Switched to player view");
+    setup_player_for_collection(false);
+    automated_active = false;
+    LOGI("script", "Automated collection completed");
+}
+
+static void run_continuous_manual_collection(AutoCollectEvent event_type, int collection_count = 10) {
+    static bool manual_active = false;
+    if (manual_active) {
+        LOGW("script", "Continuous manual collection already running");
+        return;
     }
-    if (player) {
-        ENTITY::SET_ENTITY_COORDS(player, target_node.x, target_node.y, target_node.z, true, false, false, true);
-        WAIT(1000); // 等待传送完成
-        LOGI("script", "Player teleported to (" + std::to_string(target_node.x) + "," +
-            std::to_string(target_node.y) + "," + std::to_string(target_node.z) + ")");
-    }
-    // 恢复玩家状态
-    if (player) {
-        // 恢复基础状态
-        ENTITY::SET_ENTITY_INVINCIBLE(player, false);
-        ENTITY::SET_ENTITY_VISIBLE(player, true, false);
-        ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, true);
+    manual_active = true;
+    LOGI("script", "Starting continuous manual collection: " + std::to_string(collection_count) + " samples");
+
+    setup_player_for_collection(true);
+    srand(static_cast<unsigned int>(time(nullptr)));
+
+    for (int i = 0; i < collection_count; i++) {
+        LOGI("script", "Starting manual collection attempt " + std::to_string(i + 1) + "/" + std::to_string(collection_count));
         
-        LOGI("script", "Player protection and visibility restored");
+        Position3D target, start;
+        float yaw;
+
+        if (!generate_scenario(event_type, target, start, yaw)) {
+            LOGW("script", "Failed to generate scenario, skipping");
+            continue;
+        }
+
+        const char* task = "";
+        if (event_type == AUTO_EVENT_FIRE) task = "find the exploded car";
+        else if (event_type == AUTO_EVENT_FIGHT) task = "find the street fight";
+        else task = "find crashed cars";
+
+        start_recording_session(task);
+        LOGI("script", "Scenario ready. Please manually navigate to the target.");
+
+        bool reached = false;
+        int steps = 0;
+
+        while (!reached) {
+            if (F11.isKeyDown()) {
+                stop_recording_session();
+                StopCamera();
+                scriptStatus = scriptStop;
+                goto EXIT_MANUAL_COLLECTION;
+            }
+            
+            // 提供手动确认到达的按键，避免因微小距离偏差卡死在当前场景
+            if (F7.isKeyDown()) {
+                record_step("AUTO_STOP_FAILED", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+                LOGI("script", "manually failed.");
+                reached = true;
+                continue;
+            }
+
+            bool moved = false;
+
+            Any cam = CAM::GET_RENDERING_CAM();
+            Vector3 cam_pos = CAM::GET_CAM_COORD(cam);
+            Vector3 cam_rot = CAM::GET_CAM_ROT(cam, 2);
+
+            Position3D cur_pos(cam_pos.x, cam_pos.y, cam_pos.z);
+            Position3D next_pos;
+
+            if (W.isKeyDown()) {
+                next_pos = Position3D(cur_pos.x + cosf(cam_rot.z * (3.14159f / 180.0f)) * STEPSIZE, cur_pos.y + sinf(cam_rot.z * (3.14159f / 180.0f)) * STEPSIZE, cur_pos.z);
+                if (check_collision_raycast(cur_pos, next_pos)) continue;
+                record_step("AUTO_FORWARD", STEPSIZE, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+                moveCameraDelta(STEPSIZE, 0.0f, 0.0f);
+                moved = true;
+            } else if (shift.isKeyDown()) {
+                next_pos = Position3D(cur_pos.x, cur_pos.y, cur_pos.z + STEPSIZE);
+                if (check_collision_raycast(cur_pos, next_pos)) continue;
+                record_step("AUTO_UP", 0.0f, 0.0f, STEPSIZE, 0.0f, 0.0f, 0.0f);
+                moveCameraDelta(0.0f, 0.0f, STEPSIZE);
+                moved = true;
+            } else if (ctrl.isKeyDown()) {
+                next_pos = Position3D(cur_pos.x, cur_pos.y, cur_pos.z - STEPSIZE);
+                if (check_collision_raycast(cur_pos, next_pos)) continue;
+                record_step("AUTO_DOWN", 0.0f, 0.0f, -STEPSIZE, 0.0f, 0.0f, 0.0f);
+                moveCameraDelta(0.0f, 0.0f, -STEPSIZE);
+                moved = true;
+            } else if (Q.isKeyDown()) {
+                record_step("AUTO_YAW_LEFT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, YAW_STEPSIZE);
+                rotateCameraDelta(0.0f, 0.0f, YAW_STEPSIZE);
+                moved = true;
+            } else if (E.isKeyDown()) {
+                record_step("AUTO_YAW_RIGHT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -YAW_STEPSIZE);
+                rotateCameraDelta(0.0f, 0.0f, -YAW_STEPSIZE);
+                moved = true;
+            }
+
+            if (moved) {
+                steps++;
+                Any cam = CAM::GET_RENDERING_CAM();
+                Vector3 pos = CAM::GET_CAM_COORD(cam);
+                float dist = Position3D(pos.x, pos.y, pos.z).distance_to(target);
+                float dz = target.z - pos.z;
+                if (dist <= STEPSIZE * 4.0f && fabsf(dz) <= STEPSIZE) {
+                    reached = true;
+                    record_step("AUTO_STOP_REACHED", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+                    LOGI("script", "Target reached manually!");
+                }
+            }
+            WAIT(0);
+        }
+
+        stop_recording_session(event_type, target, start, yaw, steps + 1, task);
+        clear_spawned_entities();
+        WAIT(1000);
     }
 
-    automated_active = false;
-    LOGI("script", "Automated collection completed: " + std::to_string(successful_collections) +
-        " successful out of " + std::to_string(total_attempts) + " attempts");
+EXIT_MANUAL_COLLECTION:
+    setup_player_for_collection(false);
+    manual_active = false;
+    LOGI("script", "Continuous manual collection finished.");
 }
 
 void scriptMain()
@@ -1234,16 +1183,15 @@ void scriptMain()
             }
             if (F12.isKeyDown())
             {
-                LOGD("script", "F12 pressed - Starting automated batch collection (10 samples)");
-                run_automated_collection(100);
-            }
-            if (F5.isKeyDown())
-            {
-                run_auto_collect(AUTO_EVENT_FIRE);
+                LOGD("script", "F12 pressed - Starting automated batch collection");
+                // 默认使用火灾进行批量自动采集，你可以根据需求改成 AUTO_EVENT_ACCIDENT 等
+                run_automated_collection(AUTO_EVENT_FIRE, 100);
             }
             if (F6.isKeyDown())
             {
-                run_manual_collect(AUTO_EVENT_FIRE);
+                LOGD("script", "F6 pressed - Starting continuous manual collection");
+                // 默认使用火灾进行连贯手动采集，你可以根据需求改成 AUTO_EVENT_ACCIDENT 等
+                run_continuous_manual_collection(AUTO_EVENT_FIRE, 100);
             }
             if (F7.isKeyDown())
             {
@@ -1269,8 +1217,6 @@ void scriptMain()
             StopCamera();
             scriptStatus = scriptStop;
             stop_recording_session();
-            // Stop fire maintenance when exiting camera mode
-            stop_fire_maintenance();
             // Reset verification mode when exiting camera mode
             g_verificationMode = false;
             g_verificationSteps = 0;
@@ -1286,8 +1232,6 @@ void scriptMain()
                 LOGD("script", std::string("Script main loop heartbeat: ") + std::to_string(heartbeat_counter) + ", queue size: " + std::to_string(command_queue_size()));
             }
             
-            // Maintain fire effects during verification
-            maintain_fire();
             WAIT(0); 
             continue; 
         }
@@ -1307,8 +1251,6 @@ void scriptMain()
             StopCamera();
             scriptStatus = scriptStop;
             stop_recording_session();
-            // Stop fire maintenance when camera stops
-            stop_fire_maintenance();
             // setStatusText("Camera mode disabled.");
             LOGI("script", "Camera stopped and returned to player view");
         }
@@ -1457,9 +1399,6 @@ void scriptMain()
         }
         else if (cmd == "RESTORE_PLAYER")
         {
-            // Stop fire maintenance when restoring player
-            stop_fire_maintenance();
-            
             // Restore player to normal state after verification
             Ped player = PLAYER::PLAYER_PED_ID();
             if (player) {
