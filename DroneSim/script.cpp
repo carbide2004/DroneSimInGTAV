@@ -1064,15 +1064,29 @@ static void run_continuous_manual_collection(AutoCollectEvent event_type, int co
             }
 
             bool moved = false;
+
+            Any cam = CAM::GET_RENDERING_CAM();
+            Vector3 cam_pos = CAM::GET_CAM_COORD(cam);
+            Vector3 cam_rot = CAM::GET_CAM_ROT(cam, 2);
+
+            Position3D cur_pos(cam_pos.x, cam_pos.y, cam_pos.z);
+            Position3D next_pos;
+
             if (W.isKeyDown()) {
+                next_pos = Position3D(cur_pos.x + cosf(cam_rot.z * (3.14159f / 180.0f)) * STEPSIZE, cur_pos.y + sinf(cam_rot.z * (3.14159f / 180.0f)) * STEPSIZE, cur_pos.z);
+                if (check_collision_raycast(cur_pos, next_pos)) continue;
                 record_step("AUTO_FORWARD", STEPSIZE, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(STEPSIZE, 0.0f, 0.0f);
                 moved = true;
             } else if (shift.isKeyDown()) {
+                next_pos = Position3D(cur_pos.x, cur_pos.y, cur_pos.z + STEPSIZE);
+                if (check_collision_raycast(cur_pos, next_pos)) continue;
                 record_step("AUTO_UP", 0.0f, 0.0f, STEPSIZE, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(0.0f, 0.0f, STEPSIZE);
                 moved = true;
             } else if (ctrl.isKeyDown()) {
+                next_pos = Position3D(cur_pos.x, cur_pos.y, cur_pos.z - STEPSIZE);
+                if (check_collision_raycast(cur_pos, next_pos)) continue;
                 record_step("AUTO_DOWN", 0.0f, 0.0f, -STEPSIZE, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(0.0f, 0.0f, -STEPSIZE);
                 moved = true;
