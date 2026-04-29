@@ -42,5 +42,5 @@ def plot_history(file_path):
     plt.show()
 
 if __name__ == "__main__":
-    path = 'agent_control/checkpoints/stage1_rgbdheat/history.json'
+    path = 'agent_control/checkpoints/stage1_rgbdheat_10/history.json'
     plot_history(path)
