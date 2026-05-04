@@ -2,6 +2,8 @@ import argparse
 import json
 import os
 import random
+import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -87,6 +89,62 @@ def _cleanup_distributed():
 def _print_rank0(message: str):
     if _is_main_process():
         print(message, flush=True)
+
+
+def _parse_gpu_ids(gpu_ids_text: str):
+    if gpu_ids_text is None:
+        return []
+    gpu_ids = []
+    for part in str(gpu_ids_text).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        gpu_ids.append(int(part))
+    return gpu_ids
+
+
+def _maybe_launch_with_gpu_ids(args):
+    gpu_ids = _parse_gpu_ids(getattr(args, "gpu_ids", ""))
+    if "RANK" in os.environ or "WORLD_SIZE" in os.environ or not gpu_ids:
+        return False
+    if not torch.cuda.is_available():
+        raise RuntimeError("--gpu_ids requires CUDA.")
+
+    script_path = Path(__file__).resolve()
+    cleaned = []
+    skip_next = False
+    for arg in sys.argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--gpu_ids":
+            skip_next = True
+            continue
+        if arg.startswith("--gpu_ids="):
+            continue
+        cleaned.append(arg)
+
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(x) for x in gpu_ids)
+    if len(gpu_ids) == 1:
+        env.setdefault("LOCAL_RANK", "0")
+        os.environ["CUDA_VISIBLE_DEVICES"] = env["CUDA_VISIBLE_DEVICES"]
+        args.device = "cuda:0"
+        return False
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        f"--nproc_per_node={len(gpu_ids)}",
+        str(script_path),
+        *cleaned,
+    ]
+    print(
+        f"Launching DDP on physical GPUs {gpu_ids}; each process sees one local CUDA device.",
+        flush=True,
+    )
+    raise SystemExit(subprocess.call(cmd, env=env))
 
 
 def _masked_mean_pool(last_hidden_state, attention_mask):
@@ -688,6 +746,11 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--gpu_ids",
+        default="",
+        help="Comma-separated physical GPU ids. If set to multiple ids, this script launches one DDP process per GPU.",
+    )
     parser.add_argument("--dist_backend", default="nccl")
     parser.add_argument("--log_interval", type=int, default=1)
     parser.add_argument("--d_model", type=int, default=128)
@@ -714,6 +777,9 @@ def main():
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--lora_targets", default="q_proj,k_proj,v_proj,o_proj")
     args = parser.parse_args()
+
+    if _maybe_launch_with_gpu_ids(args):
+        return 0
 
     dist_state = _setup_distributed(args)
     rank = int(dist_state["rank"])
