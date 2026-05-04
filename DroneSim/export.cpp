@@ -10,6 +10,7 @@
 #include <mutex>
 #include <chrono>
 #include <condition_variable>
+#include <exception>
 #include <Eigen/Core>
 #include <atlimage.h>
 #include <windows.h>
@@ -66,6 +67,9 @@ void writeLog(std::string msg)
 
 static void unpack_depth(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resource* src, vector<unsigned char>& dst, vector<unsigned char>& stencil)
 {
+	if (dev == nullptr || ctx == nullptr || src == nullptr) {
+		throw std::invalid_argument("unpack_depth received null device/context/resource");
+	}
 	HRESULT hr = S_OK;
 
 	ComPtr<ID3D11Texture2D> src_tex;
@@ -106,6 +110,9 @@ static void unpack_depth(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Reso
 }
 static ComPtr<ID3D11Texture2D> CreateTexHelper(ID3D11Device* dev, DXGI_FORMAT fmt, int width, int height, int samples)
 {
+	if (dev == nullptr) {
+		throw std::invalid_argument("CreateTexHelper received null device");
+	}
 	D3D11_TEXTURE2D_DESC desc = { 0 };
 	desc.Format = fmt;
 	desc.ArraySize = 1;
@@ -126,6 +133,9 @@ static ComPtr<ID3D11Texture2D> CreateTexHelper(ID3D11Device* dev, DXGI_FORMAT fm
 
 }
 static ComPtr<ID3D11Buffer> CreateStagingBuffer(ID3D11Device* dev, int size) {
+	if (dev == nullptr || size <= 0) {
+		throw std::invalid_argument("CreateStagingBuffer received invalid device or size");
+	}
 	ComPtr<ID3D11Buffer> result;
 	D3D11_BUFFER_DESC desc = { 0 };
 	desc.BindFlags = 0;
@@ -133,12 +143,16 @@ static ComPtr<ID3D11Buffer> CreateStagingBuffer(ID3D11Device* dev, int size) {
 	desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
 	desc.MiscFlags = 0;
 	desc.Usage = D3D11_USAGE_STAGING;
-	dev->CreateBuffer(&desc, nullptr, &result);
+	HRESULT hr = dev->CreateBuffer(&desc, nullptr, &result);
+	if (FAILED(hr) || result == nullptr) throw std::system_error(hr, std::system_category());
 	return result;
 }
 
 void CreateTextureIfNeeded(ID3D11Device* dev, ID3D11Resource* for_res, ComPtr<ID3D11Texture2D>* tex_target)
 {
+	if (dev == nullptr || for_res == nullptr || tex_target == nullptr) {
+		throw std::invalid_argument("CreateTextureIfNeeded received null argument");
+	}
 	ComPtr<ID3D11Texture2D> tex;
 	HRESULT hr = S_OK;
 	D3D11_TEXTURE2D_DESC desc = { 0 };
@@ -168,6 +182,9 @@ int getBitsPerPixel(DXGI_FORMAT fmt)
 }
 void copyTexToVector(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resource* res, vector<unsigned char>& buffer)
 {
+	if (dev == nullptr || ctx == nullptr || res == nullptr) {
+		throw std::invalid_argument("copyTexToVector received null device/context/resource");
+	}
 	ComPtr<ID3D11Texture2D> tex;
 	HRESULT hr;
 	hr = res->QueryInterface(__uuidof(ID3D11Texture2D), &tex);
@@ -224,6 +241,11 @@ void CopyIfRequested()
 
 void ExtractDepthBuffer(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resource* res)
 {
+	std::lock_guard<mutex> lk(copy_mtx);
+	if (dev == nullptr || ctx == nullptr || res == nullptr) {
+		LOGE("export", "ExtractDepthBuffer: invalid device/context/resource");
+		return;
+	}
 	lastDev = dev;
 	lastCtx = ctx;
     CreateTextureIfNeeded(dev, res, &depthRes);
@@ -234,6 +256,11 @@ void ExtractDepthBuffer(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resou
 
 void ExtractColorBuffer(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resource* tex)
 {
+	std::lock_guard<mutex> lk(copy_mtx);
+	if (dev == nullptr || ctx == nullptr || tex == nullptr) {
+		LOGE("export", "ExtractColorBuffer: invalid device/context/resource");
+		return;
+	}
 	lastDev = dev;
 	lastCtx = ctx;
 	CreateTextureIfNeeded(dev, tex, &colorRes);
@@ -244,6 +271,11 @@ void ExtractColorBuffer(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resou
 }
 
 void ExtractConstantBuffer(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Buffer* buf) {
+	std::lock_guard<mutex> lk(copy_mtx);
+	if (dev == nullptr || ctx == nullptr || buf == nullptr) {
+		LOGE("export", "ExtractConstantBuffer: invalid device/context/buffer");
+		return;
+	}
 	lastDev = dev;
 	lastCtx = ctx;
 	D3D11_BUFFER_DESC desc = { 0 };
@@ -269,6 +301,11 @@ void ExtractConstantBuffer(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Bu
 
 void ExtractScreenBuffer(ID3D11DeviceContext* ctx, ID3D11Texture2D* back, HRESULT hr)
 {
+	std::lock_guard<mutex> lk(copy_mtx);
+	if (ctx == nullptr || back == nullptr) {
+		LOGE("export", "ExtractScreenBuffer: invalid context/back buffer");
+		return;
+	}
 	lastCtx = ctx;
 	backBuf = back;
 	screenHr = hr;
@@ -279,6 +316,11 @@ extern "C" {
 	__declspec(dllexport) int export_get_depth_buffer(void** buf)
 	{
 		try {
+			if (buf == nullptr) {
+				LOGE("export", "export_get_depth_buffer: output pointer is null");
+				return -1;
+			}
+			std::lock_guard<mutex> lk(copy_mtx);
 			if (lastDev == nullptr || lastCtx == nullptr || depthRes == nullptr) {
 				LOGE("export", "export_get_depth_buffer: Invalid device/context/resource pointers");
 				return -1;
@@ -304,6 +346,11 @@ extern "C" {
 	__declspec(dllexport) int export_get_color_buffer(void** buf)
 	{
 		try {
+			if (buf == nullptr) {
+				LOGE("export", "export_get_color_buffer: output pointer is null");
+				return -1;
+			}
+			std::lock_guard<mutex> lk(copy_mtx);
 			if (lastDev == nullptr || lastCtx == nullptr || colorRes == nullptr) {
 				LOGE("export", "export_get_color_buffer: Invalid device/context/resource pointers");
 				return -1;
@@ -332,6 +379,11 @@ extern "C" {
 	__declspec(dllexport) int export_get_stencil_buffer(void** buf)
 	{
 		try {
+			if (buf == nullptr) {
+				LOGE("export", "export_get_stencil_buffer: output pointer is null");
+				return -1;
+			}
+			std::lock_guard<mutex> lk(copy_mtx);
 			if (lastDev == nullptr || lastCtx == nullptr || depthRes == nullptr) {
 				LOGE("export", "export_get_stencil_buffer: Invalid device/context/resource pointers");
 				return -1;
@@ -356,6 +408,11 @@ extern "C" {
     }
 	__declspec(dllexport) int export_get_constant_buffer(rage_matrices* buf) {
 		try {
+			if (buf == nullptr) {
+				LOGE("export", "export_get_constant_buffer: output pointer is null");
+				return -1;
+			}
+			std::lock_guard<mutex> lk(copy_mtx);
 			if (constantBuf == nullptr) {
 				LOGE("export", "export_get_constant_buffer: Constant buffer is null");
 				return -1;
@@ -389,6 +446,11 @@ extern "C" {
 	__declspec(dllexport) int export_get_screen_buffer(WCHAR *pictureName)
 	{
 		try {
+			if (pictureName == nullptr) {
+				LOGE("export", "export_get_screen_buffer: pictureName is null");
+				return 0;
+			}
+			std::lock_guard<mutex> lk(copy_mtx);
 			if (lastCtx == nullptr || backBuf == nullptr || !SUCCEEDED(screenHr)) {
 				LOGE("export", "export_get_screen_buffer: Invalid context/buffer or screen HR failed");
 				return 0;

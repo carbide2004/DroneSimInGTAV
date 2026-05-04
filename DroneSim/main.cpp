@@ -26,6 +26,7 @@
 #include <ScreenGrab.h>
 #include "keyboard.h"
 #include <cstring>
+#include <exception>
 using Microsoft::WRL::ComPtr;
 using namespace std::experimental::filesystem;
 using namespace std::string_literals;
@@ -139,12 +140,24 @@ template<int offset, typename T>
 void hook_function(T* inst, void* hook, bool unhook = false)
 {
 	//__debugbreak();
+	if (inst == nullptr) {
+		LOGE("main", std::string("hook_function: null instance at offset ") + std::to_string(offset));
+		return;
+	}
 	void** vtbl = *reinterpret_cast<void***>(inst);
+	if (vtbl == nullptr) {
+		LOGE("main", std::string("hook_function: null vtable at offset ") + std::to_string(offset));
+		return;
+	}
     
 	//fprintf(f, "Hooking %p at offset %d\n", inst, offset);
 	MH_STATUS res = MH_OK;
 	DWORD oldProt = 0;
 	vtbl += offset;
+	if (*vtbl == nullptr) {
+		LOGE("main", std::string("hook_function: null target at offset ") + std::to_string(offset));
+		return;
+	}
 	//VirtualProtect(vtbl, 8, PAGE_READWRITE, &oldProt);
 	if (unhook)
 	{
@@ -215,6 +228,14 @@ void draw_hook_impl()
 }
 void draw_indexed_hook(ID3D11DeviceContext* self, UINT indexCount, UINT startLoc, UINT baseLoc) {
 	auto origMethod = reinterpret_cast<decltype(draw_indexed_hook)*>(orig<drawIndexedOffset, ID3D11DeviceContext>);
+	if (origMethod == nullptr) {
+		LOGE("main", "draw_indexed_hook: original method is null");
+		return;
+	}
+	if (self == nullptr) {
+		LOGE("main", "draw_indexed_hook: device context is null");
+		return;
+	}
 	HRESULT hr;
 	ComPtr<ID3D11VertexShader> vs;
 	self->VSGetShader(&vs, nullptr, nullptr);
@@ -227,7 +248,13 @@ void draw_indexed_hook(ID3D11DeviceContext* self, UINT indexCount, UINT startLoc
 	// fclose(f);
     if (buf != nullptr && draw_indexed_count == 1000) {
         lastConstants = buf;
-        ExtractConstantBuffer(dev.Get(), self, buf.Get());
+		try {
+			ExtractConstantBuffer(dev.Get(), self, buf.Get());
+		} catch (const std::exception& e) {
+			LOGE("main", std::string("draw_indexed_hook: ExtractConstantBuffer failed: ") + e.what());
+		} catch (...) {
+			LOGE("main", "draw_indexed_hook: ExtractConstantBuffer failed with unknown exception");
+		}
     }
 
 	draw_indexed_count += 1;
@@ -236,6 +263,14 @@ void draw_indexed_hook(ID3D11DeviceContext* self, UINT indexCount, UINT startLoc
 void clear_render_target_view_hook(ID3D11DeviceContext* self, ID3D11RenderTargetView* rtv, float color[4])
 {
 	auto origMethod = reinterpret_cast<void (*)(ID3D11DeviceContext*, ID3D11RenderTargetView*, float[4])>(orig<50, ID3D11DeviceContext>);
+	if (origMethod == nullptr) {
+		LOGE("main", "clear_render_target_view_hook: original method is null");
+		return;
+	}
+	if (self == nullptr) {
+		LOGE("main", "clear_render_target_view_hook: device context is null");
+		return;
+	}
 	
 	ComPtr<ID3D11RenderTargetView> curRTV;
 	self->OMGetRenderTargets(1, &curRTV, nullptr);
@@ -245,6 +280,10 @@ void clear_render_target_view_hook(ID3D11DeviceContext* self, ID3D11RenderTarget
 		ComPtr<ID3D11Resource> res;
 		ComPtr<ID3D11Texture2D> tex;
 		curRTV->GetResource(&res);
+		if (res == nullptr) {
+			origMethod(self, rtv, color);
+			return;
+		}
 		HRESULT hr = S_OK;
 		hr = res.As(&tex);
 		if (hr != S_OK) return;
@@ -275,84 +314,113 @@ auto screenShot = []() {
 void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencilView* dsv, UINT8 flags, float depth, UINT8 stencil)
 {
 	auto origMethod = reinterpret_cast<decltype(&clear_depth_stencil_view_hook)>(orig<53, ID3D11DeviceContext>);
-	ComPtr<ID3D11DepthStencilView> curDSV;
-	self->OMGetRenderTargets(1, nullptr, &curDSV);
-	ComPtr<ID3D11Device> dev;
-	self->GetDevice(&dev);
-	if (curDSV != nullptr) {
-		D3D11_TEXTURE2D_DESC desc;
-		ComPtr<ID3D11Resource> res;
-		ComPtr<ID3D11Texture2D> tex;
-		curDSV->GetResource(&res);
-		HRESULT hr = S_OK;
-		hr = res.As(&tex);
-		if (hr != S_OK) return;
-		tex->GetDesc(&desc);
-		
-		if (lastDsv == nullptr && desc.Width > 600 && desc.Height > 600 && desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS) {
-			lastDsv = curDSV;
-			std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
-				std::chrono::system_clock::now().time_since_epoch()
-				);
-            
-			//go = true;
-			//fprintf(f, "[%I64d] : trans stencil info over, cmdToCatch = %d.\n", ms.count(), cmdToCatch);
-			
-			ExtractDepthBuffer(dev.Get(), self, res.Get());
-			last_capture_depth = system_clock::now();
+	if (origMethod == nullptr) {
+		LOGE("main", "clear_depth_stencil_view_hook: original method is null");
+		return;
+	}
+	if (self == nullptr) {
+		LOGE("main", "clear_depth_stencil_view_hook: device context is null");
+		return;
+	}
 
-			if (cmdToCatch == catchStart) {
-				void* rgb_buf = nullptr;
-				void* depth_buf = nullptr;
-				void* stencil_buf = nullptr;
-				int sizeRgb = export_get_color_buffer(&rgb_buf);
-				int sizeDepth = export_get_depth_buffer(&depth_buf);
-				int sizeStencil = export_get_stencil_buffer(&stencil_buf);
+	try {
+		ComPtr<ID3D11DepthStencilView> curDSV;
+		self->OMGetRenderTargets(1, nullptr, &curDSV);
+		ComPtr<ID3D11Device> dev;
+		self->GetDevice(&dev);
+		if (curDSV != nullptr && dev != nullptr) {
+			D3D11_TEXTURE2D_DESC desc;
+			ComPtr<ID3D11Resource> res;
+			ComPtr<ID3D11Texture2D> tex;
+			curDSV->GetResource(&res);
+			if (res == nullptr) {
+				origMethod(self, dsv, flags, depth, stencil);
+				return;
+			}
+			HRESULT hr = S_OK;
+			hr = res.As(&tex);
+			if (hr == S_OK && tex != nullptr) {
+				tex->GetDesc(&desc);
+				
+				if (lastDsv == nullptr && desc.Width > 600 && desc.Height > 600 && desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS) {
+					lastDsv = curDSV;
+					std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
+						std::chrono::system_clock::now().time_since_epoch()
+						);
+		            
+					//go = true;
+					//fprintf(f, "[%I64d] : trans stencil info over, cmdToCatch = %d.\n", ms.count(), cmdToCatch);
+					
+					ExtractDepthBuffer(dev.Get(), self, res.Get());
+					last_capture_depth = system_clock::now();
 
-				bool same_rgb = false;
-				bool same_depth = false;
-				if (sizeRgb > 0 && rgb_buf && !g_lastRgbBytes.empty() && g_lastRgbBytes.size() == static_cast<size_t>(sizeRgb)) {
-					same_rgb = std::memcmp(rgb_buf, g_lastRgbBytes.data(), sizeRgb) == 0;
-				}
-				if (sizeDepth > 0 && depth_buf && !g_lastDepthBytes.empty() && g_lastDepthBytes.size() == static_cast<size_t>(sizeDepth)) {
-					same_depth = std::memcmp(depth_buf, g_lastDepthBytes.data(), sizeDepth) == 0;
-				}
+					if (cmdToCatch == catchStart) {
+						void* rgb_buf = nullptr;
+						void* depth_buf = nullptr;
+						void* stencil_buf = nullptr;
+						int sizeRgb = export_get_color_buffer(&rgb_buf);
+						int sizeDepth = export_get_depth_buffer(&depth_buf);
+						int sizeStencil = export_get_stencil_buffer(&stencil_buf);
 
-				if (same_rgb || same_depth) {
-					LOGW("main", std::string("capture skipped because ") +
-						(same_rgb ? "RGB " : "") +
-						(same_depth ? "DEPTH " : "") +
-						"unchanged from last frame");
-				} 
-				else {
-					if (sizeRgb > 0 && rgb_buf) {
-						g_lastRgbBytes.assign(reinterpret_cast<unsigned char*>(rgb_buf),
-							reinterpret_cast<unsigned char*>(rgb_buf) + sizeRgb);
+						if (sizeRgb <= 0 || sizeDepth <= 0 || sizeStencil <= 0 || rgb_buf == nullptr || depth_buf == nullptr || stencil_buf == nullptr) {
+							LOGE("main", "capture failed because one or more exported buffers are invalid");
+							makeCmdStop();
+						}
+						else {
+							bool same_rgb = false;
+							bool same_depth = false;
+							if (!g_lastRgbBytes.empty() && g_lastRgbBytes.size() == static_cast<size_t>(sizeRgb)) {
+								same_rgb = std::memcmp(rgb_buf, g_lastRgbBytes.data(), sizeRgb) == 0;
+							}
+							if (!g_lastDepthBytes.empty() && g_lastDepthBytes.size() == static_cast<size_t>(sizeDepth)) {
+								same_depth = std::memcmp(depth_buf, g_lastDepthBytes.data(), sizeDepth) == 0;
+							}
+
+							if (same_rgb || same_depth) {
+								LOGW("main", std::string("capture skipped because ") +
+									(same_rgb ? "RGB " : "") +
+									(same_depth ? "DEPTH " : "") +
+									"unchanged from last frame");
+							} 
+							else {
+								g_lastRgbBytes.assign(reinterpret_cast<unsigned char*>(rgb_buf),
+									reinterpret_cast<unsigned char*>(rgb_buf) + sizeRgb);
+								g_lastDepthBytes.assign(reinterpret_cast<unsigned char*>(depth_buf),
+									reinterpret_cast<unsigned char*>(depth_buf) + sizeDepth);
+
+								screenShot();
+
+								auto raw = fopen(rawPath, "wb");
+								if (raw != nullptr) {
+									fwrite(stencil_buf, 1, sizeStencil, raw);
+									fclose(raw);
+									LOGI("main", std::string("write stencil into file: ") + rawPath);
+									g_stencilCapturedFilePath = rawPath;
+								} else {
+									LOGE("main", std::string("failed to open stencil file: ") + rawPath);
+								}
+
+								auto depth_raw = fopen(depthPath, "wb");
+								if (depth_raw != nullptr) {
+									fwrite(depth_buf, 1, sizeDepth, depth_raw);
+									fclose(depth_raw);
+									LOGI("main", std::string("write depth into file: ") + depthPath);
+									g_depthCapturedFilePath = depthPath;
+								} else {
+									LOGE("main", std::string("failed to open depth file: ") + depthPath);
+								}
+
+								makeCmdStop();
+							}
+						}
 					}
-					if (sizeDepth > 0 && depth_buf) {
-						g_lastDepthBytes.assign(reinterpret_cast<unsigned char*>(depth_buf),
-							reinterpret_cast<unsigned char*>(depth_buf) + sizeDepth);
-					}
-
-					screenShot();
-
-					auto raw = fopen(rawPath, "wb");
-					fwrite(stencil_buf, 1, sizeStencil, raw);
-					fclose(raw);
-					LOGI("main", std::string("write stencil into file: ") + rawPath);
-					g_stencilCapturedFilePath = rawPath;
-
-					auto depth_raw = fopen(depthPath, "wb");
-					fwrite(depth_buf, 1, sizeDepth, depth_raw);
-					fclose(depth_raw);
-					LOGI("main", std::string("write depth into file: ") + depthPath);
-					g_depthCapturedFilePath = depthPath;
-
-					makeCmdStop();
 				}
 			}
-            
 		}
+	} catch (const std::exception& e) {
+		LOGE("main", std::string("clear_depth_stencil_view_hook failed: ") + e.what());
+	} catch (...) {
+		LOGE("main", "clear_depth_stencil_view_hook failed with unknown exception");
 	}
 	origMethod(self, dsv, flags, depth, stencil);
 }
@@ -360,50 +428,77 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 
 void presentCallback(void* chain)
 {	
-    
-	std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
-		std::chrono::system_clock::now().time_since_epoch()
-		);
+	try {
+		std::chrono::milliseconds ms = std::chrono::duration_cast< std::chrono::milliseconds >(
+			std::chrono::system_clock::now().time_since_epoch()
+			);
 
-	// draw_indexed_count = 0;
-	HRESULT hr2 = S_OK, hr1 = S_OK;
-	ComPtr<ID3D11Device> dev;
-	ComPtr<ID3D11DeviceContext> ctx;
-	ComPtr<ID3D11Texture2D> backBuffer;
+		if (chain == nullptr) {
+			LOGE("main", "presentCallback: swap chain is null");
+			return;
+		}
 
-	auto swapChain = static_cast<IDXGISwapChain*>(chain);
-	hr2 = swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<LPVOID*>(backBuffer.GetAddressOf()));
-	if (hr2 != S_OK) throw std::system_error(hr2, std::system_category());
+		// draw_indexed_count = 0;
+		HRESULT hr2 = S_OK, hr1 = S_OK;
+		ComPtr<ID3D11Device> dev;
+		ComPtr<ID3D11DeviceContext> ctx;
+		ComPtr<ID3D11Texture2D> backBuffer;
 
-	swapChain = static_cast<IDXGISwapChain*>(chain);
-	hr1 = swapChain->GetDevice(__uuidof(ID3D11Device), &dev);
-	if (hr1 != S_OK) throw std::system_error(hr1, std::system_category());
-	dev->GetImmediateContext(&ctx);
+		auto swapChain = static_cast<IDXGISwapChain*>(chain);
+		hr2 = swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<LPVOID*>(backBuffer.GetAddressOf()));
+		if (FAILED(hr2) || backBuffer == nullptr) {
+			LOGE("main", std::string("presentCallback: GetBuffer failed, HRESULT: ") + std::to_string(hr2));
+			return;
+		}
 
-	ExtractScreenBuffer(ctx.Get(), backBuffer.Get(), hr2);
-	ComPtr<ID3D11Multithread> multithread;
-	hr2 = ctx.As(&multithread);
-	if (hr2 != S_OK) throw std::system_error(hr2, std::system_category());
-	multithread->SetMultithreadProtected(true);
-	hook_function<drawIndexedOffset>(ctx.Get(), &draw_indexed_hook);
-	
-	hook_function<53>(ctx.Get(), &clear_depth_stencil_view_hook);
-    
-	
-	ComPtr<ID3D11Resource> depthres;
-	ComPtr<ID3D11Resource> colorres;
-	ctx->OMGetRenderTargets(1, &lastRtv, nullptr);
-	last_capture_color = system_clock::now();
-	lastRtv->GetResource(&colorres);
-	ExtractColorBuffer(dev.Get(), ctx.Get(), colorres.Get());
-	//lastDsv.Reset();
+		hr1 = swapChain->GetDevice(__uuidof(ID3D11Device), &dev);
+		if (FAILED(hr1) || dev == nullptr) {
+			LOGE("main", std::string("presentCallback: GetDevice failed, HRESULT: ") + std::to_string(hr1));
+			return;
+		}
+		dev->GetImmediateContext(&ctx);
+		if (ctx == nullptr) {
+			LOGE("main", "presentCallback: immediate context is null");
+			return;
+		}
 
-	lastDsv = nullptr;
-	lastRtv = nullptr;
+		ExtractScreenBuffer(ctx.Get(), backBuffer.Get(), hr2);
+		ComPtr<ID3D11Multithread> multithread;
+		hr2 = ctx.As(&multithread);
+		if (SUCCEEDED(hr2) && multithread != nullptr) {
+			multithread->SetMultithreadProtected(true);
+		} else {
+			LOGW("main", std::string("presentCallback: ID3D11Multithread unavailable, HRESULT: ") + std::to_string(hr2));
+		}
+		hook_function<drawIndexedOffset>(ctx.Get(), &draw_indexed_hook);
+		
+		hook_function<53>(ctx.Get(), &clear_depth_stencil_view_hook);
+	    
+		
+		ComPtr<ID3D11Resource> colorres;
+		ctx->OMGetRenderTargets(1, &lastRtv, nullptr);
+		last_capture_color = system_clock::now();
+		if (lastRtv != nullptr) {
+			lastRtv->GetResource(&colorres);
+			if (colorres != nullptr) {
+				ExtractColorBuffer(dev.Get(), ctx.Get(), colorres.Get());
+			} else {
+				LOGW("main", "presentCallback: render target resource is null");
+			}
+		} else {
+			LOGW("main", "presentCallback: render target view is null");
+		}
+		//lastDsv.Reset();
 
-	ms = std::chrono::duration_cast< std::chrono::milliseconds >(
-		std::chrono::system_clock::now().time_since_epoch()
-		);
+		lastDsv = nullptr;
+		lastRtv = nullptr;
 
-    
+		ms = std::chrono::duration_cast< std::chrono::milliseconds >(
+			std::chrono::system_clock::now().time_since_epoch()
+			);
+	} catch (const std::exception& e) {
+		LOGE("main", std::string("presentCallback failed: ") + e.what());
+	} catch (...) {
+		LOGE("main", "presentCallback failed with unknown exception");
+	}
 }
