@@ -2,6 +2,8 @@ import argparse
 import json
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import get_context
 from pathlib import Path
 
 from PIL import Image
@@ -51,7 +53,7 @@ def _pose_text(entry):
         f"x={float(pose['x']):.2f}, "
         f"y={float(pose['y']):.2f}, "
         f"z={float(pose['z']):.2f}, "
-        f"rz={float(pose['rz'])}°."
+        f"rz={float(pose['rz']):.2f} deg."
     )
 
 
@@ -153,171 +155,322 @@ def _coerce_awareness(task_line, model_text, current_action):
     return "\n".join([task_line, history, obs, plan])
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Add awareness annotations to train_data_all.json")
-    parser.add_argument(
-        "--input_json",
-        default=str(_repo_root() / "dataset" / "train_data_all.json"),
-        help="Input JSON file path"
-    )
-    parser.add_argument(
-        "--output_json",
-        default=str(_repo_root() / "dataset" / "train_data_all_with_awareness.json"),
-        help="Output JSON file path"
-    )
-    parser.add_argument(
-        "--model_dir",
-        default=str(_repo_root() / "agent_control" / "models" / "qwen3_vl_sft_merged"),
-        help="Model directory path"
-    )
-    parser.add_argument("--history_k", type=int, default=12, help="Number of recent actions to include in context")
-    parser.add_argument("--max_new_tokens", type=int, default=160, help="Maximum new tokens for generation")
-    parser.add_argument("--sleep_s", type=float, default=0.0, help="Sleep time before starting")
-    parser.add_argument("--no_skip_existing", action="store_true", help="Process entries that already have awareness field (default: skip existing)")
-    parser.add_argument("--no_extract_vectors", action="store_true", help="Disable extraction of representation vectors (default: extract vectors)")
-    parser.add_argument("--no_skip_vector_existing", action="store_true", help="Process vector extraction for entries that already have representation_vector field (default: skip existing vectors)")
-    
-    args = parser.parse_args()
-    
-    # Set default values to True, but allow override with --no_* flags
-    args.skip_existing = not args.no_skip_existing
-    args.extract_vectors = not args.no_extract_vectors
-    args.skip_vector_existing = not args.no_skip_vector_existing
-
-    if float(args.sleep_s) > 0:
-        time.sleep(float(args.sleep_s))
-
-    # Import model wrapper
-    root = _repo_root()
-    agent_control_dir = root / "agent_control"
-    sys.path.insert(0, str(agent_control_dir))
-    from qwen3vl_wrapper import Qwen3VLWrapper
-
-    # Load model
-    print("Loading model...")
-    model = Qwen3VLWrapper(args.model_dir).load()
-
-    # Read input data
-    input_path = Path(args.input_json)
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input file not found: {input_path}")
-    
-    print(f"Reading data from: {input_path}")
-    data = _read_json(input_path)
+def _validate_entries(data, root):
     if not isinstance(data, list):
         raise RuntimeError("Input JSON must be a list")
-
     for i, entry in enumerate(data):
         if not isinstance(entry, dict):
-            raise RuntimeError(f"第 {i} 条样本不是对象")
+            raise RuntimeError(f"Entry at index {i} must be a JSON object")
         schema_version = entry.get("schema_version")
         if int(schema_version) != 2:
-            raise RuntimeError(f"第 {i} 条样本 schema_version 不是 2")
+            raise RuntimeError(f"Entry at index {i} must have schema_version == 2")
         _parse_traj_step(entry)
         _get_action(entry)
         _pose_text(entry)
         _extract_task_desc(entry)
         _resolve_rgbd_paths(root, entry)
 
-    # Group entries by trajectory
+
+def _should_generate(entry, skip_existing, extract_vectors, skip_vector_existing):
+    has_awareness = "awareness" in entry
+    has_vector = "representation_vector" in entry
+    need_awareness = not (skip_existing and has_awareness)
+    need_vector = bool(extract_vectors) and not (skip_vector_existing and has_vector)
+    return need_awareness or need_vector, need_awareness, need_vector
+
+
+def _group_entries_by_trajectory(data):
     groups = {}
     for i, entry in enumerate(data):
         traj, step = _parse_traj_step(entry)
         groups.setdefault(traj, []).append((step, i))
+    return groups
 
-    # Sort trajectories and steps
+
+def _build_generation_tasks(data, root, history_k, skip_existing, extract_vectors, skip_vector_existing):
+    tasks = []
+    groups = _group_entries_by_trajectory(data)
     traj_order = sorted(groups.items(), key=lambda kv: kv[0])
-    
-    # Count total entries and already processed
+
+    for traj, step_pairs in traj_order:
+        step_pairs.sort(key=lambda x: x[0])
+        ordered_indices = [idx for _, idx in step_pairs]
+        traj_entries = [data[idx] for idx in ordered_indices]
+        task_desc = _extract_task_desc(traj_entries[0]) if traj_entries else "find the closest burning car"
+        task_line = f"Task: I need to {task_desc} (Task)."
+
+        trajectory_tasks = []
+        for local_idx, global_idx in enumerate(ordered_indices):
+            entry = data[global_idx]
+            should_generate, need_awareness, need_vector = _should_generate(
+                entry=entry,
+                skip_existing=skip_existing,
+                extract_vectors=extract_vectors,
+                skip_vector_existing=skip_vector_existing,
+            )
+            if not should_generate:
+                continue
+
+            rgb_path, depth_path = _resolve_rgbd_paths(root, entry)
+            context = _build_context_for_step(traj_entries, local_idx, int(history_k))
+            current_action = _get_action(entry)
+            trajectory_tasks.append({
+                "global_idx": global_idx,
+                "task_line": task_line,
+                "current_action": current_action,
+                "prompt": _awareness_prompt(task_line, context, current_action),
+                "rgb_path": str(rgb_path),
+                "depth_path": str(depth_path),
+                "need_awareness": bool(need_awareness),
+                "need_vector": bool(need_vector),
+            })
+
+        if trajectory_tasks:
+            tasks.append({
+                "trajectory_id": traj,
+                "num_steps": len(trajectory_tasks),
+                "items": trajectory_tasks,
+            })
+    return tasks
+
+
+def _parse_gpu_ids(gpu_ids_text):
+    gpu_ids = []
+    for part in str(gpu_ids_text).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        gpu_ids.append(int(part))
+    if not gpu_ids:
+        raise ValueError("gpu_ids must contain at least one GPU id")
+    return gpu_ids
+
+
+def _assign_trajectories_to_workers(trajectory_tasks, worker_count):
+    buckets = [{"total_steps": 0, "trajectories": []} for _ in range(int(worker_count))]
+    for task in sorted(trajectory_tasks, key=lambda item: item["num_steps"], reverse=True):
+        target = min(buckets, key=lambda item: item["total_steps"])
+        target["trajectories"].append(task)
+        target["total_steps"] += int(task["num_steps"])
+    return [bucket["trajectories"] for bucket in buckets if bucket["trajectories"]]
+
+
+def _load_rgbd_images(rgb_path, depth_path):
+    rgb_file = Path(rgb_path)
+    depth_file = Path(depth_path)
+    if not rgb_file.exists():
+        raise FileNotFoundError(f"RGB image not found: {rgb_file}")
+    if not depth_file.exists():
+        raise FileNotFoundError(f"Depth image not found: {depth_file}")
+    with Image.open(rgb_file) as rgb_src:
+        rgb_img = rgb_src.convert("RGB")
+    with Image.open(depth_file) as depth_src:
+        depth_img = depth_src.convert("RGB")
+    return rgb_img, depth_img
+
+
+def _load_model(model_dir, gpu_id):
+    root = _repo_root()
+    agent_control_dir = root / "agent_control"
+    if str(agent_control_dir) not in sys.path:
+        sys.path.insert(0, str(agent_control_dir))
+    from qwen3vl_wrapper import Qwen3VLWrapper
+
+    device_map = {"": f"cuda:{int(gpu_id)}"}
+    return Qwen3VLWrapper(model_dir, torch_dtype="auto", device_map=device_map).load()
+
+
+def _run_model_for_item(model, item, max_new_tokens):
+    rgb_img, depth_img = _load_rgbd_images(item["rgb_path"], item["depth_path"])
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": item["prompt"]},
+                {"type": "image"},
+                {"type": "image"},
+            ],
+        }
+    ]
+
+    if item["need_vector"]:
+        awareness, representation_vector = model.generate_chat_with_representation(
+            messages=messages,
+            images=[rgb_img, depth_img],
+            max_new_tokens=int(max_new_tokens),
+            do_sample=False,
+            normalize_vector=True,
+        )
+        return {
+            "awareness": _coerce_awareness(item["task_line"], awareness, item["current_action"]),
+            "representation_vector": representation_vector,
+            "vector_dim": len(representation_vector),
+        }
+
+    awareness = model.generate_chat(
+        messages=messages,
+        images=[rgb_img, depth_img],
+        max_new_tokens=int(max_new_tokens),
+        do_sample=False,
+    )
+    return {
+        "awareness": _coerce_awareness(item["task_line"], awareness, item["current_action"]),
+    }
+
+
+def _process_worker(worker_id, gpu_id, model_dir, assigned_trajectories, max_new_tokens):
+    model = _load_model(model_dir=model_dir, gpu_id=gpu_id)
+    updates = []
+    processed = 0
+
+    for trajectory in assigned_trajectories:
+        for item in trajectory["items"]:
+            result = _run_model_for_item(model=model, item=item, max_new_tokens=max_new_tokens)
+            update = {"global_idx": int(item["global_idx"])}
+            if item["need_awareness"]:
+                update["awareness"] = result["awareness"]
+            if item["need_vector"]:
+                update["representation_vector"] = result["representation_vector"]
+                update["vector_dim"] = int(result["vector_dim"])
+            updates.append(update)
+            processed += 1
+
+    return {
+        "worker_id": int(worker_id),
+        "gpu_id": int(gpu_id),
+        "processed": int(processed),
+        "updates": updates,
+    }
+
+
+def _apply_updates(data, worker_result):
+    for update in worker_result["updates"]:
+        entry = data[int(update["global_idx"])]
+        if "awareness" in update:
+            entry["awareness"] = update["awareness"]
+        if "representation_vector" in update:
+            entry["representation_vector"] = update["representation_vector"]
+            entry["vector_dim"] = int(update["vector_dim"])
+
+
+def _run_parallel_generation(trajectory_tasks, args):
+    assignments = _assign_trajectories_to_workers(trajectory_tasks, len(args.gpu_ids))
+    futures = []
+    results = []
+
+    mp_context = get_context("spawn")
+    with ProcessPoolExecutor(max_workers=len(assignments), mp_context=mp_context) as executor:
+        for worker_id, assigned_trajectories in enumerate(assignments):
+            gpu_id = args.gpu_ids[worker_id % len(args.gpu_ids)]
+            futures.append(
+                executor.submit(
+                    _process_worker,
+                    worker_id,
+                    gpu_id,
+                    args.model_dir,
+                    assigned_trajectories,
+                    args.max_new_tokens,
+                )
+            )
+
+        with tqdm(total=sum(task["num_steps"] for task in trajectory_tasks), desc="Generating awareness", unit="entry") as pbar:
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+                pbar.update(int(result["processed"]))
+
+    return results
+
+
+def _run_single_worker_generation(trajectory_tasks, args):
+    result = _process_worker(
+        worker_id=0,
+        gpu_id=args.gpu_ids[0],
+        model_dir=args.model_dir,
+        assigned_trajectories=trajectory_tasks,
+        max_new_tokens=args.max_new_tokens,
+    )
+    return [result]
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Add awareness annotations to train_data_all.json")
+    parser.add_argument(
+        "--input_json",
+        default=str(_repo_root() / "dataset" / "train_data_all.json"),
+        help="Input JSON file path",
+    )
+    parser.add_argument(
+        "--output_json",
+        default=str(_repo_root() / "dataset" / "train_data_all_with_awareness.json"),
+        help="Output JSON file path",
+    )
+    parser.add_argument(
+        "--model_dir",
+        default=str(_repo_root() / "agent_control" / "models" / "qwen3_vl_sft_merged"),
+        help="Model directory path",
+    )
+    parser.add_argument("--history_k", type=int, default=12, help="Number of recent actions to include in context")
+    parser.add_argument("--max_new_tokens", type=int, default=160, help="Maximum new tokens for generation")
+    parser.add_argument("--sleep_s", type=float, default=0.0, help="Sleep time before starting")
+    parser.add_argument("--gpu_ids", default="0", help="Comma-separated GPU ids, for example: 0,1,2,3")
+    parser.add_argument("--no_skip_existing", action="store_true", help="Process entries that already have awareness field (default: skip existing)")
+    parser.add_argument("--no_extract_vectors", action="store_true", help="Disable extraction of representation vectors (default: extract vectors)")
+    parser.add_argument("--no_skip_vector_existing", action="store_true", help="Process vector extraction for entries that already have representation_vector field (default: skip existing vectors)")
+
+    args = parser.parse_args()
+
+    args.skip_existing = not args.no_skip_existing
+    args.extract_vectors = not args.no_extract_vectors
+    args.skip_vector_existing = not args.no_skip_vector_existing
+    args.gpu_ids = _parse_gpu_ids(args.gpu_ids)
+
+    if float(args.sleep_s) > 0:
+        time.sleep(float(args.sleep_s))
+
+    root = _repo_root()
+    input_path = Path(args.input_json)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+
+    print(f"Reading data from: {input_path}")
+    data = _read_json(input_path)
+    _validate_entries(data, root)
+
+    trajectory_tasks = _build_generation_tasks(
+        data=data,
+        root=root,
+        history_k=args.history_k,
+        skip_existing=args.skip_existing,
+        extract_vectors=args.extract_vectors,
+        skip_vector_existing=args.skip_vector_existing,
+    )
+
     total_entries = len(data)
-    if args.skip_existing:
-        already_processed = sum(1 for entry in data if "awareness" in entry)
-        print(f"Found {already_processed} entries already processed")
+    total_to_generate = sum(task["num_steps"] for task in trajectory_tasks)
+    skipped_entries = total_entries - total_to_generate
+
+    print(f"Total entries: {total_entries}")
+    print(f"Entries to generate: {total_to_generate}")
+    print(f"Entries skipped: {skipped_entries}")
+    print(f"Using GPUs: {args.gpu_ids}")
+
+    if total_to_generate > 0:
+        if len(args.gpu_ids) == 1:
+            worker_results = _run_single_worker_generation(trajectory_tasks, args)
+        else:
+            worker_results = _run_parallel_generation(trajectory_tasks, args)
+        for result in worker_results:
+            _apply_updates(data, result)
     else:
-        already_processed = 0
+        print("Nothing to generate.")
 
-    print(f"Processing {total_entries} entries...")
-    
-    with tqdm(total=total_entries, initial=already_processed, desc="Processing entries", unit="entry") as pbar:
-        for traj, step_pairs in traj_order:
-            step_pairs.sort(key=lambda x: x[0])
-            ordered_indices = [idx for _, idx in step_pairs]
-            traj_entries = [data[idx] for idx in ordered_indices]
-            
-            # Extract task description from first entry
-            task_desc = _extract_task_desc(traj_entries[0]) if traj_entries else "find the closest burning car"
-            task_line = f"Task: I need to {task_desc} (Task)."
-
-            for local_idx, global_idx in enumerate(ordered_indices):
-                entry = data[global_idx]
-                
-                # Skip if already has awareness and skip_existing is True
-                if args.skip_existing and "awareness" in entry:
-                    pbar.update(1)
-                    continue
-                
-                # Skip if already has vector and skip_vector_existing is True
-                if args.skip_vector_existing and "representation_vector" in entry:
-                    pbar.update(1)
-                    continue
-
-                rgb_path, depth_path = _resolve_rgbd_paths(root, entry)
-                if not rgb_path.exists():
-                    raise FileNotFoundError(f"RGB image not found: {rgb_path}")
-                if not depth_path.exists():
-                    raise FileNotFoundError(f"Depth image not found: {depth_path}")
-
-                rgb_img = Image.open(rgb_path).convert("RGB")
-                depth_img = Image.open(depth_path).convert("RGB")
-
-                current_action = _get_action(entry)
-
-                context = _build_context_for_step(traj_entries, local_idx, int(args.history_k))
-                prompt = _awareness_prompt(task_line, context, current_action)
-
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image"},
-                            {"type": "image"},
-                        ],
-                    }
-                ]
-
-                if args.extract_vectors:
-                    awareness, representation_vector = model.generate_chat_with_representation(
-                        messages=messages,
-                        images=[rgb_img, depth_img],
-                        max_new_tokens=int(args.max_new_tokens),
-                        do_sample=False,
-                        normalize_vector=True,
-                    )
-                    awareness = _coerce_awareness(task_line, awareness, current_action)
-
-                    entry["awareness"] = awareness
-                    entry["representation_vector"] = representation_vector
-                    entry["vector_dim"] = len(representation_vector)
-                else:
-                    awareness = model.generate_chat(
-                        messages=messages,
-                        images=[rgb_img, depth_img],
-                        max_new_tokens=int(args.max_new_tokens),
-                        do_sample=False,
-                    )
-                    awareness = _coerce_awareness(task_line, awareness, current_action)
-
-                    entry["awareness"] = awareness
-                pbar.update(1)
-
-    # Write output
     output_path = Path(args.output_json)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     print(f"Writing results to: {output_path}")
     _write_json(output_path, data)
-    
+
     print("Done!")
     return 0
 
