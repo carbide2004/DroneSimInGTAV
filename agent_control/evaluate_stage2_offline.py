@@ -11,6 +11,7 @@ from action_mapping import ACTIONS, parse_action
 from hf_auth import load_hf_token_from_env_file
 from prompting import build_prompt
 from qwen3vl_wrapper import Qwen3VLWrapper
+from smt_observation import SmtObservationConfig, SmtObservationEncoder
 from stage1_model import Stage1Config, Stage1GRUModel
 from stage2_bridge import Stage2BridgeConfig, Stage2BridgeModel
 from stage2_softprompt import forward_action_ce_with_soft_prompt, generate_action_with_soft_prompt
@@ -57,6 +58,8 @@ def _load_stage2_bridge(stage2_ckpt: Path, device: torch.device):
         hidden_dim=int(stage1_cfg.get("hidden_dim", 512)),
         llm_dim=int(stage2_cfg.get("llm_dim", 3584)),
         num_soft_tokens=int(stage2_cfg.get("num_soft_tokens", 16)),
+        smt_dim=int(stage2_cfg.get("smt_dim", config.get("smt", {}).get("d_model", 128))),
+        num_smt_soft_tokens=int(stage2_cfg.get("num_smt_soft_tokens", 0)),
     )
     bridge = Stage2BridgeModel(bridge_cfg).to(device)
     state = payload.get("bridge_state_dict")
@@ -66,7 +69,25 @@ def _load_stage2_bridge(stage2_ckpt: Path, device: torch.device):
     bridge.eval()
     for p in bridge.parameters():
         p.requires_grad = False
-    return bridge
+    return bridge, payload
+
+
+def _load_smt_encoder(stage2_payload: dict, feature_dim: int, device: torch.device):
+    config = stage2_payload.get("config", {})
+    smt_cfg_data = config.get("smt")
+    stage2_cfg = config.get("stage2", {})
+    if not isinstance(smt_cfg_data, dict) or int(stage2_cfg.get("num_smt_soft_tokens", 0)) <= 0:
+        return None
+    smt_cfg = SmtObservationConfig(**{**smt_cfg_data, "feature_dim": int(feature_dim)})
+    encoder = SmtObservationEncoder(smt_cfg).to(device)
+    state = stage2_payload.get("smt_state_dict")
+    if not isinstance(state, dict):
+        raise RuntimeError("Invalid SMT stage2 checkpoint: missing smt_state_dict")
+    encoder.load_state_dict(state, strict=True)
+    encoder.eval()
+    for p in encoder.parameters():
+        p.requires_grad = False
+    return encoder
 
 
 def _load_step_images(dataset_root: Path, step: dict):
@@ -90,6 +111,8 @@ def _load_step_images(dataset_root: Path, step: dict):
 def _prepare_features(raw_batch, feature_store: FeatureCacheStore, max_len: int, device: torch.device):
     batch_size = len(raw_batch)
     features = torch.zeros((batch_size, max_len, feature_store.feature_dim), dtype=torch.float32, device=device)
+    poses = torch.zeros((batch_size, max_len, 6), dtype=torch.float32, device=device)
+    action_ids = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
     valid_steps = []
     for i, item in enumerate(raw_batch):
         steps = item["steps"][:max_len]
@@ -99,8 +122,22 @@ def _prepare_features(raw_batch, feature_store: FeatureCacheStore, max_len: int,
             if feat is None:
                 raise RuntimeError(f"Missing feature cache for sample_id={sample_id}")
             features[i, j] = torch.from_numpy(feat).to(device=device)
+            pose = step.get("pose") or {}
+            poses[i, j] = torch.tensor(
+                [
+                    float(pose.get("x", 0.0)),
+                    float(pose.get("y", 0.0)),
+                    float(pose.get("z", 0.0)),
+                    float(pose.get("rx", 0.0)),
+                    float(pose.get("ry", 0.0)),
+                    float(pose.get("rz", 0.0)),
+                ],
+                dtype=torch.float32,
+                device=device,
+            )
+            action_ids[i, j] = int(step.get("action_id", 0))
             valid_steps.append((i, j, item, step))
-    return features, valid_steps
+    return features, poses, action_ids, valid_steps
 
 
 def _select_steps(valid_steps, steps_per_batch: int):
@@ -205,7 +242,8 @@ def main():
     loader = val_loader if args.split == "val" else train_loader
 
     stage1_model = _load_stage1_encoder(Path(args.stage1_ckpt), device=device)
-    bridge = _load_stage2_bridge(Path(args.stage2_ckpt), device=device)
+    bridge, stage2_payload = _load_stage2_bridge(Path(args.stage2_ckpt), device=device)
+    smt_encoder = _load_smt_encoder(stage2_payload, feature_store.feature_dim, device=device)
 
     qwen = Qwen3VLWrapper(args.model_dir, torch_dtype="auto", device_map={"":str(device)}).load()
     if args.stage2_lora_dir:
@@ -233,12 +271,13 @@ def main():
             if args.sample_limit > 0 and batch_idx >= int(args.sample_limit):
                 break
             raw_batch = batch["raw_batch"]
-            features, valid_steps = _prepare_features(raw_batch, feature_store, max_len=int(args.max_len), device=device)
+            features, poses, action_ids, valid_steps = _prepare_features(raw_batch, feature_store, max_len=int(args.max_len), device=device)
             selected_steps = _select_steps(valid_steps, steps_per_batch=int(args.steps_per_batch))
             if not selected_steps:
                 continue
 
             h_seq, _ = stage1_model(features)
+            smt_seq = smt_encoder(features, poses, action_ids) if smt_encoder is not None else None
             for i, j, item, step in selected_steps:
                 pose = step.get("pose") or {}
                 task = item.get("task") or "find the closest burning car"
@@ -269,7 +308,8 @@ def main():
                 ]
 
                 h_t = h_seq[i, j].unsqueeze(0)
-                soft_prompt = bridge(h_t)
+                smt_context = smt_seq[i, j].unsqueeze(0) if smt_seq is not None else None
+                soft_prompt = bridge(h_t, smt_context=smt_context)
                 raw_pred = None
                 if args.eval_mode == "rank_actions":
                     pred_action, pred_ce = _rank_action_by_ce(

@@ -10,6 +10,7 @@ from PIL import Image
 from hf_auth import load_hf_token_from_env_file
 from prompting import build_prompt
 from qwen3vl_wrapper import Qwen3VLWrapper
+from smt_observation import SmtObservationConfig, SmtObservationEncoder
 from stage1_model import Stage1Config, Stage1GRUModel
 from stage2_bridge import Stage2BridgeConfig, Stage2BridgeModel
 from stage2_softprompt import forward_action_ce_with_soft_prompt
@@ -87,6 +88,8 @@ def _load_step_images(dataset_root: Path, step: dict):
 def _prepare_features(raw_batch, feature_store: FeatureCacheStore, max_len: int, device: torch.device):
     batch_size = len(raw_batch)
     features = torch.zeros((batch_size, max_len, feature_store.feature_dim), dtype=torch.float32, device=device)
+    poses = torch.zeros((batch_size, max_len, 6), dtype=torch.float32, device=device)
+    action_ids = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
     valid_steps = []
 
     for i, item in enumerate(raw_batch):
@@ -97,8 +100,22 @@ def _prepare_features(raw_batch, feature_store: FeatureCacheStore, max_len: int,
             if feat is None:
                 raise RuntimeError(f"Missing feature cache for sample_id={sample_id}")
             features[i, j] = torch.from_numpy(feat).to(device=device)
+            pose = step.get("pose") or {}
+            poses[i, j] = torch.tensor(
+                [
+                    float(pose.get("x", 0.0)),
+                    float(pose.get("y", 0.0)),
+                    float(pose.get("z", 0.0)),
+                    float(pose.get("rx", 0.0)),
+                    float(pose.get("ry", 0.0)),
+                    float(pose.get("rz", 0.0)),
+                ],
+                dtype=torch.float32,
+                device=device,
+            )
+            action_ids[i, j] = int(step.get("action_id", 0))
             valid_steps.append((i, j, item, step))
-    return features, valid_steps
+    return features, poses, action_ids, valid_steps
 
 
 def _select_steps(valid_steps, steps_per_batch: int):
@@ -109,6 +126,7 @@ def _select_steps(valid_steps, steps_per_batch: int):
 
 def _run_epoch(
     stage1_model: Stage1GRUModel,
+    smt_encoder: SmtObservationEncoder,
     bridge: Stage2BridgeModel,
     qwen_wrapper: Qwen3VLWrapper,
     loader,
@@ -120,6 +138,7 @@ def _run_epoch(
     optimizer=None,
 ):
     train = optimizer is not None
+    smt_encoder.train(mode=train)
     bridge.train(mode=train)
     qwen_wrapper.model.train(mode=train)
     total_loss = 0.0
@@ -127,13 +146,14 @@ def _run_epoch(
 
     for batch in loader:
         raw_batch = batch["raw_batch"]
-        features, valid_steps = _prepare_features(raw_batch, feature_store, max_len=max_len, device=device)
+        features, poses, action_ids, valid_steps = _prepare_features(raw_batch, feature_store, max_len=max_len, device=device)
         selected_steps = _select_steps(valid_steps, steps_per_batch=steps_per_batch)
         if not selected_steps:
             continue
 
         with torch.no_grad():
             h_seq, _ = stage1_model(features)
+        smt_seq = smt_encoder(features, poses, action_ids)
 
         losses = []
         for i, j, item, step in selected_steps:
@@ -162,7 +182,8 @@ def _run_epoch(
                 }
             ]
             h_t = h_seq[i, j].unsqueeze(0)
-            soft_prompt = bridge(h_t)
+            smt_context = smt_seq[i, j].unsqueeze(0)
+            soft_prompt = bridge(h_t, smt_context=smt_context)
             loss = forward_action_ce_with_soft_prompt(
                 processor=qwen_wrapper.processor,
                 model=qwen_wrapper.model,
@@ -209,7 +230,18 @@ def main():
     parser.add_argument("--val_json", default=None, help="Fixed val split JSON path")
     parser.add_argument("--steps_per_batch", type=int, default=4, help="Timesteps sampled per trajectory batch")
     parser.add_argument("--num_soft_tokens", type=int, default=16)
+    parser.add_argument("--num_smt_soft_tokens", type=int, default=4)
+    parser.add_argument("--smt_dim", type=int, default=128)
+    parser.add_argument("--smt_feature_embed_dim", type=int, default=128)
+    parser.add_argument("--smt_pose_embed_dim", type=int, default=16)
+    parser.add_argument("--smt_action_embed_dim", type=int, default=16)
+    parser.add_argument("--smt_heads", type=int, default=4)
+    parser.add_argument("--smt_ff_dim", type=int, default=256)
+    parser.add_argument("--smt_pose_scale", type=float, default=50.0)
+    parser.add_argument("--smt_use_factorization", action="store_true")
+    parser.add_argument("--smt_num_centers", type=int, default=64)
     parser.add_argument("--lr_bridge", type=float, default=1e-4)
+    parser.add_argument("--lr_smt", type=float, default=1e-4)
     parser.add_argument("--lr_lora", type=float, default=5e-5)
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--lora_r", type=int, default=16)
@@ -278,13 +310,30 @@ def main():
         hidden_dim=int(stage1_cfg.hidden_dim),
         llm_dim=llm_dim,
         num_soft_tokens=int(args.num_soft_tokens),
+        smt_dim=int(args.smt_dim),
+        num_smt_soft_tokens=int(args.num_smt_soft_tokens),
     )
     bridge = Stage2BridgeModel(bridge_cfg).to(device)
+    smt_cfg = SmtObservationConfig(
+        feature_dim=int(feature_store.feature_dim),
+        d_model=int(args.smt_dim),
+        feature_embed_dim=int(args.smt_feature_embed_dim),
+        pose_embed_dim=int(args.smt_pose_embed_dim),
+        action_embed_dim=int(args.smt_action_embed_dim),
+        num_actions=int(stage1_cfg.action_dim),
+        pose_scale=float(args.smt_pose_scale),
+        n_heads=int(args.smt_heads),
+        d_ff=int(args.smt_ff_dim),
+        num_centers=int(args.smt_num_centers),
+        use_factorization=bool(args.smt_use_factorization),
+    )
+    smt_encoder = SmtObservationEncoder(smt_cfg).to(device)
 
     lora_params = [p for p in qwen.model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
         [
             {"params": bridge.parameters(), "lr": float(args.lr_bridge)},
+            {"params": smt_encoder.parameters(), "lr": float(args.lr_smt)},
             {"params": lora_params, "lr": float(args.lr_lora)},
         ],
         weight_decay=float(args.weight_decay),
@@ -298,6 +347,8 @@ def main():
         },
         "stage2": {
             "num_soft_tokens": int(args.num_soft_tokens),
+            "num_smt_soft_tokens": int(args.num_smt_soft_tokens),
+            "smt_dim": int(args.smt_dim),
             "llm_dim": llm_dim,
             "steps_per_batch": int(args.steps_per_batch),
             "loss": "action_ce_only",
@@ -307,6 +358,7 @@ def main():
             "lora_alpha": int(args.lora_alpha),
             "lora_dropout": float(args.lora_dropout),
         },
+        "smt": smt_cfg.to_dict(),
         "train": {
             "epochs": int(args.epochs),
             "batch_size": int(args.batch_size),
@@ -314,6 +366,7 @@ def main():
             "val_ratio": float(args.val_ratio),
             "seed": int(args.seed),
             "lr_bridge": float(args.lr_bridge),
+            "lr_smt": float(args.lr_smt),
             "lr_lora": float(args.lr_lora),
             "weight_decay": float(args.weight_decay),
             "dataset_json": str(Path(args.dataset_json)),
@@ -333,6 +386,7 @@ def main():
     for epoch in range(1, int(args.epochs) + 1):
         train_metrics = _run_epoch(
             stage1_model=stage1_model,
+            smt_encoder=smt_encoder,
             bridge=bridge,
             qwen_wrapper=qwen,
             loader=train_loader,
@@ -346,6 +400,7 @@ def main():
         with torch.no_grad():
             val_metrics = _run_epoch(
                 stage1_model=stage1_model,
+                smt_encoder=smt_encoder,
                 bridge=bridge,
                 qwen_wrapper=qwen,
                 loader=val_loader,
@@ -368,6 +423,7 @@ def main():
         payload = {
             "epoch": epoch,
             "bridge_state_dict": bridge.state_dict(),
+            "smt_state_dict": smt_encoder.state_dict(),
             "config": config_payload,
             "history": history,
         }

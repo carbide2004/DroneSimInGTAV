@@ -15,6 +15,7 @@ from dronesim_client import DroneSimClient
 from prompting import build_prompt
 from qwen3vl_wrapper import Qwen3VLWrapper
 from rgbd_utils import depth_bytes_to_pil, rgb_bytes_to_pil
+from smt_observation import SmtObservationConfig, SmtObservationEncoder
 from stage1_model import Stage1Config, Stage1GRUModel
 from stage2_bridge import Stage2BridgeConfig, Stage2BridgeModel
 from stage2_softprompt import forward_action_ce_with_soft_prompt, generate_action_with_soft_prompt
@@ -165,11 +166,29 @@ def _load_stage2_bridge(stage2_ckpt: Path, device: torch.device):
         hidden_dim=int(stage1_cfg.get("hidden_dim", 512)),
         llm_dim=int(config.get("llm_dim", 3584)),
         num_soft_tokens=int(config.get("num_soft_tokens", 16)),
+        smt_dim=int(config.get("smt_dim", payload.get("config", {}).get("smt", {}).get("d_model", 128))),
+        num_smt_soft_tokens=int(config.get("num_smt_soft_tokens", 0)),
     )
     bridge = Stage2BridgeModel(bridge_cfg).to(device)
     bridge.load_state_dict(payload["bridge_state_dict"], strict=True)
     bridge.eval()
-    return bridge
+    return bridge, payload
+
+
+def _load_smt_encoder(stage2_payload: dict, feature_dim: int, device: torch.device):
+    config = stage2_payload.get("config", {})
+    smt_cfg_data = config.get("smt")
+    stage2_cfg = config.get("stage2", {})
+    if not isinstance(smt_cfg_data, dict) or int(stage2_cfg.get("num_smt_soft_tokens", 0)) <= 0:
+        return None
+    smt_cfg = SmtObservationConfig(**{**smt_cfg_data, "feature_dim": int(feature_dim)})
+    encoder = SmtObservationEncoder(smt_cfg).to(device)
+    state = stage2_payload.get("smt_state_dict")
+    if not isinstance(state, dict):
+        raise RuntimeError("Invalid SMT stage2 checkpoint: missing smt_state_dict")
+    encoder.load_state_dict(state, strict=True)
+    encoder.eval()
+    return encoder
 
 
 def _rank_action_by_ce(processor, model, messages, images, soft_prompt):
@@ -272,6 +291,7 @@ def run_single_verification_stage2(
     cli,
     qwen: Qwen3VLWrapper,
     stage1_model,
+    smt_encoder,
     bridge,
     extractor: ClipHeatDepthExtractor,
     sample: dict,
@@ -317,6 +337,10 @@ def run_single_verification_stage2(
     stopped_by_model = False
     final_pose = None
     h_prev = None
+    prev_action_id = int(getattr(stage1_model.config, "action_dim", len(ACTIONS))) if stage1_model is not None else len(ACTIONS)
+    feature_history = []
+    pose_history = []
+    prev_action_history = []
 
     with torch.inference_mode():
         while steps < max_steps:
@@ -344,7 +368,33 @@ def run_single_verification_stage2(
                 x = stage1_model.input_proj(feat_t)
                 out, h_prev = stage1_model.gru(x, h_prev)
                 h_t = out[:, 0, :]
-                soft_prompt = bridge(h_t.to(next(bridge.parameters()).device))
+                smt_context = None
+                if smt_encoder is not None:
+                    pose_t = torch.tensor(
+                        [[pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]]],
+                        dtype=torch.float32,
+                        device=next(smt_encoder.parameters()).device,
+                    )
+                    feature_history.append(feat_t.to(next(smt_encoder.parameters()).device))
+                    pose_history.append(pose_t.unsqueeze(1))
+                    prev_action_history.append(
+                        torch.tensor(
+                            [[prev_action_id]],
+                            dtype=torch.long,
+                            device=next(smt_encoder.parameters()).device,
+                        )
+                    )
+                    smt_features = torch.cat(feature_history, dim=1)
+                    smt_poses = torch.cat(pose_history, dim=1)
+                    smt_prev_actions = torch.cat(prev_action_history, dim=1)
+                    smt_seq = smt_encoder(
+                        smt_features,
+                        smt_poses,
+                        smt_prev_actions,
+                        action_ids_are_previous=True,
+                    )
+                    smt_context = smt_seq[:, -1, :].to(next(bridge.parameters()).device)
+                soft_prompt = bridge(h_t.to(next(bridge.parameters()).device), smt_context=smt_context)
 
             x0, y0, z0, _, _, rz0 = pose
             prompt = build_prompt(x0, y0, z0, rz0, task=task_desc)
@@ -395,6 +445,8 @@ def run_single_verification_stage2(
                 stopped_by_model = True
                 break
             dispatch_action(cli, action, **movement_params)
+            if policy_mode == "stage2_softprompt":
+                prev_action_id = ACTIONS.index(action) if action in ACTIONS else 0
             steps += 1
 
     if final_pose is None:
@@ -522,6 +574,7 @@ def main():
 
     stage1_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     stage1_model = None
+    smt_encoder = None
     bridge = None
     extractor = None
     expected_feature_dim = -1
@@ -548,7 +601,8 @@ def main():
                 f"using user-provided heatmap_size={int(args.heatmap_size)}."
             )
 
-        bridge = _load_stage2_bridge(Path(args.stage2_ckpt), stage1_device)
+        bridge, stage2_payload = _load_stage2_bridge(Path(args.stage2_ckpt), stage1_device)
+        smt_encoder = _load_smt_encoder(stage2_payload, expected_feature_dim, stage1_device)
         extractor = ClipHeatDepthExtractor(
             model_name=args.clip_model_name,
             heatmap_size=int(args.heatmap_size),
@@ -613,6 +667,7 @@ def main():
                 cli=cli,
                 qwen=qwen,
                 stage1_model=stage1_model,
+                smt_encoder=smt_encoder,
                 bridge=bridge,
                 extractor=extractor,
                 sample=sample,
