@@ -51,7 +51,7 @@ def _format_timing(timing: dict):
     total = max(float(timing.get("step_total", timing.get("sample_total", 0.0))), 1e-8)
     parts = []
     for key, value in sorted(timing.items(), key=lambda item: item[1], reverse=True):
-        if key in {"step_total", "sample_total"}:
+        if key in {"index", "step_total", "sample_total"}:
             continue
         parts.append(f"{key}={value:.3f}s/{value / total * 100.0:.1f}%")
     return ", ".join(parts)
