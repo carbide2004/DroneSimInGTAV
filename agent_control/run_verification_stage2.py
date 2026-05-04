@@ -19,6 +19,7 @@ from smt_observation import SmtObservationConfig, SmtObservationEncoder
 from stage1_model import Stage1Config, Stage1GRUModel
 from stage2_bridge import Stage2BridgeConfig, Stage2BridgeModel
 from stage2_softprompt import forward_action_ce_with_soft_prompt, generate_action_with_soft_prompt
+from train_e2e_smt_gru import E2ESmtConfig, E2ESmtGruModel
 from verification_runtime import (
     build_movement_params,
     calculate_distance,
@@ -191,6 +192,40 @@ def _load_smt_encoder(stage2_payload: dict, feature_dim: int, device: torch.devi
     return encoder
 
 
+def _load_e2e_policy(e2e_ckpt: Path, device: torch.device):
+    payload = torch.load(e2e_ckpt, map_location=device)
+    config = payload.get("config", {})
+    e2e_cfg_data = config.get("e2e_smt_gru")
+    bridge_cfg_data = config.get("bridge")
+    if not isinstance(e2e_cfg_data, dict) or not isinstance(bridge_cfg_data, dict):
+        raise RuntimeError("Invalid e2e checkpoint: missing e2e_smt_gru/bridge config")
+
+    e2e_model = E2ESmtGruModel(E2ESmtConfig(**e2e_cfg_data)).to(device)
+    e2e_state = payload.get("e2e_state_dict")
+    if not isinstance(e2e_state, dict):
+        raise RuntimeError("Invalid e2e checkpoint: missing e2e_state_dict")
+    e2e_model.load_state_dict(e2e_state, strict=True)
+    e2e_model.eval()
+
+    bridge = Stage2BridgeModel(Stage2BridgeConfig(**bridge_cfg_data)).to(device)
+    bridge_state = payload.get("bridge_state_dict")
+    if not isinstance(bridge_state, dict):
+        raise RuntimeError("Invalid e2e checkpoint: missing bridge_state_dict")
+    bridge.load_state_dict(bridge_state, strict=True)
+    bridge.eval()
+    return e2e_model, bridge, payload
+
+
+def _pil_rgbd_tensor(rgb_img: Image.Image, depth_img: Image.Image, image_size: int, device: torch.device):
+    rgb = rgb_img.convert("RGB").resize((image_size, image_size), Image.BILINEAR)
+    depth = depth_img.convert("L").resize((image_size, image_size), Image.BILINEAR)
+    rgb_np = np.asarray(rgb, dtype=np.float32) / 255.0
+    depth_np = np.asarray(depth, dtype=np.float32) / 255.0
+    rgb_t = torch.from_numpy(rgb_np).permute(2, 0, 1)
+    depth_t = torch.from_numpy(depth_np).unsqueeze(0)
+    return torch.cat([rgb_t, depth_t], dim=0).to(device)
+
+
 def _rank_action_by_ce(processor, model, messages, images, soft_prompt):
     best_action = None
     best_loss = None
@@ -292,6 +327,7 @@ def run_single_verification_stage2(
     qwen: Qwen3VLWrapper,
     stage1_model,
     smt_encoder,
+    e2e_model,
     bridge,
     extractor: ClipHeatDepthExtractor,
     sample: dict,
@@ -300,6 +336,7 @@ def run_single_verification_stage2(
     action_select_mode: str,
     expected_feature_dim: int,
     policy_mode: str,
+    image_size: int,
 ):
     scenario_id = sample["scenario_id"]
     anomaly_type = sample["anomaly_type"]
@@ -341,6 +378,9 @@ def run_single_verification_stage2(
     feature_history = []
     pose_history = []
     prev_action_history = []
+    e2e_image_history = []
+    e2e_pose_history = []
+    e2e_action_history = []
 
     with torch.inference_mode():
         while steps < max_steps:
@@ -395,6 +435,28 @@ def run_single_verification_stage2(
                     )
                     smt_context = smt_seq[:, -1, :].to(next(bridge.parameters()).device)
                 soft_prompt = bridge(h_t.to(next(bridge.parameters()).device), smt_context=smt_context)
+            elif policy_mode == "e2e_smt_gru":
+                e2e_device = next(e2e_model.parameters()).device
+                image_t = _pil_rgbd_tensor(rgb_pil, depth_pil, int(image_size), e2e_device)
+                pose_t = torch.tensor(
+                    [[pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]]],
+                    dtype=torch.float32,
+                    device=e2e_device,
+                )
+                e2e_image_history.append(image_t.unsqueeze(0).unsqueeze(0))
+                e2e_pose_history.append(pose_t.unsqueeze(1))
+                # E2ESmtGruModel shifts action_ids internally, so the current slot can be a dummy.
+                action_seq = list(e2e_action_history) + [0]
+                actions_t = torch.tensor([action_seq], dtype=torch.long, device=e2e_device)
+                images_t = torch.cat(e2e_image_history, dim=1)
+                poses_t = torch.cat(e2e_pose_history, dim=1)
+                smt_seq, h_seq, _ = e2e_model(images_t, poses_t, actions_t)
+                h_t = h_seq[:, -1, :]
+                smt_context = smt_seq[:, -1, :]
+                soft_prompt = bridge(
+                    h_t.to(next(bridge.parameters()).device),
+                    smt_context=smt_context.to(next(bridge.parameters()).device),
+                )
 
             x0, y0, z0, _, _, rz0 = pose
             prompt = build_prompt(x0, y0, z0, rz0, task=task_desc)
@@ -408,7 +470,7 @@ def run_single_verification_stage2(
                     ],
                 }
             ]
-            if policy_mode == "stage2_softprompt" and action_select_mode == "rank_actions":
+            if policy_mode in ("stage2_softprompt", "e2e_smt_gru") and action_select_mode == "rank_actions":
                 action, best_ce = _rank_action_by_ce(
                     processor=qwen.processor,
                     model=qwen.model,
@@ -418,7 +480,7 @@ def run_single_verification_stage2(
                 )
                 action = action or "AUTO_FORWARD"
                 print(f"  [{steps}] {action} (ce={best_ce:.4f})")
-            elif policy_mode == "stage2_softprompt":
+            elif policy_mode in ("stage2_softprompt", "e2e_smt_gru"):
                 raw = generate_action_with_soft_prompt(
                     processor=qwen.processor,
                     model=qwen.model,
@@ -447,6 +509,8 @@ def run_single_verification_stage2(
             dispatch_action(cli, action, **movement_params)
             if policy_mode == "stage2_softprompt":
                 prev_action_id = ACTIONS.index(action) if action in ACTIONS else 0
+            elif policy_mode == "e2e_smt_gru":
+                e2e_action_history.append(ACTIONS.index(action) if action in ACTIONS else 0)
             steps += 1
 
     if final_pose is None:
@@ -504,10 +568,11 @@ def main():
     parser.add_argument("--model_dir", default=str(Path(__file__).resolve().parent / "models" / "qwen3_vl_sft_GTAV_20260403"))
     parser.add_argument("--stage1_ckpt", default=None)
     parser.add_argument("--stage2_ckpt", default=None)
+    parser.add_argument("--e2e_ckpt", default=None, help="Path to e2e_smt_gru best.pt/last.pt")
     parser.add_argument("--stage2_lora_dir", default=None, help="Optional LoRA dir, default is sibling lora_best")
     parser.add_argument(
         "--policy_mode",
-        choices=["stage2_softprompt", "vla_direct"],
+        choices=["stage2_softprompt", "e2e_smt_gru", "vla_direct"],
         default="stage2_softprompt",
         help="Policy to run in online verification",
     )
@@ -518,6 +583,7 @@ def main():
     parser.add_argument("--stride", type=int, default=48)
     parser.add_argument("--tile_batch_size", type=int, default=128)
     parser.add_argument("--use_null_text_baseline", action="store_true")
+    parser.add_argument("--image_size", type=int, default=96, help="RGBD resize size for policy_mode=e2e_smt_gru")
     parser.add_argument(
         "--action_select_mode",
         choices=["rank_actions", "generate_parse"],
@@ -541,6 +607,8 @@ def main():
     if args.policy_mode == "stage2_softprompt":
         if not args.stage1_ckpt or not args.stage2_ckpt:
             raise RuntimeError("policy_mode=stage2_softprompt requires --stage1_ckpt and --stage2_ckpt")
+    if args.policy_mode == "e2e_smt_gru" and not args.e2e_ckpt:
+        raise RuntimeError("policy_mode=e2e_smt_gru requires --e2e_ckpt")
     if args.policy_mode == "vla_direct" and args.action_select_mode == "rank_actions":
         print("Warning: policy_mode=vla_direct does not support rank_actions; switching to generate_parse.")
         args.action_select_mode = "generate_parse"
@@ -561,6 +629,8 @@ def main():
     qwen = Qwen3VLWrapper(args.model_dir).load()
     if args.stage2_lora_dir:
         lora_dir = Path(args.stage2_lora_dir)
+    elif args.e2e_ckpt:
+        lora_dir = Path(args.e2e_ckpt).resolve().parent / "lora_best"
     elif args.stage2_ckpt:
         lora_dir = Path(args.stage2_ckpt).resolve().parent / "lora_best"
     else:
@@ -575,6 +645,7 @@ def main():
     stage1_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     stage1_model = None
     smt_encoder = None
+    e2e_model = None
     bridge = None
     extractor = None
     expected_feature_dim = -1
@@ -612,6 +683,8 @@ def main():
             use_null_text_baseline=bool(args.use_null_text_baseline),
             device=args.clip_device,
         )
+    elif args.policy_mode == "e2e_smt_gru":
+        e2e_model, bridge, _ = _load_e2e_policy(Path(args.e2e_ckpt), stage1_device)
 
     cli = DroneSimClient(host=args.host, port=int(args.port))
     time.sleep(float(args.sleep_s))
@@ -668,6 +741,7 @@ def main():
                 qwen=qwen,
                 stage1_model=stage1_model,
                 smt_encoder=smt_encoder,
+                e2e_model=e2e_model,
                 bridge=bridge,
                 extractor=extractor,
                 sample=sample,
@@ -676,6 +750,7 @@ def main():
                 action_select_mode=str(args.action_select_mode),
                 expected_feature_dim=expected_feature_dim,
                 policy_mode=str(args.policy_mode),
+                image_size=int(args.image_size),
             )
             results.append(result)
             # Save progress after every completed sample to avoid losing finished results.
