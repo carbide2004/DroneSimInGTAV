@@ -1,4 +1,5 @@
 import argparse
+from contextlib import contextmanager
 import json
 import math
 import os
@@ -27,6 +28,53 @@ from verification_runtime import (
     read_jsonl,
     write_json,
 )
+
+
+def _sync_cuda_for_timing(enabled: bool):
+    if enabled and torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+@contextmanager
+def _timed_stage(timing: dict, stage: str, sync_cuda: bool):
+    _sync_cuda_for_timing(sync_cuda)
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        _sync_cuda_for_timing(sync_cuda)
+        elapsed = time.perf_counter() - start
+        timing[stage] = timing.get(stage, 0.0) + float(elapsed)
+
+
+def _format_timing(timing: dict):
+    total = max(float(timing.get("step_total", timing.get("sample_total", 0.0))), 1e-8)
+    parts = []
+    for key, value in sorted(timing.items(), key=lambda item: item[1], reverse=True):
+        if key in {"step_total", "sample_total"}:
+            continue
+        parts.append(f"{key}={value:.3f}s/{value / total * 100.0:.1f}%")
+    return ", ".join(parts)
+
+
+def _aggregate_timing(results):
+    aggregate = {}
+    step_count = 0
+    for result in results:
+        timing = result.get("timing")
+        if not isinstance(timing, dict):
+            continue
+        for key, value in timing.get("sample", {}).items():
+            aggregate[f"sample.{key}"] = aggregate.get(f"sample.{key}", 0.0) + float(value)
+        for step in timing.get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            step_count += 1
+            for key, value in step.items():
+                if key == "index":
+                    continue
+                aggregate[f"step.{key}"] = aggregate.get(f"step.{key}", 0.0) + float(value)
+    return aggregate, step_count
 
 
 def _read_json(path: Path):
@@ -303,6 +351,7 @@ def _calculate_stage2_metrics(results):
 
 def _print_stage2_summary(results):
     metrics = _calculate_stage2_metrics(results)
+    timing_aggregate, timing_steps = _aggregate_timing(results)
     print(f"\n{'=' * 50}")
     print("STAGE2 VERIFICATION SUMMARY")
     print(f"{'=' * 50}")
@@ -319,6 +368,18 @@ def _print_stage2_summary(results):
         print(f"Avg stop distance (overall): {metrics['avg_stop_distance_overall']:.2f}m")
     else:
         print("Avg stop distance (overall): inf")
+    if timing_aggregate:
+        print("\nTiming totals:")
+        for key, value in sorted(timing_aggregate.items(), key=lambda item: item[1], reverse=True):
+            if key.endswith(".step_total") or key.endswith(".sample_total"):
+                continue
+            if key.startswith("step.") and timing_steps > 0:
+                print(f"{key}: total={value:.3f}s, avg/step={value / timing_steps:.3f}s")
+            else:
+                print(f"{key}: total={value:.3f}s")
+        if timing_steps > 0:
+            step_total = timing_aggregate.get("step.step_total", 0.0)
+            print(f"step.total: total={step_total:.3f}s, avg/step={step_total / timing_steps:.3f}s")
     print(f"{'=' * 50}")
 
 
@@ -337,7 +398,13 @@ def run_single_verification_stage2(
     expected_feature_dim: int,
     policy_mode: str,
     image_size: int,
+    profile_timing: bool,
+    timing_sync_cuda: bool,
+    timing_step_log: bool,
 ):
+    sample_start = time.perf_counter()
+    sample_timing = {}
+    step_timings = []
     scenario_id = sample["scenario_id"]
     anomaly_type = sample["anomaly_type"]
     anomaly_pos = sample["anomaly_position"]
@@ -346,10 +413,12 @@ def run_single_verification_stage2(
     task_desc = sample["task_description"]
 
     print(f"\n=== Testing {scenario_id} (stage2) ===")
-    anomaly_result = create_anomaly_at_position(
-        cli, anomaly_type, (anomaly_pos["x"], anomaly_pos["y"], anomaly_pos["z"])
-    )
+    with _timed_stage(sample_timing, "create_anomaly", bool(profile_timing and timing_sync_cuda)):
+        anomaly_result = create_anomaly_at_position(
+            cli, anomaly_type, (anomaly_pos["x"], anomaly_pos["y"], anomaly_pos["z"])
+        )
     if anomaly_result is None:
+        sample_timing["sample_total"] = float(time.perf_counter() - sample_start)
         return {
             "scenario_id": scenario_id,
             "success": False,
@@ -358,17 +427,19 @@ def run_single_verification_stage2(
             "final_distance": float("inf"),
             "path_efficiency": 0.0,
             "anomaly_type": anomaly_type,
+            "timing": {"sample": sample_timing, "steps": step_timings},
         }
 
-    cli.set_posture(
-        start_pose["x"],
-        start_pose["y"],
-        start_pose["z"],
-        start_pose.get("rx", 0.0),
-        start_pose.get("ry", 0.0),
-        start_pose.get("rz", 0.0),
-    )
-    time.sleep(1.0)
+    with _timed_stage(sample_timing, "set_start_pose_wait", bool(profile_timing and timing_sync_cuda)):
+        cli.set_posture(
+            start_pose["x"],
+            start_pose["y"],
+            start_pose["z"],
+            start_pose.get("rx", 0.0),
+            start_pose.get("ry", 0.0),
+            start_pose.get("rz", 0.0),
+        )
+        time.sleep(1.0)
 
     steps = 0
     stopped_by_model = False
@@ -384,133 +455,155 @@ def run_single_verification_stage2(
 
     with torch.inference_mode():
         while steps < max_steps:
-            pose = cli.get_pose()
+            step_start = time.perf_counter()
+            step_timing = {"index": int(steps)}
+            with _timed_stage(step_timing, "get_pose", bool(profile_timing and timing_sync_cuda)):
+                pose = cli.get_pose()
             if pose is None:
                 continue
             final_pose = pose
 
-            cap = cli.capture()
+            with _timed_stage(step_timing, "capture", bool(profile_timing and timing_sync_cuda)):
+                cap = cli.capture()
             if cap is None:
                 continue
             w, h, rgb_bytes, depth_bytes = cap
-            rgb_pil = rgb_bytes_to_pil(w, h, rgb_bytes)
-            depth_pil = depth_bytes_to_pil(w, h, depth_bytes)
+            with _timed_stage(step_timing, "decode_rgbd", bool(profile_timing and timing_sync_cuda)):
+                rgb_pil = rgb_bytes_to_pil(w, h, rgb_bytes)
+                depth_pil = depth_bytes_to_pil(w, h, depth_bytes)
 
             soft_prompt = None
             if policy_mode == "stage2_softprompt":
-                feat = extractor.extract(rgb_pil, depth_pil, task_desc)
-                if int(feat.shape[0]) != int(expected_feature_dim):
-                    raise RuntimeError(
-                        f"Feature dim mismatch in online verification: got {int(feat.shape[0])}, "
-                        f"expected {int(expected_feature_dim)} from stage1 input_proj."
-                    )
-                feat_t = torch.from_numpy(feat).to(next(stage1_model.parameters()).device).unsqueeze(0).unsqueeze(0)
-                x = stage1_model.input_proj(feat_t)
-                out, h_prev = stage1_model.gru(x, h_prev)
-                h_t = out[:, 0, :]
-                smt_context = None
-                if smt_encoder is not None:
+                with _timed_stage(step_timing, "stage2_clip_extract", bool(profile_timing and timing_sync_cuda)):
+                    feat = extractor.extract(rgb_pil, depth_pil, task_desc)
+                with _timed_stage(step_timing, "stage2_gru_smt_bridge", bool(profile_timing and timing_sync_cuda)):
+                    if int(feat.shape[0]) != int(expected_feature_dim):
+                        raise RuntimeError(
+                            f"Feature dim mismatch in online verification: got {int(feat.shape[0])}, "
+                            f"expected {int(expected_feature_dim)} from stage1 input_proj."
+                        )
+                    feat_t = torch.from_numpy(feat).to(next(stage1_model.parameters()).device).unsqueeze(0).unsqueeze(0)
+                    x = stage1_model.input_proj(feat_t)
+                    out, h_prev = stage1_model.gru(x, h_prev)
+                    h_t = out[:, 0, :]
+                    smt_context = None
+                    if smt_encoder is not None:
+                        pose_t = torch.tensor(
+                            [[pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]]],
+                            dtype=torch.float32,
+                            device=next(smt_encoder.parameters()).device,
+                        )
+                        feature_history.append(feat_t.to(next(smt_encoder.parameters()).device))
+                        pose_history.append(pose_t.unsqueeze(1))
+                        prev_action_history.append(
+                            torch.tensor(
+                                [[prev_action_id]],
+                                dtype=torch.long,
+                                device=next(smt_encoder.parameters()).device,
+                            )
+                        )
+                        smt_features = torch.cat(feature_history, dim=1)
+                        smt_poses = torch.cat(pose_history, dim=1)
+                        smt_prev_actions = torch.cat(prev_action_history, dim=1)
+                        smt_seq = smt_encoder(
+                            smt_features,
+                            smt_poses,
+                            smt_prev_actions,
+                            action_ids_are_previous=True,
+                        )
+                        smt_context = smt_seq[:, -1, :].to(next(bridge.parameters()).device)
+                    soft_prompt = bridge(h_t.to(next(bridge.parameters()).device), smt_context=smt_context)
+            elif policy_mode == "e2e_smt_gru":
+                with _timed_stage(step_timing, "e2e_rgbd_preprocess", bool(profile_timing and timing_sync_cuda)):
+                    e2e_device = next(e2e_model.parameters()).device
+                    image_t = _pil_rgbd_tensor(rgb_pil, depth_pil, int(image_size), e2e_device)
                     pose_t = torch.tensor(
                         [[pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]]],
                         dtype=torch.float32,
-                        device=next(smt_encoder.parameters()).device,
+                        device=e2e_device,
                     )
-                    feature_history.append(feat_t.to(next(smt_encoder.parameters()).device))
-                    pose_history.append(pose_t.unsqueeze(1))
-                    prev_action_history.append(
-                        torch.tensor(
-                            [[prev_action_id]],
-                            dtype=torch.long,
-                            device=next(smt_encoder.parameters()).device,
-                        )
+                with _timed_stage(step_timing, "e2e_smt_gru_bridge", bool(profile_timing and timing_sync_cuda)):
+                    e2e_image_history.append(image_t.unsqueeze(0).unsqueeze(0))
+                    e2e_pose_history.append(pose_t.unsqueeze(1))
+                    # E2ESmtGruModel shifts action_ids internally, so the current slot can be a dummy.
+                    action_seq = list(e2e_action_history) + [0]
+                    actions_t = torch.tensor([action_seq], dtype=torch.long, device=e2e_device)
+                    images_t = torch.cat(e2e_image_history, dim=1)
+                    poses_t = torch.cat(e2e_pose_history, dim=1)
+                    smt_seq, h_seq, _ = e2e_model(images_t, poses_t, actions_t)
+                    h_t = h_seq[:, -1, :]
+                    smt_context = smt_seq[:, -1, :]
+                    soft_prompt = bridge(
+                        h_t.to(next(bridge.parameters()).device),
+                        smt_context=smt_context.to(next(bridge.parameters()).device),
                     )
-                    smt_features = torch.cat(feature_history, dim=1)
-                    smt_poses = torch.cat(pose_history, dim=1)
-                    smt_prev_actions = torch.cat(prev_action_history, dim=1)
-                    smt_seq = smt_encoder(
-                        smt_features,
-                        smt_poses,
-                        smt_prev_actions,
-                        action_ids_are_previous=True,
-                    )
-                    smt_context = smt_seq[:, -1, :].to(next(bridge.parameters()).device)
-                soft_prompt = bridge(h_t.to(next(bridge.parameters()).device), smt_context=smt_context)
-            elif policy_mode == "e2e_smt_gru":
-                e2e_device = next(e2e_model.parameters()).device
-                image_t = _pil_rgbd_tensor(rgb_pil, depth_pil, int(image_size), e2e_device)
-                pose_t = torch.tensor(
-                    [[pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]]],
-                    dtype=torch.float32,
-                    device=e2e_device,
-                )
-                e2e_image_history.append(image_t.unsqueeze(0).unsqueeze(0))
-                e2e_pose_history.append(pose_t.unsqueeze(1))
-                # E2ESmtGruModel shifts action_ids internally, so the current slot can be a dummy.
-                action_seq = list(e2e_action_history) + [0]
-                actions_t = torch.tensor([action_seq], dtype=torch.long, device=e2e_device)
-                images_t = torch.cat(e2e_image_history, dim=1)
-                poses_t = torch.cat(e2e_pose_history, dim=1)
-                smt_seq, h_seq, _ = e2e_model(images_t, poses_t, actions_t)
-                h_t = h_seq[:, -1, :]
-                smt_context = smt_seq[:, -1, :]
-                soft_prompt = bridge(
-                    h_t.to(next(bridge.parameters()).device),
-                    smt_context=smt_context.to(next(bridge.parameters()).device),
-                )
 
-            x0, y0, z0, _, _, rz0 = pose
-            prompt = build_prompt(x0, y0, z0, rz0, task=task_desc)
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image"},
-                        {"type": "image"},
-                    ],
-                }
-            ]
+            with _timed_stage(step_timing, "build_prompt", bool(profile_timing and timing_sync_cuda)):
+                x0, y0, z0, _, _, rz0 = pose
+                prompt = build_prompt(x0, y0, z0, rz0, task=task_desc)
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image"},
+                            {"type": "image"},
+                        ],
+                    }
+                ]
             if policy_mode in ("stage2_softprompt", "e2e_smt_gru") and action_select_mode == "rank_actions":
-                action, best_ce = _rank_action_by_ce(
-                    processor=qwen.processor,
-                    model=qwen.model,
-                    messages=messages,
-                    images=[rgb_pil, depth_pil],
-                    soft_prompt=soft_prompt,
-                )
+                with _timed_stage(step_timing, "vlm_rank_actions", bool(profile_timing and timing_sync_cuda)):
+                    action, best_ce = _rank_action_by_ce(
+                        processor=qwen.processor,
+                        model=qwen.model,
+                        messages=messages,
+                        images=[rgb_pil, depth_pil],
+                        soft_prompt=soft_prompt,
+                    )
                 action = action or "AUTO_FORWARD"
                 print(f"  [{steps}] {action} (ce={best_ce:.4f})")
             elif policy_mode in ("stage2_softprompt", "e2e_smt_gru"):
-                raw = generate_action_with_soft_prompt(
-                    processor=qwen.processor,
-                    model=qwen.model,
-                    messages=messages,
-                    images=[rgb_pil, depth_pil],
-                    soft_prompt=soft_prompt,
-                    max_new_tokens=16,
-                    do_sample=False,
-                )
+                with _timed_stage(step_timing, "vlm_generate_parse", bool(profile_timing and timing_sync_cuda)):
+                    raw = generate_action_with_soft_prompt(
+                        processor=qwen.processor,
+                        model=qwen.model,
+                        messages=messages,
+                        images=[rgb_pil, depth_pil],
+                        soft_prompt=soft_prompt,
+                        max_new_tokens=16,
+                        do_sample=False,
+                    )
                 action = parse_action(raw) or "AUTO_FORWARD"
                 print(f"  [{steps}] {action}")
             else:
                 # Baseline policy: direct VLA action generation without GRU soft prompt.
-                raw = qwen.generate_action(
-                    prompt_text=prompt,
-                    rgb_pil=rgb_pil,
-                    depth_pil=depth_pil,
-                    max_new_tokens=16,
-                    do_sample=False,
-                )
+                with _timed_stage(step_timing, "vla_direct_generate_parse", bool(profile_timing and timing_sync_cuda)):
+                    raw = qwen.generate_action(
+                        prompt_text=prompt,
+                        rgb_pil=rgb_pil,
+                        depth_pil=depth_pil,
+                        max_new_tokens=16,
+                        do_sample=False,
+                    )
                 action = parse_action(raw) or "AUTO_FORWARD"
                 print(f"  [{steps}] {action}")
             if action == "AUTO_STOP_REACHED":
                 stopped_by_model = True
+                step_timing["step_total"] = float(time.perf_counter() - step_start)
+                step_timings.append(step_timing)
+                if profile_timing and timing_step_log:
+                    print(f"      timing: total={step_timing['step_total']:.3f}s, {_format_timing(step_timing)}")
                 break
-            dispatch_action(cli, action, **movement_params)
+            with _timed_stage(step_timing, "dispatch_action", bool(profile_timing and timing_sync_cuda)):
+                dispatch_action(cli, action, **movement_params)
             if policy_mode == "stage2_softprompt":
                 prev_action_id = ACTIONS.index(action) if action in ACTIONS else 0
             elif policy_mode == "e2e_smt_gru":
                 e2e_action_history.append(ACTIONS.index(action) if action in ACTIONS else 0)
+            step_timing["step_total"] = float(time.perf_counter() - step_start)
+            step_timings.append(step_timing)
+            if profile_timing and timing_step_log:
+                print(f"      timing: total={step_timing['step_total']:.3f}s, {_format_timing(step_timing)}")
             steps += 1
 
     if final_pose is None:
@@ -546,6 +639,9 @@ def run_single_verification_stage2(
             f"target=({target_position['x']:.2f}, {target_position['y']:.2f}, {target_position['z']:.2f}), "
             f"distance={final_distance:.2f}"
         )
+    sample_timing["sample_total"] = float(time.perf_counter() - sample_start)
+    if profile_timing:
+        print(f"  Sample timing: total={sample_timing['sample_total']:.3f}s, {_format_timing(sample_timing)}")
     return {
         "scenario_id": scenario_id,
         "success": success,
@@ -558,6 +654,7 @@ def run_single_verification_stage2(
         "spl": float(spl),
         "anomaly_type": anomaly_type,
         "task_description": task_desc,
+        "timing": {"sample": sample_timing, "steps": step_timings},
     }
 
 
@@ -602,7 +699,21 @@ def main():
     parser.add_argument("--output_file", default=None)
     parser.add_argument("--resume_from_output", dest="resume_from_output", action="store_true", help="Resume from existing output JSON")
     parser.add_argument("--no_resume_from_output", dest="resume_from_output", action="store_false", help="Disable resume from output JSON")
+    parser.add_argument("--profile_timing", action="store_true", help="Print per-step online verification timing")
+    parser.add_argument(
+        "--no_timing_sync_cuda",
+        dest="timing_sync_cuda",
+        action="store_false",
+        help="Do not synchronize CUDA before/after timed stages",
+    )
+    parser.add_argument(
+        "--no_timing_step_log",
+        dest="timing_step_log",
+        action="store_false",
+        help="Disable per-step timing logs while keeping timing in result JSON",
+    )
     parser.set_defaults(resume_from_output=True)
+    parser.set_defaults(timing_sync_cuda=True, timing_step_log=True)
     args = parser.parse_args()
     if args.policy_mode == "stage2_softprompt":
         if not args.stage1_ckpt or not args.stage2_ckpt:
@@ -695,6 +806,7 @@ def main():
     start_index = 0
 
     def _save_progress(status: str, current_index: int, error_message: str = None):
+        timing_aggregate, timing_steps = _aggregate_timing(results)
         payload = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "status": status,
@@ -702,6 +814,10 @@ def main():
             "completed_samples": len(results),
             "current_index": int(current_index),
             "summary_statistics": _calculate_stage2_metrics(results),
+            "timing_statistics": {
+                "step_count": int(timing_steps),
+                "totals_sec": timing_aggregate,
+            },
             "results": results,
         }
         if error_message is not None:
@@ -751,6 +867,9 @@ def main():
                 expected_feature_dim=expected_feature_dim,
                 policy_mode=str(args.policy_mode),
                 image_size=int(args.image_size),
+                profile_timing=bool(args.profile_timing),
+                timing_sync_cuda=bool(args.timing_sync_cuda),
+                timing_step_log=bool(args.timing_step_log),
             )
             results.append(result)
             # Save progress after every completed sample to avoid losing finished results.
