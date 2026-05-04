@@ -1,15 +1,19 @@
 import argparse
 import json
+import os
 import random
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
+from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoModel, AutoTokenizer
 
 from action_mapping import ACTIONS
@@ -35,6 +39,54 @@ def _write_json(path: Path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+def _dist_is_active():
+    return dist.is_available() and dist.is_initialized()
+
+
+def _is_main_process():
+    return not _dist_is_active() or dist.get_rank() == 0
+
+
+def _unwrap_model(model):
+    return getattr(model, "module", model)
+
+
+def _setup_distributed(args):
+    if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:
+        device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
+        return {
+            "distributed": False,
+            "rank": 0,
+            "local_rank": 0,
+            "world_size": 1,
+            "device": device,
+        }
+    if not torch.cuda.is_available():
+        raise RuntimeError("Distributed training requires CUDA in this script.")
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ.get("LOCAL_RANK", rank))
+    world_size = int(os.environ["WORLD_SIZE"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend=str(args.dist_backend), init_method="env://")
+    return {
+        "distributed": True,
+        "rank": rank,
+        "local_rank": local_rank,
+        "world_size": world_size,
+        "device": torch.device(f"cuda:{local_rank}"),
+    }
+
+
+def _cleanup_distributed():
+    if _dist_is_active():
+        dist.destroy_process_group()
+
+
+def _print_rank0(message: str):
+    if _is_main_process():
+        print(message, flush=True)
 
 
 def _masked_mean_pool(last_hidden_state, attention_mask):
@@ -185,7 +237,14 @@ def _split_trajectory_ids(entries: Sequence[Dict], val_ratio: float, seed: int):
     return train_ids, val_ids
 
 
-def _build_loaders(dataset_json: Path, batch_size: int, val_ratio: float, seed: int, num_workers: int):
+def _build_loaders(
+    dataset_json: Path,
+    batch_size: int,
+    val_ratio: float,
+    seed: int,
+    num_workers: int,
+    distributed: bool,
+):
     data = _read_json(dataset_json)
     if not isinstance(data, list):
         raise RuntimeError("Dataset JSON must be a list.")
@@ -203,23 +262,30 @@ def _build_loaders(dataset_json: Path, batch_size: int, val_ratio: float, seed: 
     val_dataset = TrajectoryDataset(data, val_ids)
     try:
         from torch.utils.data import DataLoader
+        from torch.utils.data.distributed import DistributedSampler
     except Exception as e:
         raise RuntimeError("PyTorch DataLoader is required for e2e training.") from e
+    train_sampler = DistributedSampler(train_dataset, shuffle=True, seed=int(seed)) if distributed else None
+    val_sampler = DistributedSampler(val_dataset, shuffle=False, seed=int(seed)) if distributed else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=int(batch_size),
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         num_workers=int(num_workers),
         collate_fn=_collate_trajectories,
+        pin_memory=torch.cuda.is_available(),
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=int(batch_size),
         shuffle=False,
+        sampler=val_sampler,
         num_workers=int(num_workers),
         collate_fn=_collate_trajectories,
+        pin_memory=torch.cuda.is_available(),
     )
-    return train_loader, val_loader, {
+    return train_loader, val_loader, train_sampler, val_sampler, {
         "dataset_json": str(dataset_json),
         "total_trajectories": len(train_ids) + len(val_ids),
         "train_trajectories": len(train_ids),
@@ -481,14 +547,19 @@ def _run_epoch(
     lambda_vlm_action: float,
     temperature: float,
     train: bool,
+    epoch: int,
+    log_interval: int,
+    rank: int,
 ):
     e2e_model.train(mode=train)
     bridge.train(mode=train)
     qwen.model.train(mode=train)
     text_encoder.eval()
     totals = {"loss": 0.0, "vlm_action_loss": 0.0, "gru_action_loss": 0.0, "awareness_loss": 0.0, "batches": 0}
+    phase = "train" if train else "val"
+    start_time = time.time()
 
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader, start=1):
         raw_batch = batch["raw_batch"]
         prepared = _prepare_batch(raw_batch, dataset_root, image_size=image_size, max_len=max_len, device=device)
         smt_seq, h_seq, gru_logits = e2e_model(prepared["images"], prepared["poses"], prepared["action_ids"])
@@ -504,10 +575,11 @@ def _run_epoch(
         align_texts = prepared["align_texts"]
         if len(align_texts) >= 2:
             text_embeddings = _encode_texts(align_texts, tokenizer, text_encoder, device=device)
+            e2e_base = _unwrap_model(e2e_model)
             h_vectors = torch.stack([h_seq[i, j] for i, j in prepared["align_positions"]], dim=0)
             awareness_loss = _info_nce_loss(
-                e2e_model.project_h(h_vectors),
-                e2e_model.project_e(text_embeddings),
+                e2e_base.project_h(h_vectors),
+                e2e_base.project_e(text_embeddings),
                 temperature=temperature,
             )
         else:
@@ -564,9 +636,38 @@ def _run_epoch(
         totals["gru_action_loss"] += float(gru_action_loss.item())
         totals["awareness_loss"] += float(awareness_loss.item())
         totals["batches"] += 1
+        if rank == 0 and int(log_interval) > 0 and (batch_idx % int(log_interval) == 0):
+            elapsed = max(time.time() - start_time, 1e-6)
+            avg = {k: totals[k] / max(totals["batches"], 1) for k in totals if k != "batches"}
+            _print_rank0(
+                f"[{phase}] epoch={epoch} step={batch_idx}/{len(loader)} "
+                f"loss={avg['loss']:.4f} vlm={avg['vlm_action_loss']:.4f} "
+                f"gru={avg['gru_action_loss']:.4f} aw={avg['awareness_loss']:.4f} "
+                f"batches_per_s={totals['batches'] / elapsed:.3f}"
+            )
 
     if totals["batches"] == 0:
         return totals
+    if _dist_is_active():
+        stats = torch.tensor(
+            [
+                totals["loss"],
+                totals["vlm_action_loss"],
+                totals["gru_action_loss"],
+                totals["awareness_loss"],
+                float(totals["batches"]),
+            ],
+            dtype=torch.float64,
+            device=device,
+        )
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        totals = {
+            "loss": float(stats[0].item()),
+            "vlm_action_loss": float(stats[1].item()),
+            "gru_action_loss": float(stats[2].item()),
+            "awareness_loss": float(stats[3].item()),
+            "batches": int(stats[4].item()),
+        }
     batches = totals["batches"]
     return {k: (v / batches if k != "batches" else v) for k, v in totals.items()}
 
@@ -587,6 +688,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--dist_backend", default="nccl")
+    parser.add_argument("--log_interval", type=int, default=1)
     parser.add_argument("--d_model", type=int, default=128)
     parser.add_argument("--visual_embed_dim", type=int, default=96)
     parser.add_argument("--pose_embed_dim", type=int, default=16)
@@ -612,22 +715,37 @@ def main():
     parser.add_argument("--lora_targets", default="q_proj,k_proj,v_proj,o_proj")
     args = parser.parse_args()
 
+    dist_state = _setup_distributed(args)
+    rank = int(dist_state["rank"])
+    local_rank = int(dist_state["local_rank"])
+    world_size = int(dist_state["world_size"])
+    device = dist_state["device"]
+
     repo_root = _repo_root()
     hf_token = load_hf_token_from_env_file(repo_root)
-    random.seed(int(args.seed))
-    np.random.seed(int(args.seed))
-    torch.manual_seed(int(args.seed))
+    random.seed(int(args.seed) + rank)
+    np.random.seed(int(args.seed) + rank)
+    torch.manual_seed(int(args.seed) + rank)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(args.seed) + rank)
 
-    device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if _is_main_process():
+        output_dir.mkdir(parents=True, exist_ok=True)
+    if _dist_is_active():
+        dist.barrier()
     dataset_root = Path(args.dataset_root)
-    train_loader, val_loader, split_meta = _build_loaders(
+    train_loader, val_loader, train_sampler, val_sampler, split_meta = _build_loaders(
         dataset_json=Path(args.dataset_json),
         batch_size=int(args.batch_size),
         val_ratio=float(args.val_ratio),
         seed=int(args.seed),
         num_workers=int(args.num_workers),
+        distributed=bool(dist_state["distributed"]),
+    )
+    _print_rank0(
+        f"Distributed: enabled={bool(dist_state['distributed'])} world_size={world_size} "
+        f"device={device} output_dir={output_dir}"
     )
 
     tokenizer = AutoTokenizer.from_pretrained(args.text_model_name, token=hf_token)
@@ -670,6 +788,16 @@ def main():
     )
     bridge = Stage2BridgeModel(bridge_cfg).to(device)
 
+    if bool(dist_state["distributed"]):
+        e2e_model = DDP(e2e_model, device_ids=[local_rank], output_device=local_rank)
+        bridge = DDP(bridge, device_ids=[local_rank], output_device=local_rank)
+        qwen._model = DDP(
+            qwen.model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=True,
+        )
+
     lora_params = [p for p in qwen.model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
         [
@@ -708,11 +836,16 @@ def main():
         },
         "split_meta": split_meta,
     }
-    _write_json(output_dir / "config.json", config_payload)
+    if _is_main_process():
+        _write_json(output_dir / "config.json", config_payload)
 
     best_val = float("inf")
     history = []
     for epoch in range(1, int(args.epochs) + 1):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+        if val_sampler is not None:
+            val_sampler.set_epoch(epoch)
         train_metrics = _run_epoch(
             e2e_model=e2e_model,
             bridge=bridge,
@@ -731,6 +864,9 @@ def main():
             lambda_vlm_action=float(args.lambda_vlm_action),
             temperature=float(args.temperature),
             train=True,
+            epoch=epoch,
+            log_interval=int(args.log_interval),
+            rank=rank,
         )
         with torch.no_grad():
             val_metrics = _run_epoch(
@@ -751,35 +887,41 @@ def main():
                 lambda_vlm_action=float(args.lambda_vlm_action),
                 temperature=float(args.temperature),
                 train=False,
+                epoch=epoch,
+                log_interval=0,
+                rank=rank,
             )
 
         record = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
-        history.append(record)
-        print(
-            f"epoch={epoch} "
-            f"train_loss={train_metrics['loss']:.4f} train_vlm={train_metrics['vlm_action_loss']:.4f} "
-            f"train_gru={train_metrics['gru_action_loss']:.4f} train_aw={train_metrics['awareness_loss']:.4f} "
-            f"val_loss={val_metrics['loss']:.4f} val_vlm={val_metrics['vlm_action_loss']:.4f} "
-            f"val_gru={val_metrics['gru_action_loss']:.4f} val_aw={val_metrics['awareness_loss']:.4f}"
-        )
-        payload = {
-            "epoch": epoch,
-            "e2e_state_dict": e2e_model.state_dict(),
-            "bridge_state_dict": bridge.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "config": config_payload,
-            "history": history,
-        }
-        torch.save(payload, output_dir / "last.pt")
-        qwen.model.save_pretrained(output_dir / "lora_last")
-        if val_metrics["loss"] < best_val:
-            best_val = val_metrics["loss"]
-            torch.save(payload, output_dir / "best.pt")
-            qwen.model.save_pretrained(output_dir / "lora_best")
+        if _is_main_process():
+            history.append(record)
+            _print_rank0(
+                f"epoch={epoch} "
+                f"train_loss={train_metrics['loss']:.4f} train_vlm={train_metrics['vlm_action_loss']:.4f} "
+                f"train_gru={train_metrics['gru_action_loss']:.4f} train_aw={train_metrics['awareness_loss']:.4f} "
+                f"val_loss={val_metrics['loss']:.4f} val_vlm={val_metrics['vlm_action_loss']:.4f} "
+                f"val_gru={val_metrics['gru_action_loss']:.4f} val_aw={val_metrics['awareness_loss']:.4f}"
+            )
+            payload = {
+                "epoch": epoch,
+                "e2e_state_dict": _unwrap_model(e2e_model).state_dict(),
+                "bridge_state_dict": _unwrap_model(bridge).state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "config": config_payload,
+                "history": history,
+            }
+            torch.save(payload, output_dir / "last.pt")
+            _unwrap_model(qwen.model).save_pretrained(output_dir / "lora_last")
+            if val_metrics["loss"] < best_val:
+                best_val = val_metrics["loss"]
+                torch.save(payload, output_dir / "best.pt")
+                _unwrap_model(qwen.model).save_pretrained(output_dir / "lora_best")
 
-    _write_json(output_dir / "history.json", history)
-    print(f"E2E SMT+GRU training finished. best_val_loss={best_val:.4f}")
-    print(f"Output dir: {output_dir}")
+    if _is_main_process():
+        _write_json(output_dir / "history.json", history)
+        _print_rank0(f"E2E SMT+GRU training finished. best_val_loss={best_val:.4f}")
+        _print_rank0(f"Output dir: {output_dir}")
+    _cleanup_distributed()
     return 0
 
 

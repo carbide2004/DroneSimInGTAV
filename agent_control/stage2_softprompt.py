@@ -8,6 +8,10 @@ def _model_device(model):
         return None
 
 
+def _unwrap_model(model):
+    return getattr(model, "module", model)
+
+
 def _prepare_base_inputs(processor, model, messages, images=None):
     try:
         chat_text = processor.apply_chat_template(messages, add_generation_prompt=True)
@@ -38,7 +42,8 @@ def _prepend_soft_prompt(model, inputs, soft_prompt):
         raise RuntimeError("processor output missing input_ids")
     input_ids = inputs["input_ids"]
 
-    embed_layer = model.get_input_embeddings()
+    base_model = _unwrap_model(model)
+    embed_layer = base_model.get_input_embeddings()
     token_embeds = embed_layer(input_ids)
     soft_prompt = soft_prompt.to(token_embeds.device, dtype=token_embeds.dtype)
     inputs_embeds = torch.cat([soft_prompt, token_embeds], dim=1)
@@ -142,7 +147,7 @@ def generate_action_with_soft_prompt(
         gen_kwargs["top_k"] = int(top_k)
 
     with torch.inference_mode():
-        out_ids = model.generate(**model_inputs, **gen_kwargs)
+        out_ids = _unwrap_model(model).generate(**model_inputs, **gen_kwargs)
 
     full_text = processor.batch_decode(out_ids, skip_special_tokens=True)
     if not full_text:
