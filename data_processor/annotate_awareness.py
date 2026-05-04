@@ -2,9 +2,10 @@ import argparse
 import json
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 from pathlib import Path
+from queue import Empty
 
 from PIL import Image
 from tqdm import tqdm
@@ -318,12 +319,26 @@ def _run_model_for_item(model, item, max_new_tokens):
     }
 
 
-def _process_worker(worker_id, gpu_id, model_dir, assigned_trajectories, max_new_tokens):
+def _process_worker(worker_id, gpu_id, model_dir, assigned_trajectories, max_new_tokens, progress_queue=None):
     model = _load_model(model_dir=model_dir, gpu_id=gpu_id)
     updates = []
     processed = 0
+    if progress_queue is not None:
+        progress_queue.put({
+            "type": "worker_loaded",
+            "worker_id": int(worker_id),
+            "gpu_id": int(gpu_id),
+        })
 
     for trajectory in assigned_trajectories:
+        if progress_queue is not None:
+            progress_queue.put({
+                "type": "trajectory_started",
+                "worker_id": int(worker_id),
+                "gpu_id": int(gpu_id),
+                "trajectory_id": trajectory["trajectory_id"],
+                "num_steps": int(trajectory["num_steps"]),
+            })
         for item in trajectory["items"]:
             result = _run_model_for_item(model=model, item=item, max_new_tokens=max_new_tokens)
             update = {"global_idx": int(item["global_idx"])}
@@ -334,6 +349,14 @@ def _process_worker(worker_id, gpu_id, model_dir, assigned_trajectories, max_new
                 update["vector_dim"] = int(result["vector_dim"])
             updates.append(update)
             processed += 1
+            if progress_queue is not None:
+                progress_queue.put({
+                    "type": "step_done",
+                    "worker_id": int(worker_id),
+                    "gpu_id": int(gpu_id),
+                    "trajectory_id": trajectory["trajectory_id"],
+                    "processed": int(processed),
+                })
 
     return {
         "worker_id": int(worker_id),
@@ -357,40 +380,98 @@ def _run_parallel_generation(trajectory_tasks, args):
     assignments = _assign_trajectories_to_workers(trajectory_tasks, len(args.gpu_ids))
     futures = []
     results = []
-
+    total_steps = sum(task["num_steps"] for task in trajectory_tasks)
+    worker_states = {}
     mp_context = get_context("spawn")
-    with ProcessPoolExecutor(max_workers=len(assignments), mp_context=mp_context) as executor:
-        for worker_id, assigned_trajectories in enumerate(assignments):
-            gpu_id = args.gpu_ids[worker_id % len(args.gpu_ids)]
-            futures.append(
-                executor.submit(
-                    _process_worker,
-                    worker_id,
-                    gpu_id,
-                    args.model_dir,
-                    assigned_trajectories,
-                    args.max_new_tokens,
+    with mp_context.Manager() as manager:
+        progress_queue = manager.Queue()
+        with ProcessPoolExecutor(max_workers=len(assignments), mp_context=mp_context) as executor:
+            for worker_id, assigned_trajectories in enumerate(assignments):
+                gpu_id = args.gpu_ids[worker_id % len(args.gpu_ids)]
+                futures.append(
+                    executor.submit(
+                        _process_worker,
+                        worker_id,
+                        gpu_id,
+                        args.model_dir,
+                        assigned_trajectories,
+                        args.max_new_tokens,
+                        progress_queue,
+                    )
                 )
-            )
+            pending = set(futures)
+            with tqdm(total=total_steps, desc="Generating awareness", unit="entry") as pbar:
+                while pending:
+                    try:
+                        message = progress_queue.get(timeout=0.5)
+                        _handle_progress_message(message, worker_states, pbar)
+                    except Empty:
+                        pass
 
-        with tqdm(total=sum(task["num_steps"] for task in trajectory_tasks), desc="Generating awareness", unit="entry") as pbar:
-            for future in as_completed(futures):
-                result = future.result()
-                results.append(result)
-                pbar.update(int(result["processed"]))
+                    finished = [future for future in pending if future.done()]
+                    for future in finished:
+                        result = future.result()
+                        results.append(result)
+                        pending.remove(future)
+
+                _drain_progress_queue(progress_queue, worker_states, pbar)
 
     return results
 
 
 def _run_single_worker_generation(trajectory_tasks, args):
-    result = _process_worker(
-        worker_id=0,
-        gpu_id=args.gpu_ids[0],
-        model_dir=args.model_dir,
-        assigned_trajectories=trajectory_tasks,
-        max_new_tokens=args.max_new_tokens,
-    )
-    return [result]
+    return _run_parallel_generation(trajectory_tasks, args)
+
+
+def _format_worker_state(worker_states):
+    if not worker_states:
+        return "waiting for workers"
+    parts = []
+    for worker_id in sorted(worker_states.keys()):
+        state = worker_states[worker_id]
+        gpu_id = state.get("gpu_id", "?")
+        processed = state.get("processed", 0)
+        status = state.get("status", "starting")
+        trajectory_id = state.get("trajectory_id")
+        if trajectory_id:
+            parts.append(f"w{worker_id}/g{gpu_id}:{processed} {status} {trajectory_id}")
+        else:
+            parts.append(f"w{worker_id}/g{gpu_id}:{processed} {status}")
+    return " | ".join(parts)
+
+
+def _handle_progress_message(message, worker_states, pbar):
+    msg_type = message.get("type")
+    worker_id = int(message.get("worker_id", -1))
+    state = worker_states.setdefault(worker_id, {"processed": 0})
+    if "gpu_id" in message:
+        state["gpu_id"] = int(message["gpu_id"])
+
+    if msg_type == "worker_loaded":
+        state["status"] = "loaded"
+    elif msg_type == "trajectory_started":
+        state["status"] = "running"
+        state["trajectory_id"] = str(message.get("trajectory_id", ""))
+        state["trajectory_steps"] = int(message.get("num_steps", 0))
+    elif msg_type == "step_done":
+        state["status"] = "running"
+        state["trajectory_id"] = str(message.get("trajectory_id", ""))
+        new_processed = int(message.get("processed", state.get("processed", 0)))
+        delta = max(0, new_processed - int(state.get("processed", 0)))
+        state["processed"] = new_processed
+        if delta > 0:
+            pbar.update(delta)
+
+    pbar.set_postfix_str(_format_worker_state(worker_states), refresh=False)
+
+
+def _drain_progress_queue(progress_queue, worker_states, pbar):
+    while True:
+        try:
+            message = progress_queue.get_nowait()
+            _handle_progress_message(message, worker_states, pbar)
+        except Empty:
+            break
 
 
 def main():
