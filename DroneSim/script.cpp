@@ -67,11 +67,6 @@ enum AutoCollectEvent {
     AUTO_EVENT_FIGHT = 3
 };
 
-// Verification mode variables
-static bool g_verificationMode = false;
-static int g_verificationSteps = 0;
-static Position3D g_anomalyPos;
-static std::string g_anomalyType;
 
 // Fire maintenance system
 static bool g_fireMaintenanceActive = false;
@@ -399,7 +394,7 @@ static void create_fight_near_pos(float ox, float oy, float oz) {
         ENTITY::SET_ENTITY_AS_MISSION_ENTITY(peds[i], true, true);
         // PED::SET_PED_RELATIONSHIP_GROUP_HASH(peds[i], (i < n / 2) ? groupA : groupB);
         
-        // Make fighting NPCs invincible so they don't die during verification
+        // Keep fighting NPCs alive so generated scenes remain stable during collection.
         ENTITY::SET_ENTITY_INVINCIBLE(peds[i], true);
         PED::SET_PED_CAN_BE_KNOCKED_OFF_VEHICLE(peds[i], false);
         PED::SET_PED_CAN_BE_DRAGGED_OUT(peds[i], false);
@@ -528,147 +523,6 @@ static void create_accident_near_camera() {
     create_accident_near_pos(camPos.x, camPos.y, camPos.z);
 }
 
-static void save_verification_sample() {
-    if (!g_verificationMode) return;
-    
-    // Get current camera pose
-    Any cam = CAM::GET_RENDERING_CAM();
-    Vector3 cam_pos = CAM::GET_CAM_COORD(cam);
-    Vector3 cam_rot = CAM::GET_CAM_ROT(cam, 2);
-    
-    // 转换为Position3D进行处理
-    Position3D pos(cam_pos.x, cam_pos.y, cam_pos.z);
-    Position3D rot(cam_rot.x, cam_rot.y, cam_rot.z);
-    
-    // Create timestamp
-    auto now = std::chrono::system_clock::now();
-    auto time_t = std::chrono::system_clock::to_time_t(now);
-    struct tm tm_info;
-    localtime_s(&tm_info, &time_t);
-    char timestamp[32];
-    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", &tm_info);
-    
-    // Determine task description
-    std::string task_desc;
-    if (g_anomalyType == "fire") {
-        task_desc = "find the exploded car";
-    } else if (g_anomalyType == "fight") {
-        task_desc = "find the street fight";
-    }
-
-    g_verificationSteps -= 12; // Subtract 12 steps for camera rotation
-    
-    // Create verification directory
-    ensure_dir("data");
-    ensure_dir("data\\verification");
-    
-    // Create JSON entry (single line for JSONL format)
-    std::string json_entry = "{";
-    json_entry += "\"scenario_id\": \"verification_" + std::string(timestamp) + "\",";
-    json_entry += "\"anomaly_type\": \"" + g_anomalyType + "\",";
-    json_entry += "\"anomaly_position\": {\"x\": " + std::to_string(g_anomalyPos.x) + 
-                  ", \"y\": " + std::to_string(g_anomalyPos.y) + 
-                  ", \"z\": " + std::to_string(g_anomalyPos.z) + "},";
-    json_entry += "\"start_pose\": {\"x\": " + std::to_string(pos.x) + 
-                  ", \"y\": " + std::to_string(pos.y) + 
-                  ", \"z\": " + std::to_string(pos.z) + 
-                  ", \"rx\": " + std::to_string(rot.x) + 
-                  ", \"ry\": " + std::to_string(rot.y) + 
-                  ", \"rz\": " + std::to_string(rot.z) + "},";
-    json_entry += "\"expected_steps\": " + std::to_string(g_verificationSteps) + ",";
-    json_entry += "\"task_description\": \"" + task_desc + "\",";
-    json_entry += "\"created_time\": \"" + std::string(timestamp) + "\"";
-    json_entry += "}";
-    
-    // Append to verification file
-    std::ofstream file("data\\verification\\samples.jsonl", std::ios::app);
-    if (file.is_open()) {
-        file << json_entry << std::endl;  // 添加换行符
-        file.close();
-        LOGI("script", std::string("Verification sample saved: ") + std::to_string(g_verificationSteps) + " steps");
-    } else {
-        LOGE("script", "Failed to save verification sample");
-    }
-    
-    // Reset verification mode
-    g_verificationMode = false;
-    g_verificationSteps = 0;
-}
-
-static void start_verification_mode() {
-    if (g_verificationMode) return;  // Already in verification mode
-    
-    // Randomly choose between fire and fight (0 or 1)
-    srand(static_cast<unsigned int>(time(nullptr)));
-    int choice = rand() % 2;
-    
-    Position3D anomalyPos;
-    
-    if (choice == 0) {
-        // Create fire
-        create_fire_near_camera();
-        g_anomalyType = "fire";
-        // Wait for fire to be created and position to be set
-        WAIT(500);  // Increased wait time
-        if (g_fireReady.load(std::memory_order_acquire)) {
-            anomalyPos.x = g_firePos[0];
-            anomalyPos.y = g_firePos[1];
-            anomalyPos.z = g_firePos[2];
-        } else {
-            LOGE("script", "Fire creation failed");
-            return;
-        }
-    } else {
-        // Create fight
-        create_fight_near_camera();
-        g_anomalyType = "fight";
-        // Wait for fight to be created and position to be set
-        WAIT(500);  // Increased wait time
-        if (g_fightReady.load(std::memory_order_acquire)) {
-            anomalyPos.x = g_fightPos[0];
-            anomalyPos.y = g_fightPos[1];
-            anomalyPos.z = g_fightPos[2];
-        } else {
-            LOGE("script", "Fight creation failed");
-            return;
-        }
-    }
-    
-    g_anomalyPos = anomalyPos;
-    
-    // Get ground height for the anomaly position
-    float groundZ = anomalyPos.z;
-    bool hasGround = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(anomalyPos.x, anomalyPos.y, anomalyPos.z, &groundZ, false);
-    if (hasGround) {
-        anomalyPos.z = groundZ;  // Update local variable
-        g_anomalyPos.z = groundZ;  // Update stored position
-    }
-    
-    // Move camera to 2m above the anomaly (using ground level)
-    Any cam = CAM::GET_RENDERING_CAM();
-    if (cam) {
-        float targetX = anomalyPos.x;
-        float targetY = anomalyPos.y;
-        float targetZ = anomalyPos.z + 2.0f;
-        
-        CAM::SET_CAM_COORD(cam, targetX, targetY, targetZ);
-        
-        LOGI("script", std::string("Verification mode started: ") + g_anomalyType + 
-             " at (" + std::to_string(anomalyPos.x) + ", " + 
-             std::to_string(anomalyPos.y) + ", " + std::to_string(anomalyPos.z) + 
-             ") camera at (" + std::to_string(targetX) + ", " + 
-             std::to_string(targetY) + ", " + std::to_string(targetZ) + ")");
-    } else {
-        LOGE("script", "Failed to get camera handle");
-        return;
-    }
-    
-    // Initialize verification mode
-    g_verificationMode = true;
-    g_verificationSteps = 0;
-    
-    WAIT(0);  // Allow one frame for camera to update
-}
 
 static float wrap_angle_deg(float a) {
     while (a > 180.0f) a -= 360.0f;
@@ -1156,31 +1010,26 @@ void scriptMain()
             {
                 record_step("AUTO_FORWARD", STEPSIZE, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(STEPSIZE, 0.0f, 0.0f);
-                if (g_verificationMode) g_verificationSteps++;
             }
             if (shift.isKeyDown())
             {
                 record_step("AUTO_UP", 0.0f, 0.0f, STEPSIZE, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(0.0f, 0.0f, STEPSIZE);
-                if (g_verificationMode) g_verificationSteps++;
             }
             if (ctrl.isKeyDown())
             {
                 record_step("AUTO_DOWN", 0.0f, 0.0f, -STEPSIZE, 0.0f, 0.0f, 0.0f);
                 moveCameraDelta(0.0f, 0.0f, -STEPSIZE);
-                if (g_verificationMode) g_verificationSteps++;
             }
             if (Q.isKeyDown())
             {
                 record_step("AUTO_YAW_LEFT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, YAW_STEPSIZE);
                 rotateCameraDelta(0.0f, 0.0f, YAW_STEPSIZE);
-                if (g_verificationMode) g_verificationSteps++;
             }
             if (E.isKeyDown())
             {
                 record_step("AUTO_YAW_RIGHT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -YAW_STEPSIZE);
                 rotateCameraDelta(0.0f, 0.0f, -YAW_STEPSIZE);
-                if (g_verificationMode) g_verificationSteps++;
             }
             if (F12.isKeyDown())
             {
@@ -1199,14 +1048,6 @@ void scriptMain()
                 record_step("AUTO_STOP_REACHED", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
                 stop_recording_session();
             }
-            if (F8.isKeyDown())
-            {
-                start_verification_mode();
-            }
-            if (F9.isKeyDown())
-            {
-                save_verification_sample();
-            }
         }
         if (F10.isKeyDown()) {
             startNewCamera();
@@ -1218,9 +1059,6 @@ void scriptMain()
             StopCamera();
             scriptStatus = scriptStop;
             stop_recording_session();
-            // Reset verification mode when exiting camera mode
-            g_verificationMode = false;
-            g_verificationSteps = 0;
             LOGI("script", "Camera stopped and returned to player view");
         }
 
@@ -1374,7 +1212,7 @@ void scriptMain()
                     WAIT(100);  // Wait for camera to stop
                 }
                 
-                // Make player invincible and invisible for verification
+                // Make player invincible and invisible during scenario setup.
                 PLAYER::SET_PLAYER_INVINCIBLE(PLAYER::PLAYER_ID(), true);
                 ENTITY::SET_ENTITY_VISIBLE(player, false, false);
                 ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, false);
@@ -1400,7 +1238,7 @@ void scriptMain()
         }
         else if (cmd == "RESTORE_PLAYER")
         {
-            // Restore player to normal state after verification
+            // Restore player to normal state after scenario interaction.
             Ped player = PLAYER::PLAYER_PED_ID();
             if (player) {
                 // Temporarily switch to player view for restoration
