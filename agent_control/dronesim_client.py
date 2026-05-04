@@ -68,7 +68,7 @@ class DroneSimClient:
         payload = struct.pack("fff", dx, dy, dz)
         s = self._send(TYPE_MOVE, 2, payload)
         self._recv(s)
-        time.sleep(0.5)
+        time.sleep(0.1)
 
     def move_to(self, x, y, z):
         """Move camera to absolute position (keeping current rotation)"""
@@ -82,7 +82,7 @@ class DroneSimClient:
         payload = struct.pack("fff", rx, ry, rz)
         s = self._send(TYPE_ROTATE, 3, payload)
         self._recv(s)
-        time.sleep(0.5)
+        time.sleep(0.1)
 
     def set_rotation(self, rx, ry, rz):
         """Set camera to absolute rotation (keeping current position)"""
@@ -97,13 +97,13 @@ class DroneSimClient:
         payload = struct.pack("ffffff", x, y, z, rx, ry, rz)
         s = self._send(TYPE_SET_POSTURE, 16, payload)
         self._recv(s)
-        time.sleep(0.5)
+        time.sleep(0.1)
 
     def set_fov(self, fov):
         payload = struct.pack("f", fov)
         s = self._send(TYPE_SET_FOV, 4, payload)
         self._recv(s)
-        time.sleep(0.5)
+        time.sleep(0.1)
 
     def capture(self):
         s = self._send(TYPE_CAPTURE, 5)
@@ -113,7 +113,7 @@ class DroneSimClient:
         rgb_size, depth_size, w, h = struct.unpack("IIII", p[:16])
         rgb = p[16:16+rgb_size]
         depth = p[16+rgb_size:16+rgb_size+depth_size]
-        time.sleep(2.0)
+        time.sleep(0.5)
         return w, h, rgb, depth
 
     def get_pose(self):
@@ -122,25 +122,25 @@ class DroneSimClient:
         if not p or len(p) < 24:
             return None
         x,y,z,rx,ry,rz = struct.unpack("ffffff", p)
-        time.sleep(0.5)
+        time.sleep(0.1)
         return x,y,z,rx,ry,rz
 
     def set_time(self, hour, minute, second):
         payload = struct.pack("iii", int(hour), int(minute), int(second))
         s = self._send(TYPE_SET_TIME, 7, payload)
         self._recv(s)
-        time.sleep(0.5)
+        time.sleep(0.1)
 
     def set_weather(self, name):
         data = name.encode('ascii')
         s = self._send(TYPE_SET_WEATHER, 8, data)
         self._recv(s)
-        time.sleep(0.5)
+        time.sleep(0.1)
 
     def stop_camera(self):
         s = self._send(TYPE_STOP_CAMERA, 9)
         self._recv(s)
-        time.sleep(0.5)
+        time.sleep(0.1)
 
     def create_accident(self):
         s = self._send(TYPE_CREATE_ACCIDENT, 11)
