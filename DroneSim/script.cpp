@@ -18,25 +18,26 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <atomic>
 #include "command_queue.h"
  
-volatile bool g_poseReady = false;
+std::atomic<bool> g_poseReady{false};
 float g_pose[6] = {0};
 
-volatile bool g_accidentReady = false;
+std::atomic<bool> g_accidentReady{false};
 float g_accidentPos[3] = {0};
 
-volatile bool g_recordingEnabled = false;
-volatile int g_recordingStep = 0;
+std::atomic<bool> g_recordingEnabled{false};
+std::atomic<int> g_recordingStep{0};
 char g_recordingSessionDir[260] = {0};
 char g_recordingRequestedSession[128] = {0};
 char g_recordingRequestedTask[256] = {0};
 
-volatile bool g_fireReady = false;
+std::atomic<bool> g_fireReady{false};
 float g_firePos[3] = {0};
 int g_fireId = -1;
 
-volatile bool g_fightReady = false;
+std::atomic<bool> g_fightReady{false};
 float g_fightPos[3] = {0};
 
 static std::vector<int> g_spawnedFireIds;
@@ -161,7 +162,7 @@ static void write_metadata(const std::string& base, AutoCollectEvent event_type,
 }
 
 static void start_recording_session(const char* task) {
-    if (g_recordingEnabled) return;
+    if (g_recordingEnabled.load(std::memory_order_acquire)) return;
     ensure_dir("data");
     ensure_dir("data\\manual");
     std::string name = (g_recordingRequestedSession[0] != '\0') ? std::string(g_recordingRequestedSession) : make_timestamp_session();
@@ -172,18 +173,18 @@ static void start_recording_session(const char* task) {
     std::memset(g_recordingSessionDir, 0, sizeof(g_recordingSessionDir));
     size_t n = std::min<size_t>(base.size(), sizeof(g_recordingSessionDir) - 1);
     std::memcpy(g_recordingSessionDir, base.data(), n);
-    g_recordingStep = 0;
+    g_recordingStep.store(0, std::memory_order_release);
     if (g_recordingStepsFile.is_open()) g_recordingStepsFile.close();
     g_recordingStepsFile.open(base + "\\steps.jsonl", std::ios::out | std::ios::binary);
-    g_recordingEnabled = g_recordingStepsFile.is_open();
-    if (g_recordingEnabled) LOGI("script", std::string("Recording started: ") + g_recordingSessionDir);
+    g_recordingEnabled.store(g_recordingStepsFile.is_open(), std::memory_order_release);
+    if (g_recordingEnabled.load(std::memory_order_acquire)) LOGI("script", std::string("Recording started: ") + g_recordingSessionDir);
     else LOGE("script", "Recording start failed");
 }
 
 static void stop_recording_session(AutoCollectEvent event_type, const Position3D& target, 
                                    const Position3D& start_pos, float start_yaw, int final_steps, const std::string& task) {
-    if (!g_recordingEnabled) return;
-    g_recordingEnabled = false;
+    if (!g_recordingEnabled.load(std::memory_order_acquire)) return;
+    g_recordingEnabled.store(false, std::memory_order_release);
     if (g_recordingStepsFile.is_open()) {
         g_recordingStepsFile.flush();
         g_recordingStepsFile.close();
@@ -200,8 +201,8 @@ static void stop_recording_session(AutoCollectEvent event_type, const Position3D
 
 // 保持向后兼容的重载函数
 static void stop_recording_session() {
-    if (!g_recordingEnabled) return;
-    g_recordingEnabled = false;
+    if (!g_recordingEnabled.load(std::memory_order_acquire)) return;
+    g_recordingEnabled.store(false, std::memory_order_release);
     if (g_recordingStepsFile.is_open()) {
         g_recordingStepsFile.flush();
         g_recordingStepsFile.close();
@@ -210,7 +211,7 @@ static void stop_recording_session() {
 }
 
 static void record_step(const char* action, float dx, float dy, float dz, float drx, float dry, float drz) {
-    if (!g_recordingEnabled) return;
+    if (!g_recordingEnabled.load(std::memory_order_acquire)) return;
     if (g_recordingSessionDir[0] == '\0') return;
     if (!g_recordingStepsFile.is_open()) return;
     Any cam = CAM::GET_RENDERING_CAM();
@@ -227,7 +228,7 @@ static void record_step(const char* action, float dx, float dy, float dz, float 
     void* depth_ptr = nullptr; int depth_size = export_get_depth_buffer(&depth_ptr);
     int w = export_get_last_color_width();
     int h = export_get_last_color_height();
-    int step = g_recordingStep;
+    int step = g_recordingStep.load(std::memory_order_acquire);
     char namebuf[64];
     sprintf_s(namebuf, "step_%06d.bin", step);
     std::string rgb_rel = std::string("RGB/") + namebuf;
@@ -252,11 +253,11 @@ static void record_step(const char* action, float dx, float dy, float dz, float 
         << ",\"depth\":{\"path\":\"" << depth_rel << "\",\"width\":" << export_get_last_depth_width() << ",\"height\":" << export_get_last_depth_height() << ",\"bytes\":" << depth_size << "}"
         << "}\n";
     g_recordingStepsFile.flush();
-    g_recordingStep = step + 1;
+    g_recordingStep.store(step + 1, std::memory_order_release);
 }
 
 static void create_fire_near_pos(float ox, float oy, float oz) {
-    g_fireReady = false;
+    g_fireReady.store(false, std::memory_order_release);
     Vector3 nodePos; float nodeHeading = 0.0f;
     bool ok = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(ox, oy, oz, &nodePos, &nodeHeading, 1, 3.0, 0);
     float px = ok ? nodePos.x : ox;
@@ -338,7 +339,7 @@ static void create_fire_near_pos(float ox, float oy, float oz) {
         }
     }
     
-    g_fireReady = true;
+    g_fireReady.store(true, std::memory_order_release);
 }
 
 static void create_fire_near_camera() {
@@ -348,7 +349,7 @@ static void create_fire_near_camera() {
 }
 
 static void create_fight_near_pos(float ox, float oy, float oz) {
-    g_fightReady = false;
+    g_fightReady.store(false, std::memory_order_release);
     Vector3 nodePos; float nodeHeading = 0.0f;
     bool ok = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(ox, oy, oz, &nodePos, &nodeHeading, 1, 3.0, 0);
     float px = ok ? nodePos.x : ox;
@@ -371,7 +372,7 @@ static void create_fight_near_pos(float ox, float oy, float oz) {
     }
     if (!STREAMING::IS_MODEL_VALID(model) || !STREAMING::HAS_MODEL_LOADED(model)) {
         LOGW("script", "CREATE_FIGHT could not load ped model");
-        g_fightReady = true;
+        g_fightReady.store(true, std::memory_order_release);
         return;
     }
 
@@ -412,7 +413,7 @@ static void create_fight_near_pos(float ox, float oy, float oz) {
     //     AI::TASK_COMBAT_PED(peds[i], peds[i - n / 2], 0, 16);
     // }
 
-    g_fightReady = true;
+    g_fightReady.store(true, std::memory_order_release);
     LOGI("script", std::string("CREATE_FIGHT at ") + std::to_string(g_fightPos[0]) + "," + std::to_string(g_fightPos[1]) + "," + std::to_string(g_fightPos[2]));
 }
 
@@ -423,11 +424,11 @@ static void create_fight_near_camera() {
 }
 
 static void create_accident_near_pos(float ox, float oy, float oz) {
-    g_accidentReady = false;
+    g_accidentReady.store(false, std::memory_order_release);
     Vector3 nodePos{}; float nodeHeading = 0.0f;
     if (!PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(ox, oy, oz, &nodePos, &nodeHeading, 1, 3.0, 0)) {
         g_accidentPos[0] = ox; g_accidentPos[1] = oy; g_accidentPos[2] = oz;
-        g_accidentReady = true;
+        g_accidentReady.store(true, std::memory_order_release);
         LOGE("script", "CREATE_ACCIDENT could not find closest vehicle node");
         return;
     }
@@ -456,7 +457,7 @@ static void create_accident_near_pos(float ox, float oy, float oz) {
 
     if (!any_model_ready) {
         g_accidentPos[0] = nodePos.x; g_accidentPos[1] = nodePos.y; g_accidentPos[2] = nodePos.z;
-        g_accidentReady = true;
+        g_accidentReady.store(true, std::memory_order_release);
         LOGW("script", "CREATE_ACCIDENT no valid vehicle model loaded");
         return;
     }
@@ -513,7 +514,7 @@ static void create_accident_near_pos(float ox, float oy, float oz) {
         if (STREAMING::HAS_MODEL_LOADED(h)) STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(h);
     }
 
-    g_accidentReady = true;
+    g_accidentReady.store(true, std::memory_order_release);
     if (created > 0) {
         LOGI("script", std::string("CREATE_ACCIDENT clustered vehicles created: ") + std::to_string(created));
     } else {
@@ -609,7 +610,7 @@ static void start_verification_mode() {
         g_anomalyType = "fire";
         // Wait for fire to be created and position to be set
         WAIT(500);  // Increased wait time
-        if (g_fireReady) {
+        if (g_fireReady.load(std::memory_order_acquire)) {
             anomalyPos.x = g_firePos[0];
             anomalyPos.y = g_firePos[1];
             anomalyPos.z = g_firePos[2];
@@ -623,7 +624,7 @@ static void start_verification_mode() {
         g_anomalyType = "fight";
         // Wait for fight to be created and position to be set
         WAIT(500);  // Increased wait time
-        if (g_fightReady) {
+        if (g_fightReady.load(std::memory_order_acquire)) {
             anomalyPos.x = g_fightPos[0];
             anomalyPos.y = g_fightPos[1];
             anomalyPos.z = g_fightPos[2];
@@ -739,7 +740,7 @@ static void delete_recording_session() {
     
     // 清空会话目录记录
     std::memset(g_recordingSessionDir, 0, sizeof(g_recordingSessionDir));
-    g_recordingEnabled = false;
+    g_recordingEnabled.store(false, std::memory_order_release);
     
     LOGI("script", "Recording session deleted due to collision");
 }
@@ -889,17 +890,17 @@ static bool generate_scenario(AutoCollectEvent event_type, Position3D& out_targe
     if (event_type == AUTO_EVENT_FIRE) {
         create_fire_near_pos(target_node.x, target_node.y, target_node.z);
         WAIT(1000);
-        if (!g_fireReady) return false;
+        if (!g_fireReady.load(std::memory_order_acquire)) return false;
         out_target = Position3D(g_firePos[0], g_firePos[1], g_firePos[2] + 1.0f);
     } else if (event_type == AUTO_EVENT_FIGHT) {
         create_fight_near_pos(target_node.x, target_node.y, target_node.z);
         WAIT(1000);
-        if (!g_fightReady) return false;
+        if (!g_fightReady.load(std::memory_order_acquire)) return false;
         out_target = Position3D(g_fightPos[0], g_fightPos[1], g_fightPos[2] + 1.0f);
     } else {
         create_accident_near_pos(target_node.x, target_node.y, target_node.z);
         WAIT(1000);
-        if (!g_accidentReady) return false;
+        if (!g_accidentReady.load(std::memory_order_acquire)) return false;
         out_target = Position3D(g_accidentPos[0], g_accidentPos[1], g_accidentPos[2] + 1.0f);
     }
 
@@ -1286,12 +1287,12 @@ void scriptMain()
                 
                 g_pose[0]=pos.x; g_pose[1]=pos.y; g_pose[2]=pos.z;
                 g_pose[3]=rot.x; g_pose[4]=rot.y; g_pose[5]=rot.z;
-                g_poseReady = true;
+                g_poseReady.store(true, std::memory_order_release);
                 LOGD("script", std::string("GET_POSE completed successfully: ") + std::to_string(g_pose[0]) + " " + std::to_string(g_pose[1]) + " " + std::to_string(g_pose[2]) + " " + std::to_string(g_pose[3]) + " " + std::to_string(g_pose[4]) + " " + std::to_string(g_pose[5]));
             } else {
                 LOGE("script", "GET_POSE: No active camera found (cam handle is 0)");
                 // 即使失败也设置g_poseReady，避免server_v2无限等待
-                g_poseReady = true;
+                g_poseReady.store(true, std::memory_order_release);
             }
         }
         else if (scriptStatus == cameraMode) {

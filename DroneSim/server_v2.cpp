@@ -7,8 +7,11 @@
 #include <thread>
 #include <cstring>
 #include <algorithm>
+#include <atomic>
 
 using namespace boost;
+
+static constexpr size_t kWireHeaderSize = 20;
 
 static std::unique_ptr<ServerV2> g_serverV2Instance;
 static asio::io_context g_io_v2;
@@ -17,23 +20,23 @@ static bool g_ws_inited_v2 = false;
 
 extern volatile catchState cmdToCatch;
 
-extern volatile bool g_poseReady;
+extern std::atomic<bool> g_poseReady;
 extern float g_pose[6];
 
-extern volatile bool g_accidentReady;
+extern std::atomic<bool> g_accidentReady;
 extern float g_accidentPos[3];
 
-extern volatile bool g_recordingEnabled;
-extern volatile int g_recordingStep;
+extern std::atomic<bool> g_recordingEnabled;
+extern std::atomic<int> g_recordingStep;
 extern char g_recordingSessionDir[260];
 extern char g_recordingRequestedSession[128];
 extern char g_recordingRequestedTask[256];
 
-extern volatile bool g_fireReady;
+extern std::atomic<bool> g_fireReady;
 extern float g_firePos[3];
 extern int g_fireId;
 
-extern volatile bool g_fightReady;
+extern std::atomic<bool> g_fightReady;
 extern float g_fightPos[3];
 
 
@@ -124,7 +127,7 @@ void ServerV2::handle_client() {
             enqueue_command("CREATE_CAMERA");
             uint64_t cam_id = 1;
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_CAMERA; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = sizeof(cam_id);
-            resp.resize(sizeof(rh) + sizeof(cam_id));
+            resp.resize(kWireHeaderSize + sizeof(cam_id));
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
             std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -154,7 +157,7 @@ void ServerV2::handle_client() {
                 LOGE("server_v2", std::string("MSG_MOVE: Invalid payload size. Expected: ") + std::to_string(sizeof(float) * 3) + ", Got: " + std::to_string(hdr.length));
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_MOVE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
-            resp.resize(sizeof(rh));
+            resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
             std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -175,7 +178,7 @@ void ServerV2::handle_client() {
                 LOGD("server_v2", std::string("Enqueue ") + s);
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_ROTATE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
-            resp.resize(sizeof(rh));
+            resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
             std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -193,7 +196,7 @@ void ServerV2::handle_client() {
                 enqueue_command(s);
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_FOV; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
-            resp.resize(sizeof(rh));
+            resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
             std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -206,14 +209,14 @@ void ServerV2::handle_client() {
         }
         case MSG_GET_POSE: {
             // 确保每次请求都有干净的状态
-            g_poseReady = false;
+            g_poseReady.store(false, std::memory_order_release);
             enqueue_command("GET_POSE");
             LOGD("server_v2", std::string("GET_POSE enqueued"));
             
             // 增加超时时间，给GTA V API更多响应时间
             int tries = 0;
             const int max_tries = 600; // 从300增加到600 (3秒)
-            while (!g_poseReady && tries < max_tries) { 
+            while (!g_poseReady.load(std::memory_order_acquire) && tries < max_tries) { 
                 std::this_thread::sleep_for(std::chrono::milliseconds(5)); 
                 tries++; 
                 
@@ -231,9 +234,10 @@ void ServerV2::handle_client() {
             rh.reserved = 0; 
             rh.request_id = hdr.request_id;
             
-            if (!g_poseReady) {
+            bool pose_ready = g_poseReady.load(std::memory_order_acquire);
+            if (!pose_ready) {
                 rh.length = 0;
-                resp.resize(sizeof(rh));
+                resp.resize(kWireHeaderSize);
                 std::memcpy(resp.data(), &rh.magic[0], 4);
                 std::memcpy(resp.data() + 4, &rh.version, 1);
                 std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -244,7 +248,7 @@ void ServerV2::handle_client() {
                 LOGW("server_v2", std::string("GET_POSE timeout after ") + std::to_string(tries * 5) + "ms - camera mode may be inactive or GTA V API blocked");
             } else {
                 rh.length = sizeof(float)*6;
-                resp.resize(sizeof(rh) + sizeof(float)*6);
+                resp.resize(kWireHeaderSize + sizeof(float)*6);
                 std::memcpy(resp.data(), &rh.magic[0], 4);
                 std::memcpy(resp.data() + 4, &rh.version, 1);
                 std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -267,7 +271,7 @@ void ServerV2::handle_client() {
                 enqueue_command(sCmd);
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_TIME; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
-            resp.resize(sizeof(rh));
+            resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
             std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -286,7 +290,7 @@ void ServerV2::handle_client() {
             std::string sCmd = std::string("SET_WEATHER ") + name;
             enqueue_command(sCmd);
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_WEATHER; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
-            resp.resize(sizeof(rh));
+            resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
             std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -300,7 +304,7 @@ void ServerV2::handle_client() {
         case MSG_STOP_CAMERA: {
             enqueue_command("STOP_CAMERA");
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_STOP_CAMERA; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
-            resp.resize(sizeof(rh));
+            resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
             std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -312,18 +316,19 @@ void ServerV2::handle_client() {
             return;
         }
         case MSG_CREATE_ACCIDENT: {
-            g_accidentReady = false;
+            g_accidentReady.store(false, std::memory_order_release);
             enqueue_command("CREATE_ACCIDENT");
             LOGD("server_v2", std::string("CREATE_ACCIDENT enqueued"));
             int tries = 0;
             // Wait for up to 20 seconds for the accident to be set up and collision detected
-            while (!g_accidentReady && tries < 4000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
+            while (!g_accidentReady.load(std::memory_order_acquire) && tries < 4000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
             
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_ACCIDENT; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
             
-            if (!g_accidentReady) {
+            bool accident_ready = g_accidentReady.load(std::memory_order_acquire);
+            if (!accident_ready) {
                 rh.length = 0;
-                resp.resize(sizeof(rh));
+                resp.resize(kWireHeaderSize);
                 std::memcpy(resp.data(), &rh.magic[0], 4);
                 std::memcpy(resp.data() + 4, &rh.version, 1);
                 std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -334,7 +339,7 @@ void ServerV2::handle_client() {
                 LOGW("server_v2", "CREATE_ACCIDENT timeout");
             } else {
                 rh.length = sizeof(float) * 3;
-                resp.resize(sizeof(rh) + sizeof(float) * 3);
+                resp.resize(kWireHeaderSize + sizeof(float) * 3);
                 std::memcpy(resp.data(), &rh.magic[0], 4);
                 std::memcpy(resp.data() + 4, &rh.version, 1);
                 std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -349,12 +354,12 @@ void ServerV2::handle_client() {
             return;
         }
         case MSG_GET_RECORDING_INFO: {
-            uint8_t enabled = g_recordingEnabled ? 1 : 0;
-            int32_t step = static_cast<int32_t>(g_recordingStep);
+            uint8_t enabled = g_recordingEnabled.load(std::memory_order_acquire) ? 1 : 0;
+            int32_t step = static_cast<int32_t>(g_recordingStep.load(std::memory_order_acquire));
             uint16_t path_len = static_cast<uint16_t>(std::min<size_t>(std::strlen(g_recordingSessionDir), 65535));
             uint32_t payload_len = 1 + 4 + 2 + path_len;
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_GET_RECORDING_INFO; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = payload_len;
-            resp.resize(sizeof(rh) + payload_len);
+            resp.resize(kWireHeaderSize + payload_len);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
             std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -391,7 +396,7 @@ void ServerV2::handle_client() {
                 g_recordingRequestedTask[tn] = '\0';
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_RECORDING_SESSION; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
-            resp.resize(sizeof(rh));
+            resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
             std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -403,15 +408,16 @@ void ServerV2::handle_client() {
             return;
         }
         case MSG_CREATE_FIRE: {
-            g_fireReady = false;
+            g_fireReady.store(false, std::memory_order_release);
             enqueue_command("CREATE_FIRE");
             int tries = 0;
-            while (!g_fireReady && tries < 2000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
+            while (!g_fireReady.load(std::memory_order_acquire) && tries < 2000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
 
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_FIRE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
-            if (!g_fireReady) {
+            bool fire_ready = g_fireReady.load(std::memory_order_acquire);
+            if (!fire_ready) {
                 rh.length = 0;
-                resp.resize(sizeof(rh));
+                resp.resize(kWireHeaderSize);
                 std::memcpy(resp.data(), &rh.magic[0], 4);
                 std::memcpy(resp.data() + 4, &rh.version, 1);
                 std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -422,7 +428,7 @@ void ServerV2::handle_client() {
                 LOGW("server_v2", "CREATE_FIRE timeout");
             } else {
                 rh.length = sizeof(float) * 3 + sizeof(int32_t);
-                resp.resize(sizeof(rh) + rh.length);
+                resp.resize(kWireHeaderSize + rh.length);
                 std::memcpy(resp.data(), &rh.magic[0], 4);
                 std::memcpy(resp.data() + 4, &rh.version, 1);
                 std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -438,15 +444,16 @@ void ServerV2::handle_client() {
             return;
         }
         case MSG_CREATE_FIGHT: {
-            g_fightReady = false;
+            g_fightReady.store(false, std::memory_order_release);
             enqueue_command("CREATE_FIGHT");
             int tries = 0;
-            while (!g_fightReady && tries < 2000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
+            while (!g_fightReady.load(std::memory_order_acquire) && tries < 2000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
 
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_FIGHT; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
-            if (!g_fightReady) {
+            bool fight_ready = g_fightReady.load(std::memory_order_acquire);
+            if (!fight_ready) {
                 rh.length = 0;
-                resp.resize(sizeof(rh));
+                resp.resize(kWireHeaderSize);
                 std::memcpy(resp.data(), &rh.magic[0], 4);
                 std::memcpy(resp.data() + 4, &rh.version, 1);
                 std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -457,7 +464,7 @@ void ServerV2::handle_client() {
                 LOGW("server_v2", "CREATE_FIGHT timeout");
             } else {
                 rh.length = sizeof(float) * 3;
-                resp.resize(sizeof(rh) + rh.length);
+                resp.resize(kWireHeaderSize + rh.length);
                 std::memcpy(resp.data(), &rh.magic[0], 4);
                 std::memcpy(resp.data() + 4, &rh.version, 1);
                 std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -492,7 +499,7 @@ void ServerV2::handle_client() {
                 LOGE("server_v2", std::string("MSG_SET_POSTURE: Invalid payload size. Expected: ") + std::to_string(sizeof(float) * 6) + ", Got: " + std::to_string(hdr.length));
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_POSTURE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
-            resp.resize(sizeof(rh));
+            resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
             std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -513,7 +520,7 @@ void ServerV2::handle_client() {
                 LOGD("server_v2", std::string("Enqueue ") + s);
             }
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_TELEPORT_PLAYER; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
-            resp.resize(sizeof(rh));
+            resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
             std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -527,7 +534,7 @@ void ServerV2::handle_client() {
         case MSG_RESTORE_PLAYER: {
             enqueue_command("RESTORE_PLAYER");
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_RESTORE_PLAYER; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
-            resp.resize(sizeof(rh));
+            resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
             std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -571,7 +578,7 @@ void ServerV2::handle_client() {
                     rh.reserved = 0; 
                     rh.request_id = hdr.request_id; 
                     rh.length = 0;
-                    resp.resize(sizeof(rh));
+                    resp.resize(kWireHeaderSize);
                     std::memcpy(resp.data(), &rh.magic[0], 4);
                     std::memcpy(resp.data() + 4, &rh.version, 1);
                     std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -602,7 +609,7 @@ void ServerV2::handle_client() {
                     rh.reserved = 0; 
                     rh.request_id = hdr.request_id; 
                     rh.length = 0;
-                    resp.resize(sizeof(rh));
+                    resp.resize(kWireHeaderSize);
                     std::memcpy(resp.data(), &rh.magic[0], 4);
                     std::memcpy(resp.data() + 4, &rh.version, 1);
                     std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -624,7 +631,7 @@ void ServerV2::handle_client() {
                 rh.request_id = hdr.request_id; 
                 rh.length = hdr_len;
                 
-                resp.resize(sizeof(rh) + hdr_len);
+                resp.resize(kWireHeaderSize + hdr_len);
                 std::memcpy(resp.data(), &rh.magic[0], 4);
                 std::memcpy(resp.data() + 4, &rh.version, 1);
                 std::memcpy(resp.data() + 5, &rh.type, 1);
@@ -659,7 +666,7 @@ void ServerV2::handle_client() {
                 rh.reserved = 0; 
                 rh.request_id = hdr.request_id; 
                 rh.length = 0;
-                resp.resize(sizeof(rh));
+                resp.resize(kWireHeaderSize);
                 std::memcpy(resp.data(), &rh.magic[0], 4);
                 std::memcpy(resp.data() + 4, &rh.version, 1);
                 std::memcpy(resp.data() + 5, &rh.type, 1);
