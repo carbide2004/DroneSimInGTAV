@@ -57,6 +57,17 @@ def _format_timing(timing: dict):
     return ", ".join(parts)
 
 
+def _safe_path_name(value: str):
+    return "".join(c if c.isalnum() or c in ("-", "_", ".") else "_" for c in str(value)).strip("_") or "sample"
+
+
+def _add_timing_totals(total: dict, timing: dict):
+    for key, value in timing.items():
+        if key == "index":
+            continue
+        total[key] = total.get(key, 0.0) + float(value)
+
+
 def _aggregate_timing(results):
     aggregate = {}
     step_count = 0
@@ -66,6 +77,12 @@ def _aggregate_timing(results):
             continue
         for key, value in timing.get("sample", {}).items():
             aggregate[f"sample.{key}"] = aggregate.get(f"sample.{key}", 0.0) + float(value)
+        steps_total = timing.get("steps_total")
+        if isinstance(steps_total, dict):
+            step_count += int(timing.get("step_count", 0))
+            for key, value in steps_total.items():
+                aggregate[f"step.{key}"] = aggregate.get(f"step.{key}", 0.0) + float(value)
+            continue
         for step in timing.get("steps", []):
             if not isinstance(step, dict):
                 continue
@@ -401,16 +418,25 @@ def run_single_verification_stage2(
     profile_timing: bool,
     timing_sync_cuda: bool,
     timing_step_log: bool,
+    save_step_traces: bool,
+    trace_root: Path,
 ):
     sample_start = time.perf_counter()
     sample_timing = {}
-    step_timings = []
+    step_timing_totals = {}
+    step_count = 0
+    trace_steps = []
     scenario_id = sample["scenario_id"]
     anomaly_type = sample["anomaly_type"]
     anomaly_pos = sample["anomaly_position"]
     start_pose = sample["start_pose"]
     expected_steps = sample["expected_steps"]
     task_desc = sample["task_description"]
+    sample_trace_dir = None
+    if save_step_traces:
+        sample_trace_dir = trace_root / _safe_path_name(str(scenario_id))
+        (sample_trace_dir / "RGB").mkdir(parents=True, exist_ok=True)
+        (sample_trace_dir / "Depth").mkdir(parents=True, exist_ok=True)
 
     print(f"\n=== Testing {scenario_id} (stage2) ===")
     with _timed_stage(sample_timing, "create_anomaly", bool(profile_timing and timing_sync_cuda)):
@@ -419,7 +445,8 @@ def run_single_verification_stage2(
         )
     if anomaly_result is None:
         sample_timing["sample_total"] = float(time.perf_counter() - sample_start)
-        return {
+        timing_payload = {"sample": sample_timing, "steps_total": step_timing_totals, "step_count": 0}
+        result = {
             "scenario_id": scenario_id,
             "success": False,
             "error": "Failed to create anomaly",
@@ -427,8 +454,11 @@ def run_single_verification_stage2(
             "final_distance": float("inf"),
             "path_efficiency": 0.0,
             "anomaly_type": anomaly_type,
-            "timing": {"sample": sample_timing, "steps": step_timings},
+            "timing": timing_payload,
         }
+        if sample_trace_dir is not None:
+            result["trace_dir"] = str(sample_trace_dir)
+        return result
 
     with _timed_stage(sample_timing, "set_start_pose_wait", bool(profile_timing and timing_sync_cuda)):
         cli.set_posture(
@@ -471,8 +501,18 @@ def run_single_verification_stage2(
             with _timed_stage(step_timing, "decode_rgbd", bool(profile_timing and timing_sync_cuda)):
                 rgb_pil = rgb_bytes_to_pil(w, h, rgb_bytes)
                 depth_pil = depth_bytes_to_pil(w, h, depth_bytes)
+            rgb_trace_rel = None
+            depth_trace_rel = None
+            if sample_trace_dir is not None:
+                with _timed_stage(step_timing, "save_observation", bool(profile_timing and timing_sync_cuda)):
+                    rgb_trace_rel = f"RGB/step_{steps:06d}.png"
+                    depth_trace_rel = f"Depth/step_{steps:06d}.png"
+                    rgb_pil.save(sample_trace_dir / rgb_trace_rel)
+                    depth_pil.save(sample_trace_dir / depth_trace_rel)
 
             soft_prompt = None
+            raw = None
+            best_ce = None
             if policy_mode == "stage2_softprompt":
                 with _timed_stage(step_timing, "stage2_clip_extract", bool(profile_timing and timing_sync_cuda)):
                     feat = extractor.extract(rgb_pil, depth_pil, task_desc)
@@ -590,7 +630,26 @@ def run_single_verification_stage2(
             if action == "AUTO_STOP_REACHED":
                 stopped_by_model = True
                 step_timing["step_total"] = float(time.perf_counter() - step_start)
-                step_timings.append(step_timing)
+                _add_timing_totals(step_timing_totals, step_timing)
+                step_count += 1
+                if sample_trace_dir is not None:
+                    trace_steps.append({
+                        "step": int(steps),
+                        "pose": {
+                            "x": float(pose[0]),
+                            "y": float(pose[1]),
+                            "z": float(pose[2]),
+                            "rx": float(pose[3]),
+                            "ry": float(pose[4]),
+                            "rz": float(pose[5]),
+                        },
+                        "rgb_path": rgb_trace_rel,
+                        "depth_path": depth_trace_rel,
+                        "action": action,
+                        "raw_output": raw,
+                        "best_ce": float(best_ce) if best_ce is not None else None,
+                        "timing": step_timing,
+                    })
                 if profile_timing and timing_step_log:
                     print(f"      timing: total={step_timing['step_total']:.3f}s, {_format_timing(step_timing)}")
                 break
@@ -601,7 +660,26 @@ def run_single_verification_stage2(
             elif policy_mode == "e2e_smt_gru":
                 e2e_action_history.append(ACTIONS.index(action) if action in ACTIONS else 0)
             step_timing["step_total"] = float(time.perf_counter() - step_start)
-            step_timings.append(step_timing)
+            _add_timing_totals(step_timing_totals, step_timing)
+            step_count += 1
+            if sample_trace_dir is not None:
+                trace_steps.append({
+                    "step": int(steps),
+                    "pose": {
+                        "x": float(pose[0]),
+                        "y": float(pose[1]),
+                        "z": float(pose[2]),
+                        "rx": float(pose[3]),
+                        "ry": float(pose[4]),
+                        "rz": float(pose[5]),
+                    },
+                    "rgb_path": rgb_trace_rel,
+                    "depth_path": depth_trace_rel,
+                    "action": action,
+                    "raw_output": raw,
+                    "best_ce": float(best_ce) if best_ce is not None else None,
+                    "timing": step_timing,
+                })
             if profile_timing and timing_step_log:
                 print(f"      timing: total={step_timing['step_total']:.3f}s, {_format_timing(step_timing)}")
             steps += 1
@@ -642,7 +720,12 @@ def run_single_verification_stage2(
     sample_timing["sample_total"] = float(time.perf_counter() - sample_start)
     if profile_timing:
         print(f"  Sample timing: total={sample_timing['sample_total']:.3f}s, {_format_timing(sample_timing)}")
-    return {
+    timing_payload = {
+        "sample": sample_timing,
+        "steps_total": step_timing_totals,
+        "step_count": int(step_count),
+    }
+    result = {
         "scenario_id": scenario_id,
         "success": success,
         "stopped_by_model": stopped_by_model,
@@ -654,8 +737,32 @@ def run_single_verification_stage2(
         "spl": float(spl),
         "anomaly_type": anomaly_type,
         "task_description": task_desc,
-        "timing": {"sample": sample_timing, "steps": step_timings},
+        "timing": timing_payload,
     }
+    if sample_trace_dir is not None:
+        result["trace_dir"] = str(sample_trace_dir)
+        write_json(
+            sample_trace_dir / "steps.json",
+            {
+                "scenario_id": scenario_id,
+                "anomaly_type": anomaly_type,
+                "task_description": task_desc,
+                "target_position": target_position,
+                "start_pose": start_pose,
+                "result": {
+                    "success": success,
+                    "stopped_by_model": stopped_by_model,
+                    "actual_steps": steps,
+                    "expected_steps": expected_steps,
+                    "final_distance": final_distance,
+                    "final_position": final_position,
+                    "spl": float(spl),
+                },
+                "timing": timing_payload,
+                "steps": trace_steps,
+            },
+        )
+    return result
 
 
 def main():
@@ -697,6 +804,16 @@ def main():
     parser.add_argument("--root_path", default=None)
     parser.add_argument("--verification_file", default=None)
     parser.add_argument("--output_file", default=None)
+    parser.add_argument(
+        "--save_step_traces",
+        action="store_true",
+        help="Save per-sample steps.json plus RGBD observations for trajectory visualization",
+    )
+    parser.add_argument(
+        "--trace_dir",
+        default=None,
+        help="Directory for --save_step_traces; default is <output_file_parent>/traces_<output_file_stem>",
+    )
     parser.add_argument("--resume_from_output", dest="resume_from_output", action="store_true", help="Resume from existing output JSON")
     parser.add_argument("--no_resume_from_output", dest="resume_from_output", action="store_false", help="Disable resume from output JSON")
     parser.add_argument("--profile_timing", action="store_true", help="Print per-step online verification timing")
@@ -803,6 +920,9 @@ def main():
     results = []
     output_file = Path(args.output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
+    trace_root = Path(args.trace_dir) if args.trace_dir else output_file.parent / f"traces_{output_file.stem}"
+    if bool(args.save_step_traces):
+        trace_root.mkdir(parents=True, exist_ok=True)
     start_index = 0
 
     def _save_progress(status: str, current_index: int, error_message: str = None):
@@ -870,6 +990,8 @@ def main():
                 profile_timing=bool(args.profile_timing),
                 timing_sync_cuda=bool(args.timing_sync_cuda),
                 timing_step_log=bool(args.timing_step_log),
+                save_step_traces=bool(args.save_step_traces),
+                trace_root=trace_root,
             )
             results.append(result)
             # Save progress after every completed sample to avoid losing finished results.
