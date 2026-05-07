@@ -34,6 +34,6 @@ extern std::atomic<bool> g_fireReady;
 extern float g_firePos[3];
 extern int g_fireId;
 
-extern std::atomic<bool> g_fightReady;
-extern float g_fightPos[3];
+extern std::atomic<bool> g_arrestReady;
+extern float g_arrestPos[3];
 void scriptMain();

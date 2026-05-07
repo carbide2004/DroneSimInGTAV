@@ -1,4 +1,4 @@
-#include "script.h"
+﻿#include "script.h"
 #include "export.h"
 #include "main.h"
 #include "utils.h"
@@ -37,8 +37,8 @@ std::atomic<bool> g_fireReady{false};
 float g_firePos[3] = {0};
 int g_fireId = -1;
 
-std::atomic<bool> g_fightReady{false};
-float g_fightPos[3] = {0};
+std::atomic<bool> g_arrestReady{false};
+float g_arrestPos[3] = {0};
 
 static std::vector<int> g_spawnedFireIds;
 static std::vector<Vehicle> g_spawnedVehicles;
@@ -64,7 +64,7 @@ public:
 enum AutoCollectEvent {
     AUTO_EVENT_ACCIDENT = 1,
     AUTO_EVENT_FIRE = 2,
-    AUTO_EVENT_FIGHT = 3
+    AUTO_EVENT_ARREST = 3
 };
 
 
@@ -135,8 +135,8 @@ static void write_metadata(const std::string& base, AutoCollectEvent event_type,
     std::string anomaly_type;
     if (event_type == AUTO_EVENT_FIRE) {
         anomaly_type = "fire";
-    } else if (event_type == AUTO_EVENT_FIGHT) {
-        anomaly_type = "fight";
+    } else if (event_type == AUTO_EVENT_ARREST) {
+        anomaly_type = "arrest";
     } else if (event_type == AUTO_EVENT_ACCIDENT) {
         anomaly_type = "accident";
     }
@@ -343,8 +343,8 @@ static void create_fire_near_camera() {
     create_fire_near_pos(camPos.x, camPos.y, camPos.z);
 }
 
-static void create_fight_near_pos(float ox, float oy, float oz) {
-    g_fightReady.store(false, std::memory_order_release);
+static void create_arrest_near_pos(float ox, float oy, float oz) {
+    g_arrestReady.store(false, std::memory_order_release);
     Vector3 nodePos; float nodeHeading = 0.0f;
     bool ok = PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(ox, oy, oz, &nodePos, &nodeHeading, 1, 3.0, 0);
     float px = ok ? nodePos.x : ox;
@@ -353,69 +353,123 @@ static void create_fight_near_pos(float ox, float oy, float oz) {
     float gz = pz;
     bool hasGround = GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(px, py, pz, &gz, false);
     if (!hasGround) gz = pz;
-    g_fightPos[0] = px;
-    g_fightPos[1] = py;
-    g_fightPos[2] = gz;
+    g_arrestPos[0] = px;
+    g_arrestPos[1] = py;
+    g_arrestPos[2] = gz;
 
-    Hash model = GAMEPLAY::GET_HASH_KEY("g_m_y_lost_01");
-    if (!STREAMING::IS_MODEL_VALID(model)) model = GAMEPLAY::GET_HASH_KEY("a_m_m_business_01");
-    if (!STREAMING::IS_MODEL_VALID(model)) model = GAMEPLAY::GET_HASH_KEY("a_m_m_skater_01");
-    if (STREAMING::IS_MODEL_VALID(model) && !STREAMING::HAS_MODEL_LOADED(model)) {
-        STREAMING::REQUEST_MODEL(model);
-        int tries = 0;
-        while (!STREAMING::HAS_MODEL_LOADED(model) && tries < 200) { WAIT(0); tries++; }
-    }
-    if (!STREAMING::IS_MODEL_VALID(model) || !STREAMING::HAS_MODEL_LOADED(model)) {
-        LOGW("script", "CREATE_FIGHT could not load ped model");
-        g_fightReady.store(true, std::memory_order_release);
-        return;
-    }
+    const Hash police_vehicle_models[] = {
+        GAMEPLAY::GET_HASH_KEY("police"),
+        GAMEPLAY::GET_HASH_KEY("police2"),
+        GAMEPLAY::GET_HASH_KEY("sheriff"),
+    };
+    const int police_vehicle_model_count = static_cast<int>(sizeof(police_vehicle_models) / sizeof(police_vehicle_models[0]));
 
-    // Hash groupA = 0, groupB = 0;
-    // char nameA[] = "FIGHT_A";
-    // char nameB[] = "FIGHT_B";
-    // PED::ADD_RELATIONSHIP_GROUP(nameA, &groupA);
-    // PED::ADD_RELATIONSHIP_GROUP(nameB, &groupB);
-    // PED::SET_RELATIONSHIP_BETWEEN_GROUPS(5, groupA, groupB);
-    // PED::SET_RELATIONSHIP_BETWEEN_GROUPS(5, groupB, groupA);
-
-    const int n = 6;
-    Ped peds[n]{};
-    for (int i = 0; i < n; i++) {
-        float a = (2.0f * 3.14159f) * (static_cast<float>(i) / static_cast<float>(n));
-        float r = 2.0f;
-        float x = g_fightPos[0] + cosf(a) * r;
-        float y = g_fightPos[1] + sinf(a) * r;
-        float z = g_fightPos[2];
-        peds[i] = PED::CREATE_PED(26, model, x, y, z, nodeHeading, true, true);
-        if (peds[i] != 0) {
-            g_spawnedPeds.push_back(peds[i]);
+    Hash police_vehicle_model = 0;
+    for (int i = 0; i < police_vehicle_model_count; ++i) {
+        Hash h = police_vehicle_models[i];
+        if (!STREAMING::IS_MODEL_VALID(h) || !STREAMING::IS_MODEL_A_VEHICLE(h)) continue;
+        if (!STREAMING::HAS_MODEL_LOADED(h)) {
+            STREAMING::REQUEST_MODEL(h);
+            int tries = 0;
+            while (!STREAMING::HAS_MODEL_LOADED(h) && tries < 200) { WAIT(0); tries++; }
         }
-        ENTITY::SET_ENTITY_AS_MISSION_ENTITY(peds[i], true, true);
-        // PED::SET_PED_RELATIONSHIP_GROUP_HASH(peds[i], (i < n / 2) ? groupA : groupB);
-        
-        // Keep fighting NPCs alive so generated scenes remain stable during collection.
-        ENTITY::SET_ENTITY_INVINCIBLE(peds[i], true);
-        PED::SET_PED_CAN_BE_KNOCKED_OFF_VEHICLE(peds[i], false);
-        PED::SET_PED_CAN_BE_DRAGGED_OUT(peds[i], false);
+        if (STREAMING::HAS_MODEL_LOADED(h)) {
+            police_vehicle_model = h;
+            break;
+        }
     }
-    STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(model);
 
-    // for (int i = 0; i < n / 2; i++) {
-    //     AI::TASK_COMBAT_PED(peds[i], peds[n / 2 + (i % (n / 2))], 0, 16);
-    // }
-    // for (int i = n / 2; i < n; i++) {
-    //     AI::TASK_COMBAT_PED(peds[i], peds[i - n / 2], 0, 16);
-    // }
+    Hash cop_model = GAMEPLAY::GET_HASH_KEY("s_m_y_cop_01");
+    if (!STREAMING::IS_MODEL_VALID(cop_model)) cop_model = GAMEPLAY::GET_HASH_KEY("s_m_y_sheriff_01");
+    if (STREAMING::IS_MODEL_VALID(cop_model) && !STREAMING::HAS_MODEL_LOADED(cop_model)) {
+        STREAMING::REQUEST_MODEL(cop_model);
+        int tries = 0;
+        while (!STREAMING::HAS_MODEL_LOADED(cop_model) && tries < 200) { WAIT(0); tries++; }
+    }
 
-    g_fightReady.store(true, std::memory_order_release);
-    LOGI("script", std::string("CREATE_FIGHT at ") + std::to_string(g_fightPos[0]) + "," + std::to_string(g_fightPos[1]) + "," + std::to_string(g_fightPos[2]));
+    Hash suspect_model = GAMEPLAY::GET_HASH_KEY("g_m_y_lost_01");
+    if (!STREAMING::IS_MODEL_VALID(suspect_model)) suspect_model = GAMEPLAY::GET_HASH_KEY("a_m_m_skater_01");
+    if (STREAMING::IS_MODEL_VALID(suspect_model) && !STREAMING::HAS_MODEL_LOADED(suspect_model)) {
+        STREAMING::REQUEST_MODEL(suspect_model);
+        int tries = 0;
+        while (!STREAMING::HAS_MODEL_LOADED(suspect_model) && tries < 200) { WAIT(0); tries++; }
+    }
+
+    const float vehicle_offsets[][2] = {
+        { 3.6f,  1.8f},
+        {-3.6f, -1.8f},
+    };
+    const float vehicle_heading_offsets[] = {155.0f, -25.0f};
+    if (police_vehicle_model != 0) {
+        for (int i = 0; i < 2; ++i) {
+            float x = g_arrestPos[0] + vehicle_offsets[i][0];
+            float y = g_arrestPos[1] + vehicle_offsets[i][1];
+            float h = nodeHeading + vehicle_heading_offsets[i];
+            Vehicle v = VEHICLE::CREATE_VEHICLE(police_vehicle_model, x, y, g_arrestPos[2], h, true, false);
+            if (v == 0) continue;
+            g_spawnedVehicles.push_back(v);
+            ENTITY::SET_ENTITY_AS_MISSION_ENTITY(v, true, true);
+            VEHICLE::SET_VEHICLE_ON_GROUND_PROPERLY(v);
+            VEHICLE::SET_VEHICLE_ENGINE_ON(v, true, true, false);
+            VEHICLE::SET_VEHICLE_HANDBRAKE(v, true);
+            VEHICLE::SET_VEHICLE_SIREN(v, true);
+            ENTITY::FREEZE_ENTITY_POSITION(v, true);
+        }
+        STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(police_vehicle_model);
+    } else {
+        LOGW("script", "CREATE_ARREST police vehicle model unavailable");
+    }
+
+    if (STREAMING::IS_MODEL_VALID(suspect_model) && STREAMING::HAS_MODEL_LOADED(suspect_model)) {
+        Ped suspect = PED::CREATE_PED(26, suspect_model, g_arrestPos[0], g_arrestPos[1], g_arrestPos[2], nodeHeading + 180.0f, true, true);
+        if (suspect != 0) {
+            g_spawnedPeds.push_back(suspect);
+            ENTITY::SET_ENTITY_AS_MISSION_ENTITY(suspect, true, true);
+            ENTITY::SET_ENTITY_INVINCIBLE(suspect, true);
+            ENTITY::FREEZE_ENTITY_POSITION(suspect, true);
+            PED::SET_PED_CAN_BE_KNOCKED_OFF_VEHICLE(suspect, false);
+            PED::SET_PED_CAN_BE_DRAGGED_OUT(suspect, false);
+        }
+        STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(suspect_model);
+    } else {
+        LOGW("script", "CREATE_ARREST suspect model unavailable");
+    }
+
+    const float cop_offsets[][2] = {
+        { 1.8f,  0.7f},
+        {-1.8f, -0.7f},
+        { 0.6f, -1.9f},
+        {-0.6f,  1.9f},
+    };
+    if (STREAMING::IS_MODEL_VALID(cop_model) && STREAMING::HAS_MODEL_LOADED(cop_model)) {
+        for (int i = 0; i < 4; ++i) {
+            float x = g_arrestPos[0] + cop_offsets[i][0];
+            float y = g_arrestPos[1] + cop_offsets[i][1];
+            float dx = g_arrestPos[0] - x;
+            float dy = g_arrestPos[1] - y;
+            float h = atan2f(-dx, dy) * (180.0f / 3.14159f);
+            Ped cop = PED::CREATE_PED(6, cop_model, x, y, g_arrestPos[2], h, true, true);
+            if (cop == 0) continue;
+            g_spawnedPeds.push_back(cop);
+            ENTITY::SET_ENTITY_AS_MISSION_ENTITY(cop, true, true);
+            ENTITY::SET_ENTITY_INVINCIBLE(cop, true);
+            ENTITY::FREEZE_ENTITY_POSITION(cop, true);
+            PED::SET_PED_CAN_BE_KNOCKED_OFF_VEHICLE(cop, false);
+            PED::SET_PED_CAN_BE_DRAGGED_OUT(cop, false);
+        }
+        STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(cop_model);
+    } else {
+        LOGW("script", "CREATE_ARREST cop model unavailable");
+    }
+
+    g_arrestReady.store(true, std::memory_order_release);
+    LOGI("script", std::string("CREATE_ARREST police arrest scene at ") + std::to_string(g_arrestPos[0]) + "," + std::to_string(g_arrestPos[1]) + "," + std::to_string(g_arrestPos[2]));
 }
 
-static void create_fight_near_camera() {
+static void create_arrest_near_camera() {
     Any cam = CAM::GET_RENDERING_CAM();
     Vector3 camPos = CAM::GET_CAM_COORD(cam);
-    create_fight_near_pos(camPos.x, camPos.y, camPos.z);
+    create_arrest_near_pos(camPos.x, camPos.y, camPos.z);
 }
 
 static void create_accident_near_pos(float ox, float oy, float oz) {
@@ -746,11 +800,11 @@ static bool generate_scenario(AutoCollectEvent event_type, Position3D& out_targe
         WAIT(1000);
         if (!g_fireReady.load(std::memory_order_acquire)) return false;
         out_target = Position3D(g_firePos[0], g_firePos[1], g_firePos[2] + 1.0f);
-    } else if (event_type == AUTO_EVENT_FIGHT) {
-        create_fight_near_pos(target_node.x, target_node.y, target_node.z);
+    } else if (event_type == AUTO_EVENT_ARREST) {
+        create_arrest_near_pos(target_node.x, target_node.y, target_node.z);
         WAIT(1000);
-        if (!g_fightReady.load(std::memory_order_acquire)) return false;
-        out_target = Position3D(g_fightPos[0], g_fightPos[1], g_fightPos[2] + 1.0f);
+        if (!g_arrestReady.load(std::memory_order_acquire)) return false;
+        out_target = Position3D(g_arrestPos[0], g_arrestPos[1], g_arrestPos[2] + 1.0f);
     } else {
         create_accident_near_pos(target_node.x, target_node.y, target_node.z);
         WAIT(1000);
@@ -788,7 +842,7 @@ static void run_auto_collect(AutoCollectEvent event_type) {
 
     const char* task = "";
     if (event_type == AUTO_EVENT_FIRE) task = "find the exploded car";
-    else if (event_type == AUTO_EVENT_FIGHT) task = "find the street fight";
+    else if (event_type == AUTO_EVENT_ARREST) task = "find the police arrest scene";
     else task = "find crashed cars";
 
     start_recording_session(task);
@@ -893,7 +947,7 @@ static void run_continuous_manual_collection(AutoCollectEvent event_type, int co
 
         const char* task = "";
         if (event_type == AUTO_EVENT_FIRE) task = "find the exploded car";
-        else if (event_type == AUTO_EVENT_FIGHT) task = "find the street fight";
+        else if (event_type == AUTO_EVENT_ARREST) task = "find the police arrest scene";
         else task = "find crashed cars";
 
         start_recording_session(task);
@@ -1035,13 +1089,13 @@ void scriptMain()
             {
                 LOGD("script", "F12 pressed - Starting automated batch collection");
                 // 默认使用火灾进行批量自动采集，你可以根据需求改成 AUTO_EVENT_ACCIDENT 等
-                run_automated_collection(AUTO_EVENT_FIRE, 100);
+                run_automated_collection(AUTO_EVENT_ARREST, 100);
             }
             if (F6.isKeyDown())
             {
                 LOGD("script", "F6 pressed - Starting continuous manual collection");
                 // 默认使用火灾进行连贯手动采集，你可以根据需求改成 AUTO_EVENT_ACCIDENT 等
-                run_continuous_manual_collection(AUTO_EVENT_FIRE, 100);
+                run_continuous_manual_collection(AUTO_EVENT_ARREST, 100);
             }
             if (F7.isKeyDown())
             {
@@ -1097,9 +1151,9 @@ void scriptMain()
         {
             create_fire_near_camera();
         }
-        else if (cmd == "CREATE_FIGHT")
+        else if (cmd == "CREATE_ARREST")
         {
-            create_fight_near_camera();
+            create_arrest_near_camera();
         }
         else if (cmd == "CREATE_ACCIDENT")
         {

@@ -36,8 +36,8 @@ extern std::atomic<bool> g_fireReady;
 extern float g_firePos[3];
 extern int g_fireId;
 
-extern std::atomic<bool> g_fightReady;
-extern float g_fightPos[3];
+extern std::atomic<bool> g_arrestReady;
+extern float g_arrestPos[3];
 
 
 ServerV2::ServerV2(boost::asio::io_context& io, unsigned short port)
@@ -443,15 +443,15 @@ void ServerV2::handle_client() {
             write_response(resp);
             return;
         }
-        case MSG_CREATE_FIGHT: {
-            g_fightReady.store(false, std::memory_order_release);
-            enqueue_command("CREATE_FIGHT");
+        case MSG_CREATE_ARREST: {
+            g_arrestReady.store(false, std::memory_order_release);
+            enqueue_command("CREATE_ARREST");
             int tries = 0;
-            while (!g_fightReady.load(std::memory_order_acquire) && tries < 2000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
+            while (!g_arrestReady.load(std::memory_order_acquire) && tries < 2000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
 
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_FIGHT; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
-            bool fight_ready = g_fightReady.load(std::memory_order_acquire);
-            if (!fight_ready) {
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_ARREST; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
+            bool arrest_ready = g_arrestReady.load(std::memory_order_acquire);
+            if (!arrest_ready) {
                 rh.length = 0;
                 resp.resize(kWireHeaderSize);
                 std::memcpy(resp.data(), &rh.magic[0], 4);
@@ -461,7 +461,7 @@ void ServerV2::handle_client() {
                 std::memcpy(resp.data() + 7, &rh.reserved, 1);
                 std::memcpy(resp.data() + 8, &rh.request_id, 8);
                 std::memcpy(resp.data() + 16, &rh.length, 4);
-                LOGW("server_v2", "CREATE_FIGHT timeout");
+                LOGW("server_v2", "CREATE_ARREST timeout");
             } else {
                 rh.length = sizeof(float) * 3;
                 resp.resize(kWireHeaderSize + rh.length);
@@ -472,7 +472,7 @@ void ServerV2::handle_client() {
                 std::memcpy(resp.data() + 7, &rh.reserved, 1);
                 std::memcpy(resp.data() + 8, &rh.request_id, 8);
                 std::memcpy(resp.data() + 16, &rh.length, 4);
-                std::memcpy(resp.data() + 20, &g_fightPos[0], sizeof(float) * 3);
+                std::memcpy(resp.data() + 20, &g_arrestPos[0], sizeof(float) * 3);
             }
             write_response(resp);
             return;
