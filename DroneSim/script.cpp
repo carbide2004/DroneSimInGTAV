@@ -305,15 +305,15 @@ static void create_fire_near_pos(float ox, float oy, float oz) {
             // Step 5: 点火
             g_fireId = static_cast<int>(FIRE::START_ENTITY_FIRE(created_vehicle));
             int fid;
-            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1], g_firePos[2], 25, true);
+            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1], g_firePos[2] + 0.5, 25, true);
             g_spawnedFireIds.push_back(fid);
-            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0] + 1.0f, g_firePos[1], g_firePos[2], 20, true);
+            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0] + 1.0f, g_firePos[1], g_firePos[2] + 0.5, 20, true);
             g_spawnedFireIds.push_back(fid);
-            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0] - 1.0f, g_firePos[1], g_firePos[2], 20, true);
+            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0] - 1.0f, g_firePos[1], g_firePos[2] + 0.5, 20, true);
             g_spawnedFireIds.push_back(fid);
-            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1] + 1.0f, g_firePos[2], 20, true);
+            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1] + 1.0f, g_firePos[2] + 0.5, 20, true);
             g_spawnedFireIds.push_back(fid);
-            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1] - 1.0f, g_firePos[2], 20, true);
+            fid = FIRE::START_SCRIPT_FIRE(g_firePos[0], g_firePos[1] - 1.0f, g_firePos[2] + 0.5, 20, true);
             g_spawnedFireIds.push_back(fid);
 
             // Step 6: 等待确认起火，最多等约1秒
@@ -1091,13 +1091,13 @@ void scriptMain()
             {
                 LOGD("script", "F12 pressed - Starting automated batch collection");
                 // 默认使用火灾进行批量自动采集，你可以根据需求改成 AUTO_EVENT_ACCIDENT 等
-                run_automated_collection(AUTO_EVENT_ARREST, 100);
+                run_automated_collection(AUTO_EVENT_FIRE, 100);
             }
             if (F6.isKeyDown())
             {
                 LOGD("script", "F6 pressed - Starting continuous manual collection");
                 // 默认使用火灾进行连贯手动采集，你可以根据需求改成 AUTO_EVENT_ACCIDENT 等
-                run_continuous_manual_collection(AUTO_EVENT_ARREST, 100);
+                run_continuous_manual_collection(AUTO_EVENT_FIRE, 100);
             }
             if (F7.isKeyDown())
             {
