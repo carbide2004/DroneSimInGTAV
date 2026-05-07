@@ -76,7 +76,7 @@ static int g_fireMaintenanceTimer = 0;
 
 scriptStatusEnum scriptStatus = scriptStop;
 
-extern volatile catchState cmdToCatch;
+extern std::atomic<catchState> cmdToCatch;
 
 static std::ofstream g_recordingStepsFile;
 
@@ -218,11 +218,13 @@ static void record_step(const char* action, float dx, float dy, float dz, float 
     Position3D rot(cam_rot.x, cam_rot.y, cam_rot.z);
     makeCmdStart();
     int tries = 0;
-    while (cmdToCatch != catchStop && tries < 6000) { WAIT(0); tries++; }
-    void* rgb_ptr = nullptr; int rgb_size = export_get_color_buffer(&rgb_ptr);
-    void* depth_ptr = nullptr; int depth_size = export_get_depth_buffer(&depth_ptr);
-    int w = export_get_last_color_width();
-    int h = export_get_last_color_height();
+    while (cmdToCatch.load(std::memory_order_acquire) != catchStop && tries < 6000) { WAIT(0); tries++; }
+    std::vector<unsigned char> rgb_data;
+    std::vector<unsigned char> depth_data;
+    int w = 0, h = 0, depth_w = 0, depth_h = 0;
+    bool has_rgbd = export_copy_rgbd_snapshot(rgb_data, depth_data, w, h, depth_w, depth_h);
+    int rgb_size = has_rgbd ? static_cast<int>(rgb_data.size()) : -1;
+    int depth_size = has_rgbd ? static_cast<int>(depth_data.size()) : -1;
     int step = g_recordingStep.load(std::memory_order_acquire);
     char namebuf[64];
     sprintf_s(namebuf, "step_%06d.bin", step);
@@ -232,11 +234,11 @@ static void record_step(const char* action, float dx, float dy, float dz, float 
     std::string depth_path = std::string(g_recordingSessionDir) + "\\Depth\\" + namebuf;
     {
         std::ofstream f(rgb_path, std::ios::binary);
-        if (rgb_size > 0 && rgb_ptr) f.write(reinterpret_cast<const char*>(rgb_ptr), rgb_size);
+        if (!rgb_data.empty()) f.write(reinterpret_cast<const char*>(rgb_data.data()), rgb_data.size());
     }
     {
         std::ofstream f(depth_path, std::ios::binary);
-        if (depth_size > 0 && depth_ptr) f.write(reinterpret_cast<const char*>(depth_ptr), depth_size);
+        if (!depth_data.empty()) f.write(reinterpret_cast<const char*>(depth_data.data()), depth_data.size());
     }
     g_recordingStepsFile
         << "{\"step\":" << step
@@ -245,7 +247,7 @@ static void record_step(const char* action, float dx, float dy, float dz, float 
         << ",\"pose\":{\"x\":" << pos.x << ",\"y\":" << pos.y << ",\"z\":" << pos.z
         << ",\"rx\":" << rot.x << ",\"ry\":" << rot.y << ",\"rz\":" << rot.z << "}"
         << ",\"rgb\":{\"path\":\"" << rgb_rel << "\",\"width\":" << w << ",\"height\":" << h << ",\"bytes\":" << rgb_size << "}"
-        << ",\"depth\":{\"path\":\"" << depth_rel << "\",\"width\":" << export_get_last_depth_width() << ",\"height\":" << export_get_last_depth_height() << ",\"bytes\":" << depth_size << "}"
+        << ",\"depth\":{\"path\":\"" << depth_rel << "\",\"width\":" << depth_w << ",\"height\":" << depth_h << ",\"bytes\":" << depth_size << "}"
         << "}\n";
     g_recordingStepsFile.flush();
     g_recordingStep.store(step + 1, std::memory_order_release);

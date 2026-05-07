@@ -18,7 +18,7 @@ static asio::io_context g_io_v2;
 static std::unique_ptr<std::thread> g_thread_v2;
 static bool g_ws_inited_v2 = false;
 
-extern volatile catchState cmdToCatch;
+extern std::atomic<catchState> cmdToCatch;
 
 extern std::atomic<bool> g_poseReady;
 extern float g_pose[6];
@@ -548,8 +548,16 @@ void ServerV2::handle_client() {
         case MSG_CAPTURE: {
             LOGD("server_v2", "Processing MSG_CAPTURE request");
             enqueue_command("REQUEST");
+            int start_tries = 0;
+            while (cmdToCatch.load(std::memory_order_acquire) == catchStop && start_tries < 1000) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                start_tries++;
+            }
+            if (start_tries >= 1000) {
+                LOGW("server_v2", "MSG_CAPTURE: Timeout waiting for capture request to start");
+            }
             int tries = 0;
-            while (cmdToCatch != catchStop && tries < 3000) {
+            while (cmdToCatch.load(std::memory_order_acquire) != catchStop && tries < 3000) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 tries++;
             }
@@ -558,17 +566,19 @@ void ServerV2::handle_client() {
                 LOGW("server_v2", "MSG_CAPTURE: Timeout waiting for capture completion");
             }
             
-            void* rgb_ptr = nullptr; 
-            void* depth_ptr = nullptr;
-            int rgb_size = 0;
-            int depth_size = 0;
-            
             try {
-                rgb_size = export_get_color_buffer(&rgb_ptr);
-                depth_size = export_get_depth_buffer(&depth_ptr);
+                std::vector<unsigned char> rgb_data;
+                std::vector<unsigned char> depth_data;
+                int w_rgb = 0;
+                int h_rgb = 0;
+                int w_depth = 0;
+                int h_depth = 0;
+                bool snapshot_ready = export_copy_rgbd_snapshot(rgb_data, depth_data, w_rgb, h_rgb, w_depth, h_depth);
+                int rgb_size = snapshot_ready ? static_cast<int>(rgb_data.size()) : -1;
+                int depth_size = snapshot_ready ? static_cast<int>(depth_data.size()) : -1;
                 
-                if (rgb_ptr == nullptr || depth_ptr == nullptr) {
-                    LOGE("server_v2", "MSG_CAPTURE: Null buffer pointers returned");
+                if (!snapshot_ready || rgb_data.empty() || depth_data.empty()) {
+                    LOGE("server_v2", "MSG_CAPTURE: RGBD snapshot is not ready");
                     // 返回空响应
                     MsgHeader rh{}; 
                     std::memcpy(rh.magic, "DSV2", 4); 
@@ -591,11 +601,6 @@ void ServerV2::handle_client() {
                 }
                 
                 LOGD("server_v2", std::string("Capture: rgb_size=") + std::to_string(rgb_size) + ", depth_size=" + std::to_string(depth_size));
-                
-                int w_rgb = export_get_last_color_width();
-                int h_rgb = export_get_last_color_height();
-                int w_depth = export_get_last_depth_width();
-                int h_depth = export_get_last_depth_height();
                 
                 // 验证尺寸的合理性
                 if (w_rgb <= 0 || h_rgb <= 0 || w_depth <= 0 || h_depth <= 0) {
@@ -648,11 +653,11 @@ void ServerV2::handle_client() {
                 
                 unsigned char* p = resp.data() + 20 + sizeof(uint32_t) * 4;
                 if (rgb_size > 0) {
-                    std::memcpy(p, rgb_ptr, rgb_size);
+                    std::memcpy(p, rgb_data.data(), rgb_size);
                 }
                 p += rgb_size;
                 if (depth_size > 0) {
-                    std::memcpy(p, depth_ptr, depth_size);
+                    std::memcpy(p, depth_data.data(), depth_size);
                 }
                 
             } catch (const std::exception& e) {

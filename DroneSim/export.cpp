@@ -312,6 +312,25 @@ void ExtractScreenBuffer(ID3D11DeviceContext* ctx, ID3D11Texture2D* back, HRESUL
 	last_screen_time = high_resolution_clock::now();
 }
 
+bool export_copy_rgbd_snapshot(std::vector<unsigned char>& rgb, std::vector<unsigned char>& depth,
+	int& rgb_width, int& rgb_height, int& depth_width, int& depth_height)
+{
+	std::lock_guard<mutex> lk(copy_mtx);
+	if (colorBuf.empty() || depthBuf.empty() || lastColorWidth <= 0 || lastColorHeight <= 0 ||
+		lastDepthWidth <= 0 || lastDepthHeight <= 0) {
+		LOGE("export", "export_copy_rgbd_snapshot: RGBD snapshot is not ready");
+		return false;
+	}
+
+	rgb = colorBuf;
+	depth = depthBuf;
+	rgb_width = lastColorWidth;
+	rgb_height = lastColorHeight;
+	depth_width = lastDepthWidth;
+	depth_height = lastDepthHeight;
+	return true;
+}
+
 extern "C" {
 	__declspec(dllexport) int export_get_depth_buffer(void** buf)
 	{

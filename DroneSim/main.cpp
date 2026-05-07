@@ -27,6 +27,7 @@
 #include "keyboard.h"
 #include <cstring>
 #include <exception>
+#include <atomic>
 using Microsoft::WRL::ComPtr;
 using namespace std::experimental::filesystem;
 using namespace std::string_literals;
@@ -68,7 +69,7 @@ static bool hooked = false;
 static int draw_indexed_count = 0;
 
 const size_t fileLength = 256;
-volatile catchState cmdToCatch = catchStop;	
+std::atomic<catchState> cmdToCatch{catchStop};
 static WCHAR imgPath[fileLength] = L"data\\screen.bmp";
 static char rawPath[fileLength] = "data\\stencil.raw";
 static char depthPath[fileLength] = "data\\depth.raw";
@@ -85,15 +86,15 @@ static std::vector<unsigned char> g_lastDepthBytes;
 
 inline void makeCmdStart()
 {
-	cmdToCatch = catchStart;
+	cmdToCatch.store(catchStart, std::memory_order_release);
 }
 inline void makeCmdStop()
 {
-	cmdToCatch = catchStop;
+	cmdToCatch.store(catchStop, std::memory_order_release);
 }
 inline void cmdCatchScreen()
 {
-	cmdToCatch = catchScreen;
+	cmdToCatch.store(catchScreen, std::memory_order_release);
 }
 
 void catchCurveAndScreen(WCHAR *_imgPath, char *_rawPath, bool _forceSave, bool _onlyScreen)
@@ -354,7 +355,7 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 					ExtractDepthBuffer(dev.Get(), self, res.Get());
 					last_capture_depth = system_clock::now();
 
-					if (cmdToCatch == catchStart) {
+					if (cmdToCatch.load(std::memory_order_acquire) == catchStart) {
 						void* rgb_buf = nullptr;
 						void* depth_buf = nullptr;
 						void* stencil_buf = nullptr;
@@ -381,6 +382,7 @@ void clear_depth_stencil_view_hook(ID3D11DeviceContext* self, ID3D11DepthStencil
 									(same_rgb ? "RGB " : "") +
 									(same_depth ? "DEPTH " : "") +
 									"unchanged from last frame");
+								makeCmdStop();
 							} 
 							else {
 								g_lastRgbBytes.assign(reinterpret_cast<unsigned char*>(rgb_buf),

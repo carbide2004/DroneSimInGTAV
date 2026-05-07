@@ -4,6 +4,7 @@
 #include <atlimage.h>
 #include <Eigen/Core>
 #include <string>
+#include <vector>
 
 void ExtractDepthBuffer(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resource* tex);
 void ExtractColorBuffer(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resource* tex);
@@ -11,6 +12,8 @@ void ExtractConstantBuffer(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Bu
 void ExtractScreenBuffer(ID3D11DeviceContext* ctx, ID3D11Texture2D* back, HRESULT hr);
 void CopyIfRequested();
 void writeLog(std::string);
+bool export_copy_rgbd_snapshot(std::vector<unsigned char>& rgb, std::vector<unsigned char>& depth,
+	int& rgb_width, int& rgb_height, int& depth_width, int& depth_height);
 
 extern float g_rgbdDownsampleFactor;
 
