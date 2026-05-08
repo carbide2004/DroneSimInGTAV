@@ -61,8 +61,8 @@ def create_anomaly_at_position(cli, anomaly_type: str, position: Tuple[float, fl
 
     if anomaly_type == "fire":
         result = cli.create_fire()
-    elif anomaly_type == "fight":
-        result = cli.create_fight()
+    elif anomaly_type == "arrest":
+        result = cli.create_arrest()
     else:
         print(f"Unknown anomaly type: {anomaly_type}")
         return None

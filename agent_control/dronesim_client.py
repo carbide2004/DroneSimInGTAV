@@ -19,7 +19,7 @@ TYPE_CREATE_ACCIDENT = 11
 TYPE_GET_RECORDING_INFO = 12
 TYPE_SET_RECORDING_SESSION = 13
 TYPE_CREATE_FIRE = 14
-TYPE_CREATE_FIGHT = 15
+TYPE_CREATE_ARREST = 15
 TYPE_SET_POSTURE = 16
 TYPE_TELEPORT_PLAYER = 17
 TYPE_RESTORE_PLAYER = 18
@@ -179,8 +179,8 @@ class DroneSimClient:
         fire_id = struct.unpack("i", p[12:16])[0]
         return x, y, z, fire_id
 
-    def create_fight(self):
-        s = self._send(TYPE_CREATE_FIGHT, 15)
+    def create_arrest(self):
+        s = self._send(TYPE_CREATE_ARREST, 15)
         t, rid, p = self._recv(s)
         if not p or len(p) < 12:
             return None
