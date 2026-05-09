@@ -302,6 +302,10 @@ static void create_fire_near_pos(float ox, float oy, float oz) {
             // Step 4: 等待伤害状态生效（关键）
             WAIT(500);
 
+            // Add a visible vehicle explosion, then keep persistent fire active.
+            FIRE::ADD_EXPLOSION(g_firePos[0], g_firePos[1], g_firePos[2] + 0.8f, 2, 0.6f, true, false, 0.45f);
+            WAIT(250);
+
             // Step 5: 点火
             g_fireId = static_cast<int>(FIRE::START_ENTITY_FIRE(created_vehicle));
             int fid;
@@ -959,6 +963,17 @@ static void run_continuous_manual_collection(AutoCollectEvent event_type, int co
         int steps = 0;
 
         while (!reached) {
+            Any reach_cam = CAM::GET_RENDERING_CAM();
+            Vector3 reach_pos = CAM::GET_CAM_COORD(reach_cam);
+            float reach_dist = Position3D(reach_pos.x, reach_pos.y, reach_pos.z).distance_to(target);
+            float reach_dz = target.z - reach_pos.z;
+            if (reach_dist <= STEPSIZE * 4.0f && fabsf(reach_dz) <= STEPSIZE) {
+                reached = true;
+                record_step("AUTO_STOP_REACHED", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+                LOGI("script", "Target reached manually!");
+                continue;
+            }
+
             if (F11.isKeyDown()) {
                 stop_recording_session();
                 StopCamera();
@@ -1013,15 +1028,6 @@ static void run_continuous_manual_collection(AutoCollectEvent event_type, int co
 
             if (moved) {
                 steps++;
-                Any cam = CAM::GET_RENDERING_CAM();
-                Vector3 pos = CAM::GET_CAM_COORD(cam);
-                float dist = Position3D(pos.x, pos.y, pos.z).distance_to(target);
-                float dz = target.z - pos.z;
-                if (dist <= STEPSIZE * 4.0f && fabsf(dz) <= STEPSIZE) {
-                    reached = true;
-                    record_step("AUTO_STOP_REACHED", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-                    LOGI("script", "Target reached manually!");
-                }
             }
             WAIT(0);
         }
@@ -1091,7 +1097,7 @@ void scriptMain()
             {
                 LOGD("script", "F12 pressed - Starting automated batch collection");
                 // 默认使用火灾进行批量自动采集，你可以根据需求改成 AUTO_EVENT_ACCIDENT 等
-                run_automated_collection(AUTO_EVENT_FIRE, 100);
+                run_automated_collection(AUTO_EVENT_FIRE, 150);
             }
             if (F6.isKeyDown())
             {
