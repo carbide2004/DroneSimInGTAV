@@ -488,16 +488,16 @@ def main():
     )
     parser.add_argument(
         "--model_dir",
-        default=str(_repo_root() / "agent_control" / "models" / "qwen3_vl_sft_merged"),
+        default=str(_repo_root() / "agent_control" / "models" / "qwen3_vl_sft_GTAV_20260509"),
         help="Model directory path",
     )
     parser.add_argument("--history_k", type=int, default=12, help="Number of recent actions to include in context")
     parser.add_argument("--max_new_tokens", type=int, default=160, help="Maximum new tokens for generation")
     parser.add_argument("--sleep_s", type=float, default=0.0, help="Sleep time before starting")
     parser.add_argument("--gpu_ids", default="0", help="Comma-separated GPU ids, for example: 0,1,2,3")
-    parser.add_argument("--no_skip_existing", action="store_true", help="Process entries that already have awareness field (default: skip existing)")
-    parser.add_argument("--no_extract_vectors", action="store_true", help="Disable extraction of representation vectors (default: extract vectors)")
-    parser.add_argument("--no_skip_vector_existing", action="store_true", help="Process vector extraction for entries that already have representation_vector field (default: skip existing vectors)")
+    parser.add_argument("--no_skip_existing", action="store_false", help="Process entries that already have awareness field (default: skip existing)")
+    parser.add_argument("--no_extract_vectors", action="store_false", help="Disable extraction of representation vectors (default: extract vectors)")
+    parser.add_argument("--no_skip_vector_existing", action="store_false", help="Process vector extraction for entries that already have representation_vector field (default: skip existing vectors)")
 
     args = parser.parse_args()
 
