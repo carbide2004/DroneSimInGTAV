@@ -377,7 +377,8 @@ def _apply_updates(data, worker_result):
 
 
 def _run_parallel_generation(trajectory_tasks, args):
-    assignments = _assign_trajectories_to_workers(trajectory_tasks, len(args.gpu_ids))
+    worker_count = max(1, len(args.gpu_ids) * int(args.workers_per_gpu))
+    assignments = _assign_trajectories_to_workers(trajectory_tasks, worker_count)
     futures = []
     results = []
     total_steps = sum(task["num_steps"] for task in trajectory_tasks)
@@ -495,6 +496,12 @@ def main():
     parser.add_argument("--max_new_tokens", type=int, default=160, help="Maximum new tokens for generation")
     parser.add_argument("--sleep_s", type=float, default=0.0, help="Sleep time before starting")
     parser.add_argument("--gpu_ids", default="0", help="Comma-separated GPU ids, for example: 0,1,2,3")
+    parser.add_argument(
+        "--workers_per_gpu",
+        type=int,
+        default=1,
+        help="Number of independent worker processes to launch per GPU",
+    )
     parser.add_argument("--no_skip_existing", action="store_true", help="Process entries that already have awareness field (default: skip existing)")
     parser.add_argument("--no_extract_vectors", action="store_true", help="Disable extraction of representation vectors (default: extract vectors)")
     parser.add_argument("--no_skip_vector_existing", action="store_true", help="Process vector extraction for entries that already have representation_vector field (default: skip existing vectors)")
@@ -505,6 +512,7 @@ def main():
     args.extract_vectors = not args.no_extract_vectors
     args.skip_vector_existing = not args.no_skip_vector_existing
     args.gpu_ids = _parse_gpu_ids(args.gpu_ids)
+    args.workers_per_gpu = max(1, int(args.workers_per_gpu))
 
     if float(args.sleep_s) > 0:
         time.sleep(float(args.sleep_s))
@@ -535,12 +543,11 @@ def main():
     print(f"Entries to generate: {total_to_generate}")
     print(f"Entries skipped: {skipped_entries}")
     print(f"Using GPUs: {args.gpu_ids}")
+    print(f"Workers per GPU: {args.workers_per_gpu}")
+    print(f"Total worker processes: {len(args.gpu_ids) * args.workers_per_gpu}")
 
     if total_to_generate > 0:
-        if len(args.gpu_ids) == 1:
-            worker_results = _run_single_worker_generation(trajectory_tasks, args)
-        else:
-            worker_results = _run_parallel_generation(trajectory_tasks, args)
+        worker_results = _run_parallel_generation(trajectory_tasks, args)
         for result in worker_results:
             _apply_updates(data, result)
     else:
