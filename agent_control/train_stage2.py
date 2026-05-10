@@ -481,8 +481,18 @@ def main():
     smt_encoder = SmtObservationEncoder(smt_cfg).to(device)
 
     if bool(dist_state["distributed"]):
-        bridge = DDP(bridge, device_ids=[local_rank], output_device=local_rank)
-        smt_encoder = DDP(smt_encoder, device_ids=[local_rank], output_device=local_rank)
+        bridge = DDP(
+            bridge,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=True,
+        )
+        smt_encoder = DDP(
+            smt_encoder,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=True,
+        )
         qwen._model = DDP(
             qwen.model,
             device_ids=[local_rank],
