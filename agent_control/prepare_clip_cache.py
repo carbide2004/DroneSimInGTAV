@@ -1,5 +1,7 @@
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
+from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
@@ -79,9 +81,39 @@ def _resize_float_map(array_2d: np.ndarray, out_size: int):
 
 
 def _process_heatmap_fixed_scale(array_2d: np.ndarray):
-    # 假设你认为 logit 达到 20 是极值
-    scale = 20.0 
+    # logit 达到 20 是极值
+    scale = 20.0
     return np.clip(array_2d / scale, 0.0, 1.0)
+
+
+def _parse_gpu_ids(gpu_ids_text):
+    gpu_ids = []
+    for part in str(gpu_ids_text).split(","):
+        part = part.strip()
+        if part:
+            gpu_ids.append(int(part))
+    return gpu_ids
+
+
+def _cache_meta(args_like, out_rel):
+    return {
+        "heatdepth": out_rel,
+        "feature_dim": int(args_like["heatmap_size"]) * int(args_like["heatmap_size"]) * 3,
+        "heatmap_size": int(args_like["heatmap_size"]),
+        "feature_components": ["clip_heatmap", "depth", "rgb_gray"],
+        "backbone": "clip",
+        "mode": "heatmap_depth",
+        "window_size": int(args_like["window_size"]),
+        "stride": int(args_like["stride"]),
+        "use_null_text_baseline": bool(args_like["use_null_text_baseline"]),
+    }
+
+
+def _assign_items_to_workers(items, worker_count):
+    buckets = [[] for _ in range(max(1, int(worker_count)))]
+    for i, item in enumerate(items):
+        buckets[i % len(buckets)].append(item)
+    return [bucket for bucket in buckets if bucket]
 
 
 def _compute_clip_heatmap(
@@ -142,6 +174,98 @@ def _compute_clip_heatmap(
     return score_map / (count_map + 1e-8)
 
 
+def _process_cache_item(
+    item,
+    dataset_root: Path,
+    cache_dir: Path,
+    clip_model,
+    clip_image_processor,
+    clip_tokenizer,
+    device,
+    args_like,
+):
+    sid, rgb_rel, depth_rel, task_text, out_rel = item
+    rgb_path = dataset_root / rgb_rel
+    depth_path = dataset_root / depth_rel
+    if not rgb_path.exists():
+        raise FileNotFoundError(f"RGB image not found: {rgb_path}")
+    if not depth_path.exists():
+        raise FileNotFoundError(f"Depth image not found: {depth_path}")
+
+    with Image.open(rgb_path) as rgb_src:
+        rgb_img = rgb_src.convert("RGB")
+    with Image.open(depth_path) as depth_src:
+        depth_img = depth_src.convert("RGB")
+
+    heatmap = _compute_clip_heatmap(
+        clip_model=clip_model,
+        clip_image_processor=clip_image_processor,
+        clip_tokenizer=clip_tokenizer,
+        rgb_image=rgb_img,
+        task_text=task_text,
+        device=device,
+        window_size=int(args_like["window_size"]),
+        stride=int(args_like["stride"]),
+        tile_batch_size=int(args_like["tile_batch_size"]),
+        use_null_text=bool(args_like["use_null_text_baseline"]),
+    )
+    heatmap_resized = _resize_float_map(heatmap, int(args_like["heatmap_size"]))
+    heatmap_norm = _process_heatmap_fixed_scale(heatmap_resized)
+
+    depth_gray = np.array(depth_img.convert("L"), dtype=np.float32) / 255.0
+    depth_resized = _resize_float_map(depth_gray, int(args_like["heatmap_size"]))
+    depth_norm = np.clip(depth_resized, 0.0, 1.0).astype(np.float32)
+
+    rgb_gray = np.array(rgb_img.convert("L"), dtype=np.float32) / 255.0
+    rgb_resized = _resize_float_map(rgb_gray, int(args_like["heatmap_size"]))
+    rgb_norm = np.clip(rgb_resized, 0.0, 1.0).astype(np.float32)
+
+    feature = np.concatenate(
+        [heatmap_norm.reshape(-1), depth_norm.reshape(-1), rgb_norm.reshape(-1)],
+        axis=0,
+    ).astype(np.float32)
+    np.save(cache_dir / out_rel, feature)
+    return sid, _cache_meta(args_like, out_rel)
+
+
+def _process_worker(worker_id, gpu_id, items, args_like, hf_token):
+    if gpu_id is None:
+        device_name = str(args_like["device"])
+    else:
+        device_name = f"cuda:{int(gpu_id)}"
+    device = torch.device(device_name if torch.cuda.is_available() or device_name == "cpu" else "cpu")
+
+    clip_model = CLIPModel.from_pretrained(str(args_like["clip_model_name"]), token=hf_token).to(device)
+    clip_model.eval()
+    clip_image_processor = CLIPImageProcessor.from_pretrained(str(args_like["clip_model_name"]), token=hf_token)
+    clip_tokenizer = AutoTokenizer.from_pretrained(str(args_like["clip_model_name"]), token=hf_token)
+
+    dataset_root = Path(args_like["dataset_root"])
+    cache_dir = Path(args_like["cache_dir"])
+    updates = {}
+    processed = 0
+    for item in items:
+        sid, meta = _process_cache_item(
+            item=item,
+            dataset_root=dataset_root,
+            cache_dir=cache_dir,
+            clip_model=clip_model,
+            clip_image_processor=clip_image_processor,
+            clip_tokenizer=clip_tokenizer,
+            device=device,
+            args_like=args_like,
+        )
+        updates[str(sid)] = meta
+        processed += 1
+    return {
+        "worker_id": int(worker_id),
+        "gpu_id": None if gpu_id is None else int(gpu_id),
+        "device": str(device),
+        "processed": int(processed),
+        "updates": updates,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Prepare CLIP tiled heatmap + depth + rgb cache")
     parser.add_argument(
@@ -175,6 +299,8 @@ def main():
     )
     parser.add_argument("--batch_size", type=int, default=16, help="Sample batch size")
     parser.add_argument("--device", default="cuda", help="Device name")
+    parser.add_argument("--gpu_ids", default="", help="Comma-separated GPU ids, for example: 0,1,2,3")
+    parser.add_argument("--workers_per_gpu", type=int, default=1, help="Worker processes to launch per GPU")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing cache")
     args = parser.parse_args()
 
@@ -194,12 +320,6 @@ def main():
     if not isinstance(data, list):
         raise RuntimeError("Dataset JSON must be a list.")
 
-    device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
-    clip_model = CLIPModel.from_pretrained(str(args.clip_model_name), token=hf_token).to(device)
-    clip_model.eval()
-    clip_image_processor = CLIPImageProcessor.from_pretrained(str(args.clip_model_name), token=hf_token)
-    clip_tokenizer = AutoTokenizer.from_pretrained(str(args.clip_model_name), token=hf_token)
-
     pairs = []
     for i, entry in enumerate(data):
         sid = _sample_id(entry, i)
@@ -214,82 +334,64 @@ def main():
             existing = old
 
     pending = []
+    args_like = {
+        "dataset_root": str(dataset_root),
+        "cache_dir": str(cache_dir),
+        "clip_model_name": str(args.clip_model_name),
+        "heatmap_size": int(args.heatmap_size),
+        "window_size": int(args.window_size),
+        "stride": int(args.stride),
+        "tile_batch_size": int(args.tile_batch_size),
+        "use_null_text_baseline": bool(args.use_null_text_baseline),
+        "device": str(args.device),
+    }
     for sid, rgb_rel, depth_rel, task_text in pairs:
         out_rel = f"{sid.replace(':', '_')}_heatdepth.npy"
         out_path = cache_dir / out_rel
         if out_path.exists() and not args.overwrite:
-            existing[sid] = {
-                "heatdepth": out_rel,
-                "feature_dim": int(args.heatmap_size) * int(args.heatmap_size) * 3,
-                "heatmap_size": int(args.heatmap_size),
-                "feature_components": ["clip_heatmap", "depth", "rgb_gray"],
-                "backbone": "clip",
-                "mode": "heatmap_depth",
-                "window_size": int(args.window_size),
-                "stride": int(args.stride),
-                "use_null_text_baseline": bool(args.use_null_text_baseline),
-            }
+            existing[sid] = _cache_meta(args_like, out_rel)
             continue
         pending.append((sid, rgb_rel, depth_rel, task_text, out_rel))
 
     total = len(pending)
     print(f"Total entries: {len(pairs)}, pending cache: {total}")
 
-    for start in range(0, total, int(args.batch_size)):
-        chunk = pending[start:start + int(args.batch_size)]
-        for sid, rgb_rel, depth_rel, task_text, out_rel in chunk:
-            rgb_path = dataset_root / rgb_rel
-            depth_path = dataset_root / depth_rel
-            if not rgb_path.exists():
-                raise FileNotFoundError(f"RGB image not found: {rgb_path}")
-            if not depth_path.exists():
-                raise FileNotFoundError(f"Depth image not found: {depth_path}")
+    if pending:
+        gpu_ids = _parse_gpu_ids(args.gpu_ids)
+        workers_per_gpu = max(1, int(args.workers_per_gpu))
+        if gpu_ids:
+            worker_count = len(gpu_ids) * workers_per_gpu
+            assignments = _assign_items_to_workers(pending, worker_count)
+            print(f"Using GPUs: {gpu_ids}")
+            print(f"Workers per GPU: {workers_per_gpu}")
+        else:
+            assignments = _assign_items_to_workers(pending, 1)
+            print(f"Using device: {args.device}")
 
-            rgb_img = Image.open(rgb_path).convert("RGB")
-            depth_img = Image.open(depth_path).convert("RGB")
-
-            heatmap = _compute_clip_heatmap(
-                clip_model=clip_model,
-                clip_image_processor=clip_image_processor,
-                clip_tokenizer=clip_tokenizer,
-                rgb_image=rgb_img,
-                task_text=task_text,
-                device=device,
-                window_size=int(args.window_size),
-                stride=int(args.stride),
-                tile_batch_size=int(args.tile_batch_size),
-                use_null_text=bool(args.use_null_text_baseline),
-            )
-            heatmap_resized = _resize_float_map(heatmap, int(args.heatmap_size))
-            heatmap_norm = _process_heatmap_fixed_scale(heatmap_resized)
-
-            depth_gray = np.array(depth_img.convert("L"), dtype=np.float32) / 255.0
-            depth_resized = _resize_float_map(depth_gray, int(args.heatmap_size))
-            depth_norm = np.clip(depth_resized, 0.0, 1.0).astype(np.float32)
-
-            rgb_gray = np.array(rgb_img.convert("L"), dtype=np.float32) / 255.0
-            rgb_resized = _resize_float_map(rgb_gray, int(args.heatmap_size))
-            rgb_norm = np.clip(rgb_resized, 0.0, 1.0).astype(np.float32)
-
-            feature = np.concatenate(
-                [heatmap_norm.reshape(-1), depth_norm.reshape(-1), rgb_norm.reshape(-1)],
-                axis=0,
-            ).astype(np.float32)
-            np.save(cache_dir / out_rel, feature)
-            existing[sid] = {
-                "heatdepth": out_rel,
-                "feature_dim": int(args.heatmap_size) * int(args.heatmap_size) * 3,
-                "heatmap_size": int(args.heatmap_size),
-                "feature_components": ["clip_heatmap", "depth", "rgb_gray"],
-                "backbone": "clip",
-                "mode": "heatmap_depth",
-                "window_size": int(args.window_size),
-                "stride": int(args.stride),
-                "use_null_text_baseline": bool(args.use_null_text_baseline),
-            }
-
-        end = min(start + int(args.batch_size), total)
-        print(f"Processed {end}/{total}")
+        done = 0
+        mp_context = get_context("spawn")
+        with ProcessPoolExecutor(max_workers=len(assignments), mp_context=mp_context) as executor:
+            futures = []
+            for worker_id, assigned_items in enumerate(assignments):
+                gpu_id = gpu_ids[worker_id % len(gpu_ids)] if gpu_ids else None
+                futures.append(
+                    executor.submit(
+                        _process_worker,
+                        worker_id,
+                        gpu_id,
+                        assigned_items,
+                        args_like,
+                        hf_token,
+                    )
+                )
+            for future in as_completed(futures):
+                result = future.result()
+                existing.update(result["updates"])
+                done += int(result["processed"])
+                print(
+                    f"Worker {result['worker_id']} device={result['device']} "
+                    f"processed={result['processed']} total_done={done}/{total}"
+                )
 
     _write_json(manifest_path, existing)
     print(f"Cache manifest saved: {manifest_path}")
