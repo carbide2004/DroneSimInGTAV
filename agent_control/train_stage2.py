@@ -348,6 +348,12 @@ def main():
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--max_len", type=int, default=100)
+    parser.add_argument(
+        "--max_trajectory_len",
+        type=int,
+        default=0,
+        help="Filter out trajectories longer than this many steps; 0 disables filtering",
+    )
     parser.add_argument("--val_ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=0)
@@ -415,6 +421,7 @@ def main():
             batch_size=int(args.batch_size),
             num_workers=int(args.num_workers),
             mode="sequence",
+            max_trajectory_len=int(args.max_trajectory_len),
         )
     elif args.split_manifest_json:
         train_loader, val_loader, split_meta = build_stage1_dataloaders_from_manifest(
@@ -423,6 +430,7 @@ def main():
             batch_size=int(args.batch_size),
             num_workers=int(args.num_workers),
             mode="sequence",
+            max_trajectory_len=int(args.max_trajectory_len),
         )
     else:
         train_loader, val_loader, split_meta = build_stage1_dataloaders(
@@ -432,6 +440,7 @@ def main():
             seed=int(args.seed),
             num_workers=int(args.num_workers),
             mode="sequence",
+            max_trajectory_len=int(args.max_trajectory_len),
         )
     train_loader, train_sampler = _wrap_loader_for_distributed(train_loader, shuffle=True, seed=int(args.seed))
     val_loader, val_sampler = _wrap_loader_for_distributed(val_loader, shuffle=False, seed=int(args.seed))
@@ -534,6 +543,7 @@ def main():
             "epochs": int(args.epochs),
             "batch_size": int(args.batch_size),
             "max_len": int(args.max_len),
+            "max_trajectory_len": int(args.max_trajectory_len),
             "val_ratio": float(args.val_ratio),
             "seed": int(args.seed),
             "lr_bridge": float(args.lr_bridge),

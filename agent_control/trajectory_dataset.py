@@ -49,6 +49,35 @@ def group_by_trajectory(entries: Sequence[Dict]) -> Dict[str, List[Dict]]:
     return groups
 
 
+def filter_entries_by_max_trajectory_len(entries: Sequence[Dict], max_trajectory_len: int):
+    groups = group_by_trajectory(entries)
+    if int(max_trajectory_len) <= 0:
+        return list(entries), {
+            "max_trajectory_len": int(max_trajectory_len),
+            "original_trajectories": len(groups),
+            "filtered_trajectories": 0,
+            "kept_trajectories": len(groups),
+            "original_entries": len(entries),
+            "filtered_entries": 0,
+            "kept_entries": len(entries),
+        }
+
+    kept_ids = {tid for tid, items in groups.items() if len(items) <= int(max_trajectory_len)}
+    filtered = [
+        entry for i, entry in enumerate(entries)
+        if _trajectory_id(entry, i) in kept_ids
+    ]
+    return filtered, {
+        "max_trajectory_len": int(max_trajectory_len),
+        "original_trajectories": len(groups),
+        "filtered_trajectories": len(groups) - len(kept_ids),
+        "kept_trajectories": len(kept_ids),
+        "original_entries": len(entries),
+        "filtered_entries": len(entries) - len(filtered),
+        "kept_entries": len(filtered),
+    }
+
+
 def split_trajectory_ids(trajectory_ids: Sequence[str], val_ratio: float, seed: int) -> Tuple[List[str], List[str]]:
     ids = list(trajectory_ids)
     random.Random(seed).shuffle(ids)
@@ -267,8 +296,12 @@ def build_stage1_dataloaders_from_manifest(
     batch_size: int = 4,
     num_workers: int = 0,
     mode: str = "sequence",
+    max_trajectory_len: int = 0,
 ):
     entries = load_dataset_entries(Path(dataset_json))
+    entries, filter_meta = filter_entries_by_max_trajectory_len(entries, int(max_trajectory_len))
+    if not entries:
+        raise RuntimeError(f"No trajectories left after filtering with max_trajectory_len={int(max_trajectory_len)}")
     manifest = _read_json(Path(split_manifest_json))
     if not isinstance(manifest, dict):
         raise RuntimeError("split manifest 必须是对象。")
@@ -293,6 +326,7 @@ def build_stage1_dataloaders_from_manifest(
         "mode": mode,
         "batch_size": int(batch_size),
         "split_strategy": "fixed_manifest",
+        "filter": filter_meta,
     }
     return train_loader, val_loader, split_meta
 
@@ -303,9 +337,16 @@ def build_stage1_dataloaders_from_split_json(
     batch_size: int = 4,
     num_workers: int = 0,
     mode: str = "sequence",
+    max_trajectory_len: int = 0,
 ):
     train_entries = load_dataset_entries(Path(train_json))
     val_entries = load_dataset_entries(Path(val_json))
+    train_entries, train_filter_meta = filter_entries_by_max_trajectory_len(train_entries, int(max_trajectory_len))
+    val_entries, val_filter_meta = filter_entries_by_max_trajectory_len(val_entries, int(max_trajectory_len))
+    if not train_entries:
+        raise RuntimeError(f"No train trajectories left after filtering with max_trajectory_len={int(max_trajectory_len)}")
+    if not val_entries:
+        raise RuntimeError(f"No val trajectories left after filtering with max_trajectory_len={int(max_trajectory_len)}")
     merged_entries = list(train_entries) + list(val_entries)
     train_groups = group_by_trajectory(train_entries)
     val_groups = group_by_trajectory(val_entries)
@@ -334,6 +375,11 @@ def build_stage1_dataloaders_from_split_json(
         "mode": mode,
         "batch_size": int(batch_size),
         "split_strategy": "fixed_json",
+        "filter": {
+            "max_trajectory_len": int(max_trajectory_len),
+            "train": train_filter_meta,
+            "val": val_filter_meta,
+        },
     }
     return train_loader, val_loader, split_meta
 
@@ -345,8 +391,12 @@ def build_stage1_dataloaders(
     seed: int = 42,
     num_workers: int = 0,
     mode: str = "sequence",
+    max_trajectory_len: int = 0,
 ):
     entries = load_dataset_entries(Path(dataset_json))
+    entries, filter_meta = filter_entries_by_max_trajectory_len(entries, int(max_trajectory_len))
+    if not entries:
+        raise RuntimeError(f"No trajectories left after filtering with max_trajectory_len={int(max_trajectory_len)}")
     groups = group_by_trajectory(entries)
     all_ids = sorted(groups.keys())
     train_ids, val_ids = split_trajectory_ids(all_ids, val_ratio=val_ratio, seed=seed)
@@ -368,5 +418,6 @@ def build_stage1_dataloaders(
         "batch_size": int(batch_size),
         "val_ratio": float(val_ratio),
         "seed": int(seed),
+        "filter": filter_meta,
     }
     return train_loader, val_loader, split_meta

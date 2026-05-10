@@ -272,6 +272,12 @@ def main():
     parser.add_argument("--epochs", type=int, default=10, help="Training epochs")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
     parser.add_argument("--max_len", type=int, default=100, help="Fixed max trajectory length")
+    parser.add_argument(
+        "--max_trajectory_len",
+        type=int,
+        default=0,
+        help="Filter out trajectories longer than this many steps; 0 disables filtering",
+    )
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
     parser.add_argument("--lambda_b1", type=float, default=10, help="B1 loss weight")
@@ -307,6 +313,7 @@ def main():
             batch_size=int(args.batch_size),
             num_workers=int(args.num_workers),
             mode="sequence",
+            max_trajectory_len=int(args.max_trajectory_len),
         )
     elif args.split_manifest_json:
         train_loader, val_loader, split_meta = build_stage1_dataloaders_from_manifest(
@@ -315,6 +322,7 @@ def main():
             batch_size=int(args.batch_size),
             num_workers=int(args.num_workers),
             mode="sequence",
+            max_trajectory_len=int(args.max_trajectory_len),
         )
     else:
         train_loader, val_loader, split_meta = build_stage1_dataloaders(
@@ -324,6 +332,7 @@ def main():
             seed=int(args.seed),
             num_workers=int(args.num_workers),
             mode="sequence",
+            max_trajectory_len=int(args.max_trajectory_len),
         )
 
     feature_store = FeatureCacheStore(Path(args.cache_dir))
@@ -354,6 +363,7 @@ def main():
             "epochs": int(args.epochs),
             "batch_size": int(args.batch_size),
             "max_len": int(args.max_len),
+            "max_trajectory_len": int(args.max_trajectory_len),
             "lr": float(args.lr),
             "weight_decay": float(args.weight_decay),
             "lambda_b1": float(args.lambda_b1),
