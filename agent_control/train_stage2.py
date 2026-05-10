@@ -1,11 +1,16 @@
 import argparse
 import json
+import os
 import random
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from PIL import Image
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from hf_auth import load_hf_token_from_env_file
 from prompting import build_prompt
@@ -20,6 +25,121 @@ from trajectory_dataset import (
     build_stage1_dataloaders_from_manifest,
     build_stage1_dataloaders_from_split_json,
 )
+
+
+def _dist_is_active():
+    return dist.is_available() and dist.is_initialized()
+
+
+def _is_main_process():
+    return not _dist_is_active() or dist.get_rank() == 0
+
+
+def _unwrap_model(model):
+    return getattr(model, "module", model)
+
+
+def _print_rank0(message: str):
+    if _is_main_process():
+        print(message, flush=True)
+
+
+def _parse_gpu_ids(gpu_ids_text: str):
+    if gpu_ids_text is None:
+        return []
+    gpu_ids = []
+    for part in str(gpu_ids_text).split(","):
+        part = part.strip()
+        if part:
+            gpu_ids.append(int(part))
+    return gpu_ids
+
+
+def _maybe_launch_with_gpu_ids(args):
+    gpu_ids = _parse_gpu_ids(getattr(args, "gpu_ids", ""))
+    if "RANK" in os.environ or "WORLD_SIZE" in os.environ or not gpu_ids:
+        return False
+    if not torch.cuda.is_available():
+        raise RuntimeError("--gpu_ids requires CUDA.")
+
+    script_path = Path(__file__).resolve()
+    cleaned = []
+    skip_next = False
+    for arg in sys.argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--gpu_ids":
+            skip_next = True
+            continue
+        if arg.startswith("--gpu_ids="):
+            continue
+        cleaned.append(arg)
+
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(x) for x in gpu_ids)
+    if len(gpu_ids) == 1:
+        env.setdefault("LOCAL_RANK", "0")
+        os.environ["CUDA_VISIBLE_DEVICES"] = env["CUDA_VISIBLE_DEVICES"]
+        args.device = "cuda:0"
+        return False
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        f"--nproc_per_node={len(gpu_ids)}",
+        str(script_path),
+        *cleaned,
+    ]
+    print(f"Launching DDP on physical GPUs {gpu_ids}; each process sees one local CUDA device.", flush=True)
+    raise SystemExit(subprocess.call(cmd, env=env))
+
+
+def _setup_distributed(args):
+    if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:
+        device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
+        return {"distributed": False, "rank": 0, "local_rank": 0, "world_size": 1, "device": device}
+    if not torch.cuda.is_available():
+        raise RuntimeError("Distributed training requires CUDA in this script.")
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ.get("LOCAL_RANK", rank))
+    world_size = int(os.environ["WORLD_SIZE"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend=str(args.dist_backend), init_method="env://")
+    return {
+        "distributed": True,
+        "rank": rank,
+        "local_rank": local_rank,
+        "world_size": world_size,
+        "device": torch.device(f"cuda:{local_rank}"),
+    }
+
+
+def _cleanup_distributed():
+    if _dist_is_active():
+        dist.destroy_process_group()
+
+
+def _wrap_loader_for_distributed(loader, shuffle: bool, seed: int):
+    if not _dist_is_active():
+        return loader, None
+    try:
+        from torch.utils.data import DataLoader
+        from torch.utils.data.distributed import DistributedSampler
+    except Exception as e:
+        raise RuntimeError("PyTorch DataLoader/DistributedSampler is required for DDP stage2 training.") from e
+    sampler = DistributedSampler(loader.dataset, shuffle=bool(shuffle), seed=int(seed))
+    wrapped = DataLoader(
+        loader.dataset,
+        batch_size=int(loader.batch_size),
+        shuffle=False,
+        sampler=sampler,
+        num_workers=int(loader.num_workers),
+        collate_fn=loader.collate_fn,
+        pin_memory=torch.cuda.is_available(),
+    )
+    return wrapped, sampler
 
 
 def _repo_root():
@@ -206,6 +326,12 @@ def _run_epoch(
         total_loss += float(batch_loss.item())
         total_steps += 1
 
+    if _dist_is_active():
+        stats = torch.tensor([total_loss, float(total_steps)], dtype=torch.float64, device=device)
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        total_loss = float(stats[0].item())
+        total_steps = int(stats[1].item())
+
     if total_steps == 0:
         return {"loss": 0.0, "batches": 0}
     return {"loss": total_loss / total_steps, "batches": total_steps}
@@ -249,19 +375,38 @@ def main():
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--lora_targets", default="q_proj,k_proj,v_proj,o_proj")
     parser.add_argument("--device", default="cuda:3")
+    parser.add_argument(
+        "--gpu_ids",
+        default="",
+        help="Comma-separated physical GPU ids. If multiple ids are set, launches one DDP process per GPU.",
+    )
+    parser.add_argument("--dist_backend", default="nccl")
     args = parser.parse_args()
+
+    if _maybe_launch_with_gpu_ids(args):
+        return 0
+
+    dist_state = _setup_distributed(args)
+    rank = int(dist_state["rank"])
+    local_rank = int(dist_state["local_rank"])
+    world_size = int(dist_state["world_size"])
+    device = dist_state["device"]
 
     repo_root = _repo_root()
     load_hf_token_from_env_file(repo_root)
 
-    random.seed(int(args.seed))
-    np.random.seed(int(args.seed))
-    torch.manual_seed(int(args.seed))
+    random.seed(int(args.seed) + rank)
+    np.random.seed(int(args.seed) + rank)
+    torch.manual_seed(int(args.seed) + rank)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(args.seed) + rank)
 
-    device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
     device_str = str(device)
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if _is_main_process():
+        output_dir.mkdir(parents=True, exist_ok=True)
+    if _dist_is_active():
+        dist.barrier()
 
     if args.train_json and args.val_json:
         train_loader, val_loader, split_meta = build_stage1_dataloaders_from_split_json(
@@ -288,6 +433,12 @@ def main():
             num_workers=int(args.num_workers),
             mode="sequence",
         )
+    train_loader, train_sampler = _wrap_loader_for_distributed(train_loader, shuffle=True, seed=int(args.seed))
+    val_loader, val_sampler = _wrap_loader_for_distributed(val_loader, shuffle=False, seed=int(args.seed))
+    _print_rank0(
+        f"Distributed: enabled={bool(dist_state['distributed'])} world_size={world_size} "
+        f"device={device} output_dir={output_dir}"
+    )
 
     feature_store = FeatureCacheStore(Path(args.cache_dir))
     dataset_root = Path(args.dataset_root)
@@ -328,6 +479,16 @@ def main():
         use_factorization=bool(args.smt_use_factorization),
     )
     smt_encoder = SmtObservationEncoder(smt_cfg).to(device)
+
+    if bool(dist_state["distributed"]):
+        bridge = DDP(bridge, device_ids=[local_rank], output_device=local_rank)
+        smt_encoder = DDP(smt_encoder, device_ids=[local_rank], output_device=local_rank)
+        qwen._model = DDP(
+            qwen.model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=True,
+        )
 
     lora_params = [p for p in qwen.model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
@@ -378,12 +539,17 @@ def main():
         },
         "split_meta": split_meta,
     }
-    _write_json(output_dir / "config.json", config_payload)
+    if _is_main_process():
+        _write_json(output_dir / "config.json", config_payload)
 
     best_val = float("inf")
     history = []
 
     for epoch in range(1, int(args.epochs) + 1):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+        if val_sampler is not None:
+            val_sampler.set_epoch(epoch)
         train_metrics = _run_epoch(
             stage1_model=stage1_model,
             smt_encoder=smt_encoder,
@@ -413,31 +579,35 @@ def main():
             )
 
         record = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
-        history.append(record)
-        print(
-            f"epoch={epoch} "
-            f"train_loss={train_metrics['loss']:.4f} train_batches={train_metrics['batches']} "
-            f"val_loss={val_metrics['loss']:.4f} val_batches={val_metrics['batches']}"
-        )
+        if _is_main_process():
+            history.append(record)
+            print(
+                f"epoch={epoch} "
+                f"train_loss={train_metrics['loss']:.4f} train_batches={train_metrics['batches']} "
+                f"val_loss={val_metrics['loss']:.4f} val_batches={val_metrics['batches']}",
+                flush=True,
+            )
 
-        payload = {
-            "epoch": epoch,
-            "bridge_state_dict": bridge.state_dict(),
-            "smt_state_dict": smt_encoder.state_dict(),
-            "config": config_payload,
-            "history": history,
-        }
-        torch.save(payload, output_dir / "last.pt")
-        qwen.model.save_pretrained(output_dir / "lora_last")
+            payload = {
+                "epoch": epoch,
+                "bridge_state_dict": _unwrap_model(bridge).state_dict(),
+                "smt_state_dict": _unwrap_model(smt_encoder).state_dict(),
+                "config": config_payload,
+                "history": history,
+            }
+            torch.save(payload, output_dir / "last.pt")
+            _unwrap_model(qwen.model).save_pretrained(output_dir / "lora_last")
 
-        if val_metrics["loss"] < best_val:
-            best_val = val_metrics["loss"]
-            torch.save(payload, output_dir / "best.pt")
-            qwen.model.save_pretrained(output_dir / "lora_best")
+            if val_metrics["loss"] < best_val:
+                best_val = val_metrics["loss"]
+                torch.save(payload, output_dir / "best.pt")
+                _unwrap_model(qwen.model).save_pretrained(output_dir / "lora_best")
 
-    _write_json(output_dir / "history.json", history)
-    print(f"Stage2 training finished. best_val_loss={best_val:.4f}")
-    print(f"Output dir: {output_dir}")
+    if _is_main_process():
+        _write_json(output_dir / "history.json", history)
+        print(f"Stage2 training finished. best_val_loss={best_val:.4f}")
+        print(f"Output dir: {output_dir}")
+    _cleanup_distributed()
     return 0
 
 
