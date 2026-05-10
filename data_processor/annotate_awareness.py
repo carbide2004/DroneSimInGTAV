@@ -489,7 +489,7 @@ def main():
     )
     parser.add_argument(
         "--model_dir",
-        default=str(_repo_root() / "agent_control" / "models" / "qwen3_vl_sft_merged"),
+        default=str(_repo_root() / "agent_control" / "models" / "qwen3_vl_sft_GTAV_20260509"),
         help="Model directory path",
     )
     parser.add_argument("--history_k", type=int, default=12, help="Number of recent actions to include in context")
