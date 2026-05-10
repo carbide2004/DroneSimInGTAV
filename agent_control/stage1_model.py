@@ -12,7 +12,7 @@ class Stage1Config:
     action_dim: int = 6
     align_dim: int = 256
     text_dim: int = 384
-    max_len: int = 100
+    max_len: int = 0  # Deprecated: kept only for loading older checkpoints.
 
     def to_dict(self) -> Dict:
         return asdict(self)
