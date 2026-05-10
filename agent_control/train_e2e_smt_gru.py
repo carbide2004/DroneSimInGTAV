@@ -295,6 +295,41 @@ def _split_trajectory_ids(entries: Sequence[Dict], val_ratio: float, seed: int):
     return train_ids, val_ids
 
 
+def _filter_entries_by_max_trajectory_len(entries: Sequence[Dict], max_trajectory_len: int):
+    if int(max_trajectory_len) <= 0:
+        ids = sorted({_trajectory_id(entry, i) for i, entry in enumerate(entries)})
+        return list(entries), {
+            "max_trajectory_len": int(max_trajectory_len),
+            "original_trajectories": len(ids),
+            "filtered_trajectories": 0,
+            "kept_trajectories": len(ids),
+            "original_entries": len(entries),
+            "filtered_entries": 0,
+            "kept_entries": len(entries),
+        }
+
+    groups: Dict[str, List[Dict]] = {}
+    for i, entry in enumerate(entries):
+        groups.setdefault(_trajectory_id(entry, i), []).append(entry)
+
+    kept_ids = {tid for tid, items in groups.items() if len(items) <= int(max_trajectory_len)}
+    filtered_entries = [
+        entry for i, entry in enumerate(entries)
+        if _trajectory_id(entry, i) in kept_ids
+    ]
+    filtered_trajectory_count = len(groups) - len(kept_ids)
+    filtered_entry_count = len(entries) - len(filtered_entries)
+    return filtered_entries, {
+        "max_trajectory_len": int(max_trajectory_len),
+        "original_trajectories": len(groups),
+        "filtered_trajectories": filtered_trajectory_count,
+        "kept_trajectories": len(kept_ids),
+        "original_entries": len(entries),
+        "filtered_entries": filtered_entry_count,
+        "kept_entries": len(filtered_entries),
+    }
+
+
 def _build_loaders(
     dataset_json: Path,
     batch_size: int,
@@ -302,6 +337,7 @@ def _build_loaders(
     seed: int,
     num_workers: int,
     distributed: bool,
+    max_trajectory_len: int,
 ):
     data = _read_json(dataset_json)
     if not isinstance(data, list):
@@ -315,6 +351,11 @@ def _build_loaders(
         _image_paths(entry)
         _pose_dict(entry)
         _safe_action_id(entry)
+    data, filter_meta = _filter_entries_by_max_trajectory_len(data, int(max_trajectory_len))
+    if not data:
+        raise RuntimeError(
+            f"No trajectories left after filtering with max_trajectory_len={int(max_trajectory_len)}."
+        )
     train_ids, val_ids = _split_trajectory_ids(data, val_ratio=val_ratio, seed=seed)
     train_dataset = TrajectoryDataset(data, train_ids)
     val_dataset = TrajectoryDataset(data, val_ids)
@@ -348,6 +389,7 @@ def _build_loaders(
         "total_trajectories": len(train_ids) + len(val_ids),
         "train_trajectories": len(train_ids),
         "val_trajectories": len(val_ids),
+        "filter": filter_meta,
         "train_ids": train_ids,
         "val_ids": val_ids,
     }
@@ -740,6 +782,12 @@ def main():
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--max_len", type=int, default=100)
+    parser.add_argument(
+        "--max_trajectory_len",
+        type=int,
+        default=0,
+        help="Filter out trajectories longer than this many steps; 0 disables filtering",
+    )
     parser.add_argument("--image_size", type=int, default=96)
     parser.add_argument("--steps_per_batch", type=int, default=2)
     parser.add_argument("--val_ratio", type=float, default=0.2)
@@ -808,11 +856,13 @@ def main():
         seed=int(args.seed),
         num_workers=int(args.num_workers),
         distributed=bool(dist_state["distributed"]),
+        max_trajectory_len=int(args.max_trajectory_len),
     )
     _print_rank0(
         f"Distributed: enabled={bool(dist_state['distributed'])} world_size={world_size} "
         f"device={device} output_dir={output_dir}"
     )
+    _print_rank0(f"Trajectory length filter: {split_meta['filter']}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.text_model_name, token=hf_token)
     text_encoder = AutoModel.from_pretrained(args.text_model_name, token=hf_token).to(device)
@@ -885,6 +935,7 @@ def main():
             "epochs": int(args.epochs),
             "batch_size": int(args.batch_size),
             "max_len": int(args.max_len),
+            "max_trajectory_len": int(args.max_trajectory_len),
             "image_size": int(args.image_size),
             "steps_per_batch": int(args.steps_per_batch),
             "lambda_vlm_action": float(args.lambda_vlm_action),
