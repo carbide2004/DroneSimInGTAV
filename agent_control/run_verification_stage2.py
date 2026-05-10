@@ -614,7 +614,7 @@ def run_single_verification_stage2(
                         do_sample=False,
                     )
                 action = parse_action(raw) or "AUTO_FORWARD"
-                print(f"  [{steps}] {action}")
+                print(f"  [{steps}] {action}(raw_message='{raw}')")
             else:
                 # Baseline policy: direct VLA action generation without GRU soft prompt.
                 with _timed_stage(step_timing, "vla_direct_generate_parse", bool(profile_timing and timing_sync_cuda)):
@@ -626,7 +626,7 @@ def run_single_verification_stage2(
                         do_sample=False,
                     )
                 action = parse_action(raw) or "AUTO_FORWARD"
-                print(f"  [{steps}] {action}")
+                print(f"  [{steps}] {action}(raw_message='{raw}')")
             if action == "AUTO_STOP_REACHED":
                 stopped_by_model = True
                 step_timing["step_total"] = float(time.perf_counter() - step_start)
