@@ -869,7 +869,7 @@ static void run_auto_collect(AutoCollectEvent event_type) {
         float desiredYaw = quantize_deg(yaw_to_target_deg(pos, target), YAW_STEPSIZE);
         float delta = wrap_angle_deg(desiredYaw - rot.z);
 
-        if (fabsf(delta) > YAW_STEPSIZE) {
+        if (fabsf(delta) > YAW_STEPSIZE * 2 / 3) {
             float step_val = (delta > 0.0f) ? YAW_STEPSIZE : -YAW_STEPSIZE;
             record_step(delta > 0.0f ? "AUTO_YAW_LEFT" : "AUTO_YAW_RIGHT", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, step_val);
             rotateCameraDelta(0.0f, 0.0f, step_val);
@@ -1097,7 +1097,7 @@ void scriptMain()
             {
                 LOGD("script", "F12 pressed - Starting automated batch collection");
                 // 默认使用火灾进行批量自动采集，你可以根据需求改成 AUTO_EVENT_ACCIDENT 等
-                run_automated_collection(AUTO_EVENT_FIRE, 150);
+                run_automated_collection(AUTO_EVENT_FIRE, 100);
             }
             if (F6.isKeyDown())
             {
