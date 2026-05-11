@@ -138,17 +138,18 @@ class FeatureCacheStore:
         return np.concatenate([rgb.astype(np.float32), depth.astype(np.float32)], axis=0)
 
 
-def _prepare_batch(batch, feature_store: FeatureCacheStore, max_len: int, device: torch.device):
+def _prepare_batch(batch, feature_store: FeatureCacheStore, device: torch.device):
     raw_batch = batch["raw_batch"]
     bsz = len(raw_batch)
-    features = torch.zeros((bsz, max_len, feature_store.feature_dim), dtype=torch.float32, device=device)
-    action_ids = torch.full((bsz, max_len), fill_value=-1, dtype=torch.long, device=device)
-    valid_mask = torch.zeros((bsz, max_len), dtype=torch.bool, device=device)
+    seq_len = max((len(item["steps"]) for item in raw_batch), default=0)
+    features = torch.zeros((bsz, seq_len, feature_store.feature_dim), dtype=torch.float32, device=device)
+    action_ids = torch.full((bsz, seq_len), fill_value=-1, dtype=torch.long, device=device)
+    valid_mask = torch.zeros((bsz, seq_len), dtype=torch.bool, device=device)
     align_positions: List[Tuple[int, int]] = []
     align_texts: List[str] = []
 
     for i, item in enumerate(raw_batch):
-        steps = item["steps"][:max_len]
+        steps = item["steps"]
         for j, step in enumerate(steps):
             action_id = int(step["action_id"])
             if action_id < 0 or action_id >= len(ACTION_SET):
@@ -192,7 +193,6 @@ def _run_epoch(
     text_encoder,
     optimizer,
     device: torch.device,
-    max_len: int,
     lambda_b1: float,
     temperature: float,
     train: bool,
@@ -205,7 +205,7 @@ def _run_epoch(
     steps = 0
 
     for batch in loader:
-        prepared = _prepare_batch(batch, feature_store, max_len=max_len, device=device)
+        prepared = _prepare_batch(batch, feature_store, device=device)
         features = prepared["features"]
         action_ids = prepared["action_ids"]
         valid_mask = prepared["valid_mask"]
@@ -271,7 +271,12 @@ def main():
     )
     parser.add_argument("--epochs", type=int, default=10, help="Training epochs")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
-    parser.add_argument("--max_len", type=int, default=100, help="Fixed max trajectory length")
+    parser.add_argument(
+        "--max_trajectory_len",
+        type=int,
+        default=0,
+        help="Filter out trajectories longer than this many steps; 0 disables filtering",
+    )
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
     parser.add_argument("--lambda_b1", type=float, default=10, help="B1 loss weight")
@@ -307,6 +312,7 @@ def main():
             batch_size=int(args.batch_size),
             num_workers=int(args.num_workers),
             mode="sequence",
+            max_trajectory_len=int(args.max_trajectory_len),
         )
     elif args.split_manifest_json:
         train_loader, val_loader, split_meta = build_stage1_dataloaders_from_manifest(
@@ -315,6 +321,7 @@ def main():
             batch_size=int(args.batch_size),
             num_workers=int(args.num_workers),
             mode="sequence",
+            max_trajectory_len=int(args.max_trajectory_len),
         )
     else:
         train_loader, val_loader, split_meta = build_stage1_dataloaders(
@@ -324,6 +331,7 @@ def main():
             seed=int(args.seed),
             num_workers=int(args.num_workers),
             mode="sequence",
+            max_trajectory_len=int(args.max_trajectory_len),
         )
 
     feature_store = FeatureCacheStore(Path(args.cache_dir))
@@ -340,7 +348,6 @@ def main():
         action_dim=len(ACTION_SET),
         align_dim=256,
         text_dim=text_dim,
-        max_len=int(args.max_len),
     )
     model = Stage1GRUModel(config).to(device)
 
@@ -353,7 +360,7 @@ def main():
         "train": {
             "epochs": int(args.epochs),
             "batch_size": int(args.batch_size),
-            "max_len": int(args.max_len),
+            "max_trajectory_len": int(args.max_trajectory_len),
             "lr": float(args.lr),
             "weight_decay": float(args.weight_decay),
             "lambda_b1": float(args.lambda_b1),
@@ -380,7 +387,6 @@ def main():
             text_encoder=text_encoder,
             optimizer=optimizer,
             device=device,
-            max_len=int(args.max_len),
             lambda_b1=float(args.lambda_b1),
             temperature=float(args.temperature),
             train=True,
@@ -393,7 +399,6 @@ def main():
             text_encoder=text_encoder,
             optimizer=optimizer,
             device=device,
-            max_len=int(args.max_len),
             lambda_b1=float(args.lambda_b1),
             temperature=float(args.temperature),
             train=False,

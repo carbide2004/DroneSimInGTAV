@@ -17,7 +17,7 @@ static Any cameraHandle;
 
 void startNewCamera()
 {
-	//Find the location of our camera based on the current actor
+	// 根据当前角色位置计算相机位置
 	Ped actorPed = PLAYER::PLAYER_PED_ID();
 	Vector3 startLocation = ENTITY::GET_ENTITY_COORDS(actorPed, true);
 	float startHeading = ENTITY::GET_ENTITY_HEADING(actorPed);

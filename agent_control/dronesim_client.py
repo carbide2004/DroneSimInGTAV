@@ -71,7 +71,7 @@ class DroneSimClient:
         time.sleep(0.1)
 
     def move_to(self, x, y, z):
-        """Move camera to absolute position (keeping current rotation)"""
+        """将相机移动到绝对位置，保持当前旋转。"""
         current_pose = self.get_pose()
         if current_pose is None:
             return
@@ -85,7 +85,7 @@ class DroneSimClient:
         time.sleep(0.1)
 
     def set_rotation(self, rx, ry, rz):
-        """Set camera to absolute rotation (keeping current position)"""
+        """设置相机绝对旋转，保持当前位置。"""
         current_pose = self.get_pose()
         if current_pose is None:
             return
@@ -93,7 +93,7 @@ class DroneSimClient:
         self.set_posture(x, y, z, rx, ry, rz)
 
     def set_posture(self, x, y, z, rx, ry, rz):
-        """Set camera to absolute position and rotation"""
+        """设置相机绝对位置和旋转。"""
         payload = struct.pack("ffffff", x, y, z, rx, ry, rz)
         s = self._send(TYPE_SET_POSTURE, 16, payload)
         self._recv(s)
@@ -188,14 +188,14 @@ class DroneSimClient:
         return x, y, z
     
     def teleport_player(self, x, y, z):
-        """Teleport player character to anomaly center with invincibility and invisibility"""
+        """将玩家角色传送到异常中心，并设置为无敌和不可见。"""
         payload = struct.pack("fff", x, y, z)
         s = self._send(TYPE_TELEPORT_PLAYER, 17, payload)
         self._recv(s)
         time.sleep(1.5)  # Longer wait for view switching and teleportation
 
     def restore_player(self):
-        """Restore player to normal state after verification"""
+        """验证结束后恢复玩家正常状态。"""
         s = self._send(TYPE_RESTORE_PLAYER, 18)
         self._recv(s)
         time.sleep(1.5)  # Longer wait for view switching and restoration

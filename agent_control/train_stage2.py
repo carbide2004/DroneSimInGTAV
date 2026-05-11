@@ -205,15 +205,16 @@ def _load_step_images(dataset_root: Path, step: dict):
     return rgb_img, depth_img
 
 
-def _prepare_features(raw_batch, feature_store: FeatureCacheStore, max_len: int, device: torch.device):
+def _prepare_features(raw_batch, feature_store: FeatureCacheStore, device: torch.device):
     batch_size = len(raw_batch)
-    features = torch.zeros((batch_size, max_len, feature_store.feature_dim), dtype=torch.float32, device=device)
-    poses = torch.zeros((batch_size, max_len, 6), dtype=torch.float32, device=device)
-    action_ids = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
+    seq_len = max((len(item["steps"]) for item in raw_batch), default=0)
+    features = torch.zeros((batch_size, seq_len, feature_store.feature_dim), dtype=torch.float32, device=device)
+    poses = torch.zeros((batch_size, seq_len, 6), dtype=torch.float32, device=device)
+    action_ids = torch.zeros((batch_size, seq_len), dtype=torch.long, device=device)
     valid_steps = []
 
     for i, item in enumerate(raw_batch):
-        steps = item["steps"][:max_len]
+        steps = item["steps"]
         for j, step in enumerate(steps):
             sample_id = step["sample_id"]
             feat = feature_store.get(sample_id)
@@ -253,7 +254,6 @@ def _run_epoch(
     feature_store: FeatureCacheStore,
     dataset_root: Path,
     device: torch.device,
-    max_len: int,
     steps_per_batch: int,
     optimizer=None,
 ):
@@ -266,7 +266,7 @@ def _run_epoch(
 
     for batch in loader:
         raw_batch = batch["raw_batch"]
-        features, poses, action_ids, valid_steps = _prepare_features(raw_batch, feature_store, max_len=max_len, device=device)
+        features, poses, action_ids, valid_steps = _prepare_features(raw_batch, feature_store, device=device)
         selected_steps = _select_steps(valid_steps, steps_per_batch=steps_per_batch)
         if not selected_steps:
             continue
@@ -347,7 +347,12 @@ def main():
     parser.add_argument("--output_dir", default=str(_repo_root() / "agent_control" / "checkpoints" / "stage2"))
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--max_len", type=int, default=100)
+    parser.add_argument(
+        "--max_trajectory_len",
+        type=int,
+        default=0,
+        help="Filter out trajectories longer than this many steps; 0 disables filtering",
+    )
     parser.add_argument("--val_ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=0)
@@ -415,6 +420,7 @@ def main():
             batch_size=int(args.batch_size),
             num_workers=int(args.num_workers),
             mode="sequence",
+            max_trajectory_len=int(args.max_trajectory_len),
         )
     elif args.split_manifest_json:
         train_loader, val_loader, split_meta = build_stage1_dataloaders_from_manifest(
@@ -423,6 +429,7 @@ def main():
             batch_size=int(args.batch_size),
             num_workers=int(args.num_workers),
             mode="sequence",
+            max_trajectory_len=int(args.max_trajectory_len),
         )
     else:
         train_loader, val_loader, split_meta = build_stage1_dataloaders(
@@ -432,6 +439,7 @@ def main():
             seed=int(args.seed),
             num_workers=int(args.num_workers),
             mode="sequence",
+            max_trajectory_len=int(args.max_trajectory_len),
         )
     train_loader, train_sampler = _wrap_loader_for_distributed(train_loader, shuffle=True, seed=int(args.seed))
     val_loader, val_sampler = _wrap_loader_for_distributed(val_loader, shuffle=False, seed=int(args.seed))
@@ -533,7 +541,7 @@ def main():
         "train": {
             "epochs": int(args.epochs),
             "batch_size": int(args.batch_size),
-            "max_len": int(args.max_len),
+            "max_trajectory_len": int(args.max_trajectory_len),
             "val_ratio": float(args.val_ratio),
             "seed": int(args.seed),
             "lr_bridge": float(args.lr_bridge),
@@ -569,7 +577,6 @@ def main():
             feature_store=feature_store,
             dataset_root=dataset_root,
             device=device,
-            max_len=int(args.max_len),
             steps_per_batch=int(args.steps_per_batch),
             optimizer=optimizer,
         )
@@ -583,7 +590,6 @@ def main():
                 feature_store=feature_store,
                 dataset_root=dataset_root,
                 device=device,
-                max_len=int(args.max_len),
                 steps_per_batch=int(args.steps_per_batch),
                 optimizer=None,
             )

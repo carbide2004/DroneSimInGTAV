@@ -154,8 +154,8 @@ def generate_action_with_soft_prompt(
         return ""
     full_text = str(full_text[0]).strip()
 
-    # With inputs_embeds generation, some backends return only generated tokens;
-    # others return prompt+generated tokens. Keep both paths robust.
+    # 使用 inputs_embeds 生成时，部分后端只返回生成的 token；
+    # 其他后端会返回提示词加生成 token，需要同时兼容两种路径。
     if out_ids.ndim == 2 and out_ids.shape[1] > prompt_len:
         tail_ids = out_ids[:, prompt_len:]
         tail_text = processor.batch_decode(tail_ids, skip_special_tokens=True)

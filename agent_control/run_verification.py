@@ -16,7 +16,7 @@ from verification_runtime import (
 
 
 def _repo_root():
-    # Try environment variable first, then fallback to hardcoded path
+    # 优先尝试环境变量，然后回退到硬编码路径
     env_path = os.getenv('DRONESIM_ROOT')
     if env_path:
         return Path(env_path)
@@ -57,19 +57,19 @@ def main():
     
     args = parser.parse_args()
     
-    # Determine root path
+    # 确定根路径
     if args.root_path:
         root_path = Path(args.root_path)
     else:
         root_path = _repo_root()
     
-    # Set default file paths if not specified
+    # 未指定时设置默认文件路径
     if args.verification_file is None:
         args.verification_file = str(root_path / "data" / "verification" / "samples.jsonl")
     if args.output_file is None:
         args.output_file = str(root_path / "data" / "verification" / "results.json")
     
-    # Load verification samples
+    # 加载验证样本
     verification_file = Path(args.verification_file)
     if not verification_file.exists():
         print(f"Error: Verification file not found: {verification_file}")
@@ -85,11 +85,11 @@ def main():
     
     print(f"Loaded {len(samples)} verification samples")
     
-    # Load model
+    # 加载模型
     print("Loading model...")
     model = Qwen3VLWrapper(args.model_dir).load()
     
-    # Connect to DroneSim
+    # 连接 DroneSim
     print("Connecting to DroneSim...")
     cli = DroneSimClient(host=args.host, port=int(args.port))
     

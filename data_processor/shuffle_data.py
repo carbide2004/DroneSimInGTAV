@@ -44,10 +44,10 @@ def main():
     
     args = parser.parse_args()
     
-    # Set random seed for reproducibility
+    # 设置随机种子以保证可复现
     random.seed(args.seed)
     
-    # Read input data
+    # 读取输入数据
     input_path = Path(args.input_json)
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
@@ -61,20 +61,20 @@ def main():
     original_count = len(data)
     print(f"Original data count: {original_count}")
     
-    # Shuffle the data
+    # 打乱数据
     shuffled_data = data.copy()
     random.shuffle(shuffled_data)
     
-    # Determine output path
+    # 确定输出路径
     if args.inplace:
         output_path = input_path
     else:
         output_path = Path(args.output_json)
     
-    # Ensure parent directory exists
+    # 确保父目录存在
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Write shuffled data
+    # 写入打乱后的数据
     print(f"Writing shuffled data to: {output_path}")
     _write_json(output_path, shuffled_data)
     

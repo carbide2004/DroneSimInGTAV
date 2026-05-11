@@ -151,12 +151,12 @@ class Qwen3VLWrapper:
         normalize_vector=True,
     ):
         """
-        Generate chat response and extract representation vector.
+        生成聊天回复并提取表征向量。
         
-        Returns:
+        返回：
             tuple: (generated_text, representation_vector)
-                - generated_text: str, the generated response
-                - representation_vector: list, the representation vector as a list of floats
+                - generated_text: 字符串，生成的回复
+                - representation_vector: list，浮点列表形式的表征向量
         """
         try:
             import torch
@@ -192,25 +192,25 @@ class Qwen3VLWrapper:
             except Exception:
                 pass
 
-        # Extract representation vector before generation
+        # 生成前提取表征向量
         with torch.inference_mode():
-            # Forward pass to get hidden states
+            # 前向传播以获取隐藏状态
             outputs = self.model(**inputs, output_hidden_states=True, use_cache=False)
             
-            # Get the last layer's hidden states
+            # 获取最后一层隐藏状态
             last_hidden_states = outputs.hidden_states[-1]  # [batch, seq_len, hidden_dim]
             
-            # Get the representation vector (last token of input sequence)
+            # 获取表征向量（输入序列最后一个 token）
             representation_vector = last_hidden_states[0, -1, :].cpu().float()  # [hidden_dim]
             
-            # Normalize if requested
+            # 按需归一化
             if normalize_vector:
                 representation_vector = F.normalize(representation_vector, p=2, dim=0)
             
-            # Convert to list for JSON serialization
+            # 转换为列表以便 JSON 序列化
             representation_vector = representation_vector.tolist()
 
-        # Generate text as usual
+        # 正常生成文本
         gen_kwargs = {
             "max_new_tokens": int(max_new_tokens),
             "do_sample": bool(do_sample),

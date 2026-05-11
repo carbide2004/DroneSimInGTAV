@@ -55,7 +55,7 @@ class SmtObservationEmbedding(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.pose_encoder = nn.Linear(5, config.pose_embed_dim)
-        # One extra id is reserved for the start-of-trajectory previous action.
+        # 额外保留一个 id 表示轨迹开始时的上一动作。
         self.action_encoder = nn.Embedding(config.num_actions + 1, config.action_embed_dim)
         total_dim = config.feature_embed_dim + config.pose_embed_dim + config.action_embed_dim
         self.out = nn.Linear(total_dim, config.d_model)
@@ -137,7 +137,7 @@ class SmtObservationEncoder(nn.Module):
     def _pose_tensor(self, poses: torch.Tensor) -> torch.Tensor:
         if poses.shape[-1] < 6:
             raise RuntimeError("SMT observation encoder expects pose tensors with at least 6 values.")
-        # The SMT memory only needs planar position and yaw.
+        # SMT 记忆只需要平面位置和偏航角。
         rz_rad = poses[..., 5] * (torch.pi / 180.0)
         return torch.stack([poses[..., 0], poses[..., 1], rz_rad], dim=-1)
 
