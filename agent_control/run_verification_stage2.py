@@ -565,7 +565,7 @@ def run_single_verification_stage2(
                 with _timed_stage(step_timing, "e2e_smt_gru_bridge", bool(profile_timing and timing_sync_cuda)):
                     e2e_image_history.append(image_t.unsqueeze(0).unsqueeze(0))
                     e2e_pose_history.append(pose_t.unsqueeze(1))
-                    # E2ESmtGruModel shifts action_ids internally, so the current slot can be a dummy.
+                    # E2ESmtGruModel 会在内部平移 action_ids，因此当前位置可以使用占位值。
                     action_seq = list(e2e_action_history) + [0]
                     actions_t = torch.tensor([action_seq], dtype=torch.long, device=e2e_device)
                     images_t = torch.cat(e2e_image_history, dim=1)
@@ -616,7 +616,7 @@ def run_single_verification_stage2(
                 action = parse_action(raw) or "AUTO_FORWARD"
                 print(f"  [{steps}] {action}")
             else:
-                # Baseline policy: direct VLA action generation without GRU soft prompt.
+                # 不使用 GRU 软提示，直接通过 VLA 生成动作。
                 with _timed_stage(step_timing, "vla_direct_generate_parse", bool(profile_timing and timing_sync_cuda)):
                     raw = qwen.generate_action(
                         prompt_text=prompt,
@@ -994,7 +994,7 @@ def main():
                 trace_root=trace_root,
             )
             results.append(result)
-            # Save progress after every completed sample to avoid losing finished results.
+            # 每完成一个样本就保存进度，避免丢失已完成结果。
             _save_progress(status="running", current_index=i + 1)
     except KeyboardInterrupt as e:
         run_error = e

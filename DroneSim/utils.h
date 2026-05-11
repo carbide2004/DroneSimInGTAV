@@ -12,7 +12,7 @@
 #include "types.h"
 #include "natives.h"
 
-// returns module load path with trailing slash
+// 返回带末尾斜杠的模块加载路径
 std::string GetCurrentModulePath();
 std::string roundNumber(float number);
 

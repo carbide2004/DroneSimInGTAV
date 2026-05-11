@@ -17,11 +17,11 @@ def plot_history(file_path):
     # 提取字段
     epochs = [x['epoch'] for x in history]
     
-    # Train Loss
+    # 训练损失
     train_act = [x['train']['action_loss'] for x in history]
     train_b1 = [x['train']['b1_loss'] for x in history]
     
-    # Val Loss
+    # 验证损失
     val_act = [x['val']['action_loss'] for x in history]
     val_b1 = [x['val']['b1_loss'] for x in history]
 

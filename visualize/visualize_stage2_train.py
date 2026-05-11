@@ -17,10 +17,10 @@ def plot_stage2_history(file_path):
     # 提取字段
     epochs = [x['epoch'] for x in history]
 
-    # Train Loss
+    # 训练损失
     train_loss = [x['train']['loss'] for x in history]
 
-    # Val Loss
+    # 验证损失
     val_loss = [x['val']['loss'] for x in history]
 
     # 绘图

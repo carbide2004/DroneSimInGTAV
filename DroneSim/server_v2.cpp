@@ -320,7 +320,7 @@ void ServerV2::handle_client() {
             enqueue_command("CREATE_ACCIDENT");
             LOGD("server_v2", std::string("CREATE_ACCIDENT enqueued"));
             int tries = 0;
-            // Wait for up to 20 seconds for the accident to be set up and collision detected
+            // 最多等待 20 秒，让事故场景完成设置并检测碰撞
             while (!g_accidentReady.load(std::memory_order_acquire) && tries < 4000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
             
             MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_ACCIDENT; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;

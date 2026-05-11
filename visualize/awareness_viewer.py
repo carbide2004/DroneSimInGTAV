@@ -18,7 +18,7 @@ def _read_json(path):
 
 
 def _get_action(entry):
-    """Extract action from messages"""
+    """从消息中提取动作。"""
     msgs = entry.get("messages") or []
     for m in reversed(msgs):
         if m.get("role") == "assistant":
@@ -29,13 +29,13 @@ def _get_action(entry):
 
 
 def _get_pose(entry):
-    """Extract pose information from messages"""
+    """从消息中提取位姿信息。"""
     msgs = entry.get("messages") or []
     for m in msgs:
         if m.get("role") == "user":
             content = m.get("content", "")
             if "Current Pose:" in content:
-                # Extract pose line
+                # 提取位姿行
                 lines = content.split('\n')
                 for line in lines:
                     if line.strip().startswith("Current Pose:"):
@@ -44,7 +44,7 @@ def _get_pose(entry):
 
 
 def _wrap_text(text, max_width, font):
-    """Wrap text to fit within max_width"""
+    """按最大宽度自动换行文本。"""
     words = text.split(' ')
     lines = []
     current_line = []
@@ -68,13 +68,13 @@ def _wrap_text(text, max_width, font):
 
 
 def _create_info_panel(action, pose, awareness, panel_width=600, panel_height=400):
-    """Create an information panel with action, pose, and awareness"""
-    # Create a white background
+    """创建包含动作、位姿和 awareness 的信息面板。"""
+    # 创建白色背景
     panel = Image.new('RGB', (panel_width, panel_height), color='white')
     draw = ImageDraw.Draw(panel)
     
     try:
-        # Try to load a font, fallback to default if not available
+        # 尝试加载字体，不可用时回退到默认字体
         font_large = ImageFont.truetype("arial.ttf", 24)
         font_medium = ImageFont.truetype("arial.ttf", 22)
         font_small = ImageFont.truetype("arial.ttf", 20)
@@ -86,23 +86,23 @@ def _create_info_panel(action, pose, awareness, panel_width=600, panel_height=40
     y_offset = 10
     margin = 10
     
-    # Draw Action
+    # 绘制动作
     draw.text((margin, y_offset), "Action:", fill='black', font=font_large)
     y_offset += 30
     draw.text((margin, y_offset), action, fill='blue', font=font_medium)
     y_offset += 40
     
-    # Draw Pose
+    # 绘制位姿
     draw.text((margin, y_offset), "Pose:", fill='black', font=font_large)
     y_offset += 30
     draw.text((margin, y_offset), pose, fill='green', font=font_small)
     y_offset += 40
     
-    # Draw Awareness
+    # 绘制 Awareness
     draw.text((margin, y_offset), "Awareness:", fill='black', font=font_large)
     y_offset += 30
     
-    # Split awareness into lines and wrap them
+    # 将 awareness 拆分并自动换行
     awareness_lines = awareness.split('\n')
     for line in awareness_lines:
         if line.strip():
@@ -116,14 +116,14 @@ def _create_info_panel(action, pose, awareness, panel_width=600, panel_height=40
 
 
 def _load_and_resize_image(image_path, target_size=(640, 480)):
-    """Load and resize image"""
+    """加载并缩放图像。"""
     try:
         img = Image.open(image_path).convert('RGB')
         img = img.resize(target_size, Image.Resampling.LANCZOS)
         return img
     except Exception as e:
         print(f"Error loading image {image_path}: {e}")
-        # Create a placeholder image
+        # 创建占位图像
         img = Image.new('RGB', target_size, color='gray')
         draw = ImageDraw.Draw(img)
         draw.text((10, 10), f"Image not found:\n{image_path}", fill='white')
@@ -131,7 +131,7 @@ def _load_and_resize_image(image_path, target_size=(640, 480)):
 
 
 def _combine_images(rgb_img, info_panel):
-    """Combine RGB image and info panel horizontally"""
+    """横向拼接 RGB 图像和信息面板。"""
     total_width = rgb_img.width + info_panel.width
     total_height = max(rgb_img.height, info_panel.height)
     
@@ -194,7 +194,7 @@ def main():
     
     args = parser.parse_args()
     
-    # Read data
+    # 读取数据
     input_path = Path(args.input_json)
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
@@ -205,7 +205,7 @@ def main():
     if not isinstance(data, list):
         raise ValueError("Input JSON must be a list")
     
-    # Determine range
+    # 确定范围
     start_idx = max(0, args.start_index)
     if args.max_entries > 0:
         end_idx = min(len(data), start_idx + args.max_entries)
@@ -216,13 +216,13 @@ def main():
     print(f"Playback speed: {args.fps} FPS")
     print("Press 'q' to quit, 'p' to pause/resume, 'n' for next frame, 'b' for previous frame")
     
-    # Setup output directory if saving frames
+    # 保存帧时设置输出目录
     if args.save_frames:
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         print(f"Saving frames to: {output_dir}")
     
-    # Initialize variables
+    # 初始化变量
     root = _repo_root()
     current_idx = start_idx
     paused = False
@@ -233,12 +233,12 @@ def main():
     while current_idx < end_idx:
         entry = data[current_idx]
         
-        # Extract information
+        # 提取信息
         action = _get_action(entry)
         pose = _get_pose(entry)
         awareness = entry.get("awareness", "No awareness data")
         
-        # Get image paths
+        # 获取图像路径
         images = entry.get("images", [])
         if not images:
             print(f"No images found for entry {current_idx}")
@@ -247,31 +247,31 @@ def main():
         
         rgb_path = root / "dataset" / images[0]
         
-        # Load and process images
+        # 加载并处理图像
         rgb_img = _load_and_resize_image(rgb_path, tuple(args.image_size))
         info_panel = _create_info_panel(action, pose, awareness, 
                                       args.panel_size[0], args.panel_size[1])
         
-        # Combine images
+        # 拼接图像
         combined_img = _combine_images(rgb_img, info_panel)
         
-        # Convert to OpenCV format for display
+        # 转换为 OpenCV 格式以便显示
         combined_cv = cv2.cvtColor(np.array(combined_img), cv2.COLOR_RGB2BGR)
         
-        # Add frame info
+        # 添加帧信息
         frame_info = f"Frame {current_idx}/{end_idx-1} | FPS: {args.fps:.1f}"
         cv2.putText(combined_cv, frame_info, (10, combined_cv.shape[0] - 10), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
-        # Display
+        # 显示
         cv2.imshow('Awareness Viewer', combined_cv)
         
-        # Save frame if requested
+        # 按需保存帧
         if args.save_frames:
             frame_filename = output_dir / f"frame_{current_idx:06d}.png"
             combined_img.save(frame_filename)
         
-        # Handle keyboard input
+        # 处理键盘输入
         if paused:
             key = cv2.waitKey(0) & 0xFF
         else:
@@ -287,7 +287,7 @@ def main():
         elif key == ord('b'):
             current_idx = max(start_idx, current_idx - 1)
         elif key == ord('s'):
-            # Save current frame to current directory
+            # 将当前帧保存到当前目录
             import os
             current_dir = os.getcwd()
             frame_filename = os.path.join(current_dir, f"frame_{current_idx:06d}.png")

@@ -30,7 +30,7 @@ std::string GetCurrentModulePath()
 {
 	if (cachedModulePath.empty())
 	{
-		// get module path
+		// 获取模块路径
 		char modPath[MAX_PATH];
 		memset(modPath, 0, sizeof(modPath));
 		GetModuleFileNameA((HMODULE)&__ImageBase, modPath, sizeof(modPath));
@@ -75,7 +75,7 @@ float actionInputFloat()
 
 Vector3 MathUtils::rotationToDirection(Vector3 rotation)
 {
-	//big thanks to camxxcore's C# code https://github.com/CamxxCore/ScriptCamTool/blob/master/GTAV_ScriptCamTool/Utils.cs
+	// 参考 camxxcore 的 C# 实现：https://github.com/CamxxCore/ScriptCamTool/blob/master/GTAV_ScriptCamTool/Utils.cs
 	float retZ = rotation.z * 0.01745329f;
 	float retX = rotation.x * 0.01745329f;
 	float absX = abs(cos(retX));
@@ -88,7 +88,7 @@ Vector3 MathUtils::rotationToDirection(Vector3 rotation)
 
 Vector3 MathUtils::crossProduct(Vector3 a, Vector3 b)
 {
-	//http://onlinemschool.com/math/assistance/vector/multiply1/
+	// 向量乘法参考：http://onlinemschool.com/math/assistance/vector/multiply1/
 	Vector3 retVector = { 0.0,0.0,0.0 };
 	retVector.x = a.y*b.z - a.z*b.y;
 	retVector.y = a.z*b.x - a.x*b.z;

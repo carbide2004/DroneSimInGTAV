@@ -10,29 +10,29 @@ def rgb_bytes_to_pil(w, h, rgb_bytes):
     expected_rgb = w * h * 3
     
     if raw.size == expected_rgba:
-        # Perfect RGBA format
+        # 完整匹配 RGBA 格式
         arr = raw.reshape((h, w, 4))[:, :, :3]
     elif raw.size == expected_rgb:
-        # Perfect RGB format
+        # 完整匹配 RGB 格式
         arr = raw.reshape((h, w, 3))
     elif abs(raw.size - expected_rgba) <= 4:
-        # Close to RGBA format (allow up to 4 bytes difference for alignment)
+        # 接近 RGBA 格式（允许最多 4 字节对齐差异）
         if raw.size < expected_rgba:
-            # Pad with zeros if missing bytes
+            # 缺少字节时用零填充
             padded = np.pad(raw, (0, expected_rgba - raw.size), mode='constant', constant_values=0)
             arr = padded.reshape((h, w, 4))[:, :, :3]
         else:
-            # Truncate if too many bytes
+            # 字节过多时截断
             truncated = raw[:expected_rgba]
             arr = truncated.reshape((h, w, 4))[:, :, :3]
     elif abs(raw.size - expected_rgb) <= 4:
-        # Close to RGB format (allow up to 4 bytes difference for alignment)
+        # 接近 RGB 格式（允许最多 4 字节对齐差异）
         if raw.size < expected_rgb:
-            # Pad with zeros if missing bytes
+            # 缺少字节时用零填充
             padded = np.pad(raw, (0, expected_rgb - raw.size), mode='constant', constant_values=0)
             arr = padded.reshape((h, w, 3))
         else:
-            # Truncate if too many bytes
+            # 字节过多时截断
             truncated = raw[:expected_rgb]
             arr = truncated.reshape((h, w, 3))
     else:
@@ -47,10 +47,10 @@ def depth_bytes_to_pil(w, h, depth_bytes):
     expected_float32 = w * h * 4  # float32 = 4 bytes per pixel
     expected_uint8 = w * h        # uint8 = 1 byte per pixel
     
-    # Try float32 format first
+    # 优先尝试 float32 格式
     if len(depth_bytes) >= expected_float32 - 4:  # Allow small tolerance
         try:
-            # Pad or truncate to exact size
+            # 填充或截断到精确大小
             if len(depth_bytes) < expected_float32:
                 padded_bytes = depth_bytes + b'\x00' * (expected_float32 - len(depth_bytes))
             else:
@@ -59,11 +59,11 @@ def depth_bytes_to_pil(w, h, depth_bytes):
             raw = np.frombuffer(padded_bytes, dtype=np.float32)
             depth = raw.reshape((h, w))
         except Exception:
-            # Fall back to uint8 if float32 fails
+            # float32 失败时回退到 uint8
             raw_u8 = np.frombuffer(depth_bytes[:expected_uint8], dtype=np.uint8)
             depth = raw_u8.reshape((h, w)).astype(np.float32)
     else:
-        # Try uint8 format
+        # 尝试 uint8 格式
         if len(depth_bytes) >= expected_uint8:
             raw_u8 = np.frombuffer(depth_bytes[:expected_uint8], dtype=np.uint8)
             depth = raw_u8.reshape((h, w)).astype(np.float32)
@@ -91,4 +91,3 @@ def depth_bytes_to_pil(w, h, depth_bytes):
             )
         rgb = np.stack([gray, gray, gray], axis=-1)
         return Image.fromarray(rgb, mode="RGB")
-

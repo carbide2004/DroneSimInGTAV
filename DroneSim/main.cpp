@@ -48,12 +48,12 @@ static time_point<system_clock> last_capture_color;
 static time_point<system_clock> last_capture_depth;
  
 //--------
-//offsets
+// 偏移量
 //--------
 const size_t drawIndexedOffset = 12;
 const size_t clearDepthStencilViewOffset = 53;
 //-------------------------
-//interesting D3D resources
+// 需要关注的 D3D 资源
 //-------------------------
 static ComPtr<ID3D11DepthStencilView> lastDsv;
 static ComPtr<ID3D11RenderTargetView> lastRtv;
@@ -63,7 +63,7 @@ static bool saveNextFrame = false;
 static bool hooked = false;
 
 //-------------------------
-//global control variables
+// 全局控制变量
 //-------------------------
 
 static int draw_indexed_count = 0;

@@ -68,7 +68,7 @@ enum AutoCollectEvent {
 };
 
 
-// Fire maintenance system
+// 火焰维护系统
 static bool g_fireMaintenanceActive = false;
 static Position3D g_fireMaintenancePos;
 static Vehicle g_fireVehicle = 0;
@@ -299,10 +299,10 @@ static void create_fire_near_pos(float ox, float oy, float oz) {
             VEHICLE::SET_VEHICLE_ENGINE_HEALTH(created_vehicle, -1000.0f);
             VEHICLE::SET_VEHICLE_DAMAGE(created_vehicle, 0.0f, 0.0f, 0.0f, 2000.0f, 5.0f, true);
 
-            // Step 4: 等待伤害状态生效（关键）
+            // Step 4: 等待伤害状态生效
             WAIT(500);
 
-            // Add a visible vehicle explosion, then keep persistent fire active.
+            // 先添加可见的车辆爆炸，再保持持续火焰。
             FIRE::ADD_EXPLOSION(g_firePos[0], g_firePos[1], g_firePos[2] + 0.8f, 2, 0.6f, true, false, 0.45f);
             WAIT(250);
 
@@ -488,8 +488,8 @@ static void create_accident_near_pos(float ox, float oy, float oz) {
         return;
     }
 
-    // Clustered multi-vehicle crash scene: spawn several cars near anomaly center and
-    // apply heavy body damage to mimic post-collision deformation.
+    // 聚集型多车事故场景：在异常中心附近生成多辆车，
+    // 并施加严重车体损坏以模拟碰撞后的变形。
     const Hash vehicle_models[] = {
         GAMEPLAY::GET_HASH_KEY("adder"),
         GAMEPLAY::GET_HASH_KEY("zentorno"),
@@ -521,7 +521,7 @@ static void create_accident_near_pos(float ox, float oy, float oz) {
     GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(nodePos.x, nodePos.y, nodePos.z, &gz, false);
     g_accidentPos[0] = nodePos.x; g_accidentPos[1] = nodePos.y; g_accidentPos[2] = gz;
 
-    // Relative offsets (meters) to form a dense crash cluster.
+    // 用于形成密集事故簇的相对偏移量
     const float offsets[][2] = {
         { 0.0f,  0.0f},
         { 2.8f,  1.0f},
@@ -549,7 +549,7 @@ static void create_accident_near_pos(float ox, float oy, float oz) {
         VEHICLE::SET_VEHICLE_HANDBRAKE(v, true);
         VEHICLE::SET_VEHICLE_ENGINE_ON(v, false, true, false);
 
-        // Simulate damaged shells: multiple impact points + broken windows/doors + dead engine.
+        // 模拟损坏车壳：多个撞击点、破碎车窗/车门和熄火发动机。
         VEHICLE::SET_VEHICLE_ENGINE_HEALTH(v, -2500.0f);
         VEHICLE::SET_VEHICLE_BODY_HEALTH(v, 120.0f);
         VEHICLE::SET_VEHICLE_PETROL_TANK_HEALTH(v, 50.0f);
@@ -1263,10 +1263,10 @@ void scriptMain()
             float x=0, y=0, z=0;
             ss >> x >> y >> z;
             
-            // Get player ped
+            // 获取玩家角色实体
             Ped player = PLAYER::PLAYER_PED_ID();
             if (player) {
-                // Temporarily switch to player view for teleportation
+                // 临时切换到玩家视角以便传送
                 bool was_camera_mode = (scriptStatus == cameraMode);
                 if (was_camera_mode) {
                     StopCamera();
@@ -1274,7 +1274,7 @@ void scriptMain()
                     WAIT(100);  // Wait for camera to stop
                 }
                 
-                // Make player invincible and invisible during scenario setup.
+                // 场景设置期间让玩家无敌并不可见。
                 PLAYER::SET_PLAYER_INVINCIBLE(PLAYER::PLAYER_ID(), true);
                 ENTITY::SET_ENTITY_VISIBLE(player, false, false);
                 ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, false);
@@ -1282,11 +1282,11 @@ void scriptMain()
                 PLAYER::SET_MAX_WANTED_LEVEL(0);
                 PLAYER::SET_POLICE_IGNORE_PLAYER(player, true);
                 
-                // Teleport player directly to anomaly position
+                // 将玩家直接传送到异常位置
                 ENTITY::SET_ENTITY_COORDS(player, x, y, z, true, false, false, true);
                 WAIT(100);  // Wait for teleportation to complete
                 
-                // Switch back to camera mode if we were in camera mode
+                // 如果原本处于相机模式，则切回相机模式
                 if (was_camera_mode) {
                     startNewCamera();
                     scriptStatus = cameraMode;
@@ -1300,10 +1300,10 @@ void scriptMain()
         }
         else if (cmd == "RESTORE_PLAYER")
         {
-            // Restore player to normal state after scenario interaction.
+            // 场景交互结束后恢复玩家正常状态。
             Ped player = PLAYER::PLAYER_PED_ID();
             if (player) {
-                // Temporarily switch to player view for restoration
+                // 临时切换到玩家视角以便恢复状态
                 bool was_camera_mode = (scriptStatus == cameraMode);
                 if (was_camera_mode) {
                     StopCamera();
@@ -1311,11 +1311,11 @@ void scriptMain()
                     WAIT(100);  // Wait for camera to stop
                 }
                 
-                // Restore visibility and mortality
+                // 恢复可见性和受伤状态
                 ENTITY::SET_ENTITY_VISIBLE(player, true, false);
                 PLAYER::SET_PLAYER_INVINCIBLE(PLAYER::PLAYER_ID(), false);
                 
-                // Teleport player to a safe surface location away from anomaly
+                // 将玩家传送到远离异常的安全地表位置
                 Any cam = CAM::GET_RENDERING_CAM();
                 Position3D safe_pos;
                 
@@ -1323,12 +1323,12 @@ void scriptMain()
                     Vector3 cam_pos = CAM::GET_CAM_COORD(cam);
                     float ground_z = cam_pos.z;
                     GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(cam_pos.x, cam_pos.y, cam_pos.z, &ground_z, false);
-                    // Move player 20m away from camera position
+                    // 将玩家移动到距离相机位置 20 米处
                     safe_pos.x = cam_pos.x + 20.0f;
                     safe_pos.y = cam_pos.y + 20.0f;
                     safe_pos.z = ground_z + 1.0f;
                 } else {
-                    // Fallback position if no camera
+                    // 无相机时使用的备用位置
                     safe_pos.x = 0.0f;
                     safe_pos.y = 0.0f;
                     safe_pos.z = 30.0f;
@@ -1337,7 +1337,7 @@ void scriptMain()
                 ENTITY::SET_ENTITY_COORDS(player, safe_pos.x, safe_pos.y, safe_pos.z, true, false, false, true);
                 WAIT(100);  // Wait for teleportation to complete
                 
-                // Switch back to camera mode if we were in camera mode
+                // 如果原本处于相机模式，则切回相机模式
                 if (was_camera_mode) {
                     startNewCamera();
                     scriptStatus = cameraMode;

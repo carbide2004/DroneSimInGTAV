@@ -23,7 +23,7 @@ def plot_history(file_paths, notes):
         # 提取字段
         epochs = [x['epoch'] for x in history]
         
-        # Val Loss
+        # 验证损失
         val_act = [x['val']['action_loss'] for x in history]
         val_b1 = [x['val']['b1_loss'] for x in history]
 
