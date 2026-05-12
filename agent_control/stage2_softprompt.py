@@ -37,6 +37,49 @@ class _ProfileStage:
         return False
 
 
+def _record_tensor_shape(profile, prefix: str, tensor):
+    if profile is None or tensor is None or not hasattr(tensor, "shape"):
+        return
+    try:
+        shape = tuple(int(v) for v in tensor.shape)
+        profile[f"{prefix}_rank"] = float(len(shape))
+        profile[f"{prefix}_numel"] = float(tensor.numel())
+        for idx, size in enumerate(shape):
+            profile[f"{prefix}_shape_{idx}"] = float(size)
+    except Exception:
+        pass
+
+
+def _record_image_grid_thw(profile, prefix: str, tensor):
+    _record_tensor_shape(profile, prefix, tensor)
+    if profile is None or tensor is None:
+        return
+    try:
+        rows = tensor.detach().cpu().tolist()
+        if rows and isinstance(rows[0], (int, float)):
+            rows = [rows]
+        profile[f"{prefix}_rows"] = float(len(rows))
+        profile[f"{prefix}_grid_tokens"] = float(sum(int(row[0]) * int(row[1]) * int(row[2]) for row in rows))
+        for row_idx, row in enumerate(rows[:4]):
+            if len(row) < 3:
+                continue
+            profile[f"{prefix}_{row_idx}_t"] = float(row[0])
+            profile[f"{prefix}_{row_idx}_h"] = float(row[1])
+            profile[f"{prefix}_{row_idx}_w"] = float(row[2])
+    except Exception:
+        pass
+
+
+def _record_vlm_input_profile(profile, prefix: str, inputs):
+    if profile is None or inputs is None:
+        return
+    for name in ("input_ids", "attention_mask", "pixel_values", "inputs_embeds"):
+        value = inputs.get(name) if hasattr(inputs, "get") else None
+        _record_tensor_shape(profile, f"{prefix}_{name}", value)
+    grid = inputs.get("image_grid_thw") if hasattr(inputs, "get") else None
+    _record_image_grid_thw(profile, f"{prefix}_image_grid_thw", grid)
+
+
 def _model_device(model):
     try:
         return next(model.parameters()).device
@@ -173,8 +216,10 @@ def generate_action_with_soft_prompt(
 
     with _ProfileStage(profile, "vlm_prepare_inputs", profile_sync_cuda):
         base_inputs = _prepare_base_inputs(processor, model, messages, images=images)
+    _record_vlm_input_profile(profile, "vlm_base", base_inputs)
     with _ProfileStage(profile, "vlm_prepend_soft_prompt", profile_sync_cuda):
         model_inputs, _, prompt_len = _prepend_soft_prompt(model, base_inputs, soft_prompt)
+    _record_vlm_input_profile(profile, "vlm_model", model_inputs)
     gen_kwargs = {
         "max_new_tokens": int(max_new_tokens),
         "do_sample": bool(do_sample),

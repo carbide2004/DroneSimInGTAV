@@ -63,7 +63,19 @@ def _format_timing(timing: dict):
 
 
 def _is_timing_metadata(key: str):
-    return str(key).endswith("_tokens") or "_tokens_" in str(key)
+    key = str(key)
+    metadata_markers = (
+        "_tokens",
+        "_shape_",
+        "_batch",
+        "_rank",
+        "_numel",
+        "_rows",
+        "_grid_",
+        "_grid_tokens",
+        "_image_grid_thw_",
+    )
+    return any(marker in key for marker in metadata_markers)
 
 
 def _safe_path_name(value: str):
@@ -876,6 +888,8 @@ def main():
         samples = samples[: args.sample_limit]
 
     qwen = Qwen3VLWrapper(args.model_dir).load()
+    if args.profile_timing:
+        print(f"Qwen device map: {getattr(qwen.model, 'hf_device_map', None)}")
     if args.stage2_lora_dir:
         lora_dir = Path(args.stage2_lora_dir)
     elif args.e2e_ckpt:
