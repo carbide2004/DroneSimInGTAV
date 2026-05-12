@@ -1,6 +1,42 @@
 from typing import Dict, List, Optional, Tuple
 
 
+def _sync_cuda_for_profile(enabled: bool):
+    if not enabled:
+        return
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    except Exception:
+        pass
+
+
+class _ProfileStage:
+    def __init__(self, profile, name: str, sync_cuda: bool):
+        self.profile = profile
+        self.name = str(name)
+        self.sync_cuda = bool(sync_cuda)
+        self.start = None
+
+    def __enter__(self):
+        if self.profile is not None:
+            import time
+
+            _sync_cuda_for_profile(self.sync_cuda)
+            self.start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.profile is not None and self.start is not None:
+            import time
+
+            _sync_cuda_for_profile(self.sync_cuda)
+            self.profile[self.name] = self.profile.get(self.name, 0.0) + float(time.perf_counter() - self.start)
+        return False
+
+
 def _model_device(model):
     try:
         return next(model.parameters()).device
@@ -130,11 +166,15 @@ def generate_action_with_soft_prompt(
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     top_k: Optional[int] = None,
+    profile: Optional[Dict[str, float]] = None,
+    profile_sync_cuda: bool = False,
 ):
     import torch
 
-    base_inputs = _prepare_base_inputs(processor, model, messages, images=images)
-    model_inputs, _, prompt_len = _prepend_soft_prompt(model, base_inputs, soft_prompt)
+    with _ProfileStage(profile, "vlm_prepare_inputs", profile_sync_cuda):
+        base_inputs = _prepare_base_inputs(processor, model, messages, images=images)
+    with _ProfileStage(profile, "vlm_prepend_soft_prompt", profile_sync_cuda):
+        model_inputs, _, prompt_len = _prepend_soft_prompt(model, base_inputs, soft_prompt)
     gen_kwargs = {
         "max_new_tokens": int(max_new_tokens),
         "do_sample": bool(do_sample),
@@ -146,20 +186,33 @@ def generate_action_with_soft_prompt(
     if top_k is not None:
         gen_kwargs["top_k"] = int(top_k)
 
-    with torch.inference_mode():
-        out_ids = _unwrap_model(model).generate(**model_inputs, **gen_kwargs)
+    with _ProfileStage(profile, "vlm_generate", profile_sync_cuda):
+        with torch.inference_mode():
+            out_ids = _unwrap_model(model).generate(**model_inputs, **gen_kwargs)
 
-    full_text = processor.batch_decode(out_ids, skip_special_tokens=True)
-    if not full_text:
-        return ""
-    full_text = str(full_text[0]).strip()
+    if profile is not None:
+        try:
+            output_tokens = int(out_ids.shape[1])
+            new_tokens = output_tokens - int(prompt_len) if output_tokens > int(prompt_len) else output_tokens
+            profile["vlm_output_tokens"] = float(output_tokens)
+            profile["vlm_prompt_tokens"] = float(prompt_len)
+            profile["vlm_new_tokens_est"] = float(max(new_tokens, 0))
+        except Exception:
+            pass
+
+    with _ProfileStage(profile, "vlm_decode", profile_sync_cuda):
+        full_text = processor.batch_decode(out_ids, skip_special_tokens=True)
+        if not full_text:
+            return ""
+        full_text = str(full_text[0]).strip()
 
     # 使用 inputs_embeds 生成时，部分后端只返回生成的 token；
     # 其他后端会返回提示词加生成 token，需要同时兼容两种路径。
     if out_ids.ndim == 2 and out_ids.shape[1] > prompt_len:
-        tail_ids = out_ids[:, prompt_len:]
-        tail_text = processor.batch_decode(tail_ids, skip_special_tokens=True)
-        tail_text = str(tail_text[0]).strip() if tail_text else ""
+        with _ProfileStage(profile, "vlm_decode_tail", profile_sync_cuda):
+            tail_ids = out_ids[:, prompt_len:]
+            tail_text = processor.batch_decode(tail_ids, skip_special_tokens=True)
+            tail_text = str(tail_text[0]).strip() if tail_text else ""
         if tail_text:
             return tail_text
     return full_text

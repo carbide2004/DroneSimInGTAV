@@ -603,6 +603,7 @@ def run_single_verification_stage2(
                 action = action or "AUTO_FORWARD"
                 print(f"  [{steps}] {action} (ce={best_ce:.4f})")
             elif policy_mode in ("stage2_softprompt", "e2e_smt_gru"):
+                vlm_profile = {} if profile_timing else None
                 with _timed_stage(step_timing, "vlm_generate_parse", bool(profile_timing and timing_sync_cuda)):
                     raw = generate_action_with_soft_prompt(
                         processor=qwen.processor,
@@ -612,7 +613,12 @@ def run_single_verification_stage2(
                         soft_prompt=soft_prompt,
                         max_new_tokens=16,
                         do_sample=False,
+                        profile=vlm_profile,
+                        profile_sync_cuda=bool(profile_timing and timing_sync_cuda),
                     )
+                if vlm_profile:
+                    for profile_key, profile_value in vlm_profile.items():
+                        step_timing[f"vlm.{profile_key}"] = float(profile_value)
                 action = parse_action(raw) or "AUTO_FORWARD"
                 print(f"  [{steps}] {action}(raw_message='{raw}')")
             else:
