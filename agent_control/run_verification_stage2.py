@@ -50,11 +50,20 @@ def _timed_stage(timing: dict, stage: str, sync_cuda: bool):
 def _format_timing(timing: dict):
     total = max(float(timing.get("step_total", timing.get("sample_total", 0.0))), 1e-8)
     parts = []
+    metadata_parts = []
     for key, value in sorted(timing.items(), key=lambda item: item[1], reverse=True):
         if key in {"index", "step_total", "sample_total"}:
             continue
+        if _is_timing_metadata(key):
+            metadata_parts.append(f"{key}={value:.0f}")
+            continue
         parts.append(f"{key}={value:.3f}s/{value / total * 100.0:.1f}%")
+    parts.extend(metadata_parts)
     return ", ".join(parts)
+
+
+def _is_timing_metadata(key: str):
+    return str(key).endswith("_tokens") or "_tokens_" in str(key)
 
 
 def _safe_path_name(value: str):
@@ -389,6 +398,12 @@ def _print_stage2_summary(results):
         print("\nTiming totals:")
         for key, value in sorted(timing_aggregate.items(), key=lambda item: item[1], reverse=True):
             if key.endswith(".step_total") or key.endswith(".sample_total"):
+                continue
+            if _is_timing_metadata(key):
+                if key.startswith("step.") and timing_steps > 0:
+                    print(f"{key}: total={value:.0f}, avg/step={value / timing_steps:.1f}")
+                else:
+                    print(f"{key}: total={value:.0f}")
                 continue
             if key.startswith("step.") and timing_steps > 0:
                 print(f"{key}: total={value:.3f}s, avg/step={value / timing_steps:.3f}s")
