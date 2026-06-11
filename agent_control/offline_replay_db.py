@@ -39,8 +39,7 @@ class ReplayState:
 @dataclass
 class NearestMatch:
     state: ReplayState
-    distance_xy: float
-    distance_z: float
+    distance_xyz: float
     distance_yaw: float
     score: float
     within_threshold: bool
@@ -300,14 +299,12 @@ class OfflineReplayDB:
         self,
         db_path: Path,
         dataset_root: Optional[Path] = None,
-        xy_threshold: float = 1.0,
-        z_threshold: float = 0.75,
+        xyz_threshold: float = 5.0,
         yaw_threshold: float = 15.0,
     ):
         self.db_path = Path(db_path)
         self.conn = _connect(self.db_path)
-        self.xy_threshold = float(xy_threshold)
-        self.z_threshold = float(z_threshold)
+        self.xyz_threshold = float(xyz_threshold)
         self.yaw_threshold = float(yaw_threshold)
         self.dataset_root = Path(dataset_root) if dataset_root is not None else self._dataset_root_from_meta()
         self._states = [
@@ -342,20 +339,24 @@ class OfflineReplayDB:
         best = None
 
         for state in self._states:
-            dxy = math.hypot(state.x - x, state.y - y)
-            dz = abs(state.z - z)
+            dxyz = math.sqrt((state.x - x) ** 2 + (state.y - y) ** 2 + (state.z - z) ** 2)
             dyaw = _yaw_delta_deg(state.rz, rz)
             score = (
-                (dxy / max(self.xy_threshold, 1e-6)) ** 2
-                + (dz / max(self.z_threshold, 1e-6)) ** 2
+                (dxyz / max(self.xyz_threshold, 1e-6)) ** 2
                 + (dyaw / max(self.yaw_threshold, 1e-6)) ** 2
             )
             if best is None or score < best[0]:
-                best = (score, state, dxy, dz, dyaw)
+                best = (score, state, dxyz, dyaw)
 
-        score, state, dxy, dz, dyaw = best
-        within = dxy <= self.xy_threshold and dz <= self.z_threshold and dyaw <= self.yaw_threshold
-        return NearestMatch(state=state, distance_xy=dxy, distance_z=dz, distance_yaw=dyaw, score=score, within_threshold=within)
+        score, state, dxyz, dyaw = best
+        within = dxyz < self.xyz_threshold and dyaw < self.yaw_threshold
+        return NearestMatch(
+            state=state,
+            distance_xyz=dxyz,
+            distance_yaw=dyaw,
+            score=score,
+            within_threshold=within,
+        )
 
     def transition(self, state_id: int, action: str) -> Optional[ReplayState]:
         row = self.conn.execute(

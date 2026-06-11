@@ -468,6 +468,8 @@ python agent_control\run_verification_stage2.py --policy_mode e2e_smt_gru --e2e_
 
 离线 replay 验证用于没有 GTA V 环境的服务器。它把已有轨迹帧做成 SQLite 数据库，然后在数据库里按位姿和动作 replay。
 
+coverage miss 的默认判定是：最近数据库状态与目标位姿的 3D 欧氏距离 `xyz < 5m`，且朝向差 `yaw < 15deg`。可用 `--xyz_threshold` 和 `--yaw_threshold` 调整。
+
 ### 1. 构建 replay DB
 
 如果服务器只传一个 DB，使用 `--store_images` 把图片打包进去：
