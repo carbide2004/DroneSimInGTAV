@@ -26,6 +26,15 @@ DroneSim/
 
 ## 环境准备
 
+### 目标运行环境
+
+当前说明面向两类实际运行环境：
+
+- 24GB RTX 4090 工作机：用于 Windows / GTA V / ScriptHookV / `DroneSim.asi` 插件、轨迹采集、人工审查和在线验证。
+- RTX 5090 服务器：用于数据处理、awareness 标注、模型训练和离线 replay 验证；服务器通常不需要运行 GTA V。
+
+当前编写 README 的机器不作为项目运行环境。命令中的路径应按 4090 工作机或 5090 服务器上的实际 clone 位置替换。
+
 ### Windows / GTA V 插件端
 
 插件端需要 Windows、GTA V、ScriptHookV 和 Visual Studio 2022。项目中已有 `DroneSim.sln`，通常用 Visual Studio 打开后选择 `x64 Release` 编译。
@@ -124,7 +133,7 @@ python -c "from agent_control.dronesim_client import DroneSimClient; c=DroneSimC
 建议使用 conda 独立环境。PowerShell 中先切到仓库根目录：
 
 ```powershell
-cd E:\study\projects\DroneSimInGTAV\DroneSim
+cd <repo>
 ```
 
 创建并激活环境：
@@ -167,6 +176,8 @@ pip install -r data_processor\requirements.txt
   -> awareness 标注
   -> 得到 dataset/train_data_all_with_awareness.json
 ```
+
+通常在 4090 工作机完成 GTA V 插件加载、`data/manual` 原始轨迹采集和人工审查；整理后的 `checked` 轨迹、`dataset/`、模型权重和验证文件再同步到 5090 服务器，用于标注、训练和离线验证。
 
 最终训练脚本默认使用：
 
@@ -400,13 +411,33 @@ python agent_control\train_e2e_smt_gru.py --dataset_json dataset\train_data_all_
 
 在线验证需要 GTA V、ScriptHookV、`DroneSim.asi` 插件和 Python 控制端同时可用。
 
-验证样本默认是：
+验证脚本默认读取：
 
 ```text
 data/verification/samples.jsonl
 ```
 
-每行至少包含：
+这个文件不是训练数据切分出来的帧级 JSON，而是从通过审查的采集 session 的 `metadata.jsonl` 抽样生成的场景级验证集。每一行代表一个验证场景，告诉验证脚本要生成什么异常、从哪个起点开始飞、预期参考步数是多少。
+
+从 `checked` 轨迹生成验证样本：
+
+```powershell
+python data_processor\create_validation_set.py --manual_dir "E:\ToolApps\Steam\steamapps\common\Grand Theft Auto V\data\manual\checked" --output_file data\verification\samples.jsonl --ratio 0.2 --seed 42
+```
+
+先只生成少量样本做 smoke test：
+
+```powershell
+python data_processor\create_validation_set.py --manual_dir "E:\ToolApps\Steam\steamapps\common\Grand Theft Auto V\data\manual\checked" --output_file data\verification\samples.jsonl --ratio 0.2 --seed 42 --limit 5
+```
+
+生成逻辑是读取每个 session 的：
+
+```text
+<GTA V>/data/manual/checked/<session>/metadata.jsonl
+```
+
+并把其中的 `scenario_id`、`anomaly_type`、`anomaly_position`、`start_pose`、`expected_steps`、`task_description` 写入 `samples.jsonl`。每行至少包含：
 
 ```json
 {
