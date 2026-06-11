@@ -291,7 +291,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--misses_file", default=None, help="默认 output_file 同目录 coverage_misses.jsonl")
     parser.add_argument("--db_path", required=True, help="offline replay SQLite DB")
     parser.add_argument("--dataset_root", default=None, help="DB 未内嵌图片时使用的图片根目录")
-    parser.add_argument("--max_steps", type=int, default=150)
+    parser.add_argument("--max_steps", type=int, default=50)
     parser.add_argument("--forward_step", type=float, default=5.0)
     parser.add_argument("--up_step", type=float, default=5.0)
     parser.add_argument("--down_step", type=float, default=5.0)
