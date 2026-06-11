@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import numpy as np
 from pathlib import Path
@@ -35,6 +36,10 @@ class SessionViewer:
         name = self.sessions[self.current_idx].name
         title = f"[{state}] J:Prev | K:Next | P:Pause | D:DELETE(Direct) | {self.current_idx + 1}/{len(self.sessions)} - {name}"
         self.fig.canvas.manager.set_window_title(title)
+
+    def _is_timestamp_session(self, session_path):
+        # 只对以时间戳命名的目录执行自动删除，避免误删其它工作目录
+        return bool(re.match(r"^\d{8}_\d{6}$", session_path.name))
 
     def _load_steps(self, session_path):
         p = session_path / "steps.jsonl"
@@ -94,6 +99,23 @@ class SessionViewer:
         while self.running and self.sessions:
             self.skip_session = False
             curr_session = self.sessions[self.current_idx]
+            
+            # 检查是否存在 metadata.jsonl
+            metadata_path = curr_session / "metadata.jsonl"
+            if not metadata_path.exists():
+                print(f"\n[警告] 轨迹缺少 metadata.jsonl: {curr_session.name}")
+                if self._is_timestamp_session(curr_session) and curr_session.exists():
+                    shutil.rmtree(curr_session)
+                    print(f"已自动删除。")
+                else:
+                    print(f"跳过删除：目录名不是时间戳，保留 {curr_session.name}")
+                
+                self.sessions.pop(self.current_idx)
+                if self.sessions:
+                    self.current_idx %= len(self.sessions)
+                self.skip_session = True
+                continue
+            
             try:
                 steps = self._load_steps(curr_session)
                 self._update_title()
