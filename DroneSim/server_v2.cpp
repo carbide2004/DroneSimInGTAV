@@ -545,6 +545,20 @@ void ServerV2::handle_client() {
             write_response(resp);
             return;
         }
+        case MSG_CLEAR_SCENE: {
+            enqueue_command("CLEAR_SCENE");
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CLEAR_SCENE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            resp.resize(kWireHeaderSize);
+            std::memcpy(resp.data(), &rh.magic[0], 4);
+            std::memcpy(resp.data() + 4, &rh.version, 1);
+            std::memcpy(resp.data() + 5, &rh.type, 1);
+            std::memcpy(resp.data() + 6, &rh.flags, 1);
+            std::memcpy(resp.data() + 7, &rh.reserved, 1);
+            std::memcpy(resp.data() + 8, &rh.request_id, 8);
+            std::memcpy(resp.data() + 16, &rh.length, 4);
+            write_response(resp);
+            return;
+        }
         case MSG_CAPTURE: {
             LOGD("server_v2", "Processing MSG_CAPTURE request");
             enqueue_command("REQUEST");

@@ -163,7 +163,7 @@ void hook_function(T* inst, void* hook, bool unhook = false)
 	if (unhook)
 	{
 		res = MH_DisableHook(vtbl);
-            if(res != MH_OK) LOGE("main", std::string("error ") + std::to_string(res) + " disabling hook at offset " + std::to_string(offset));
+        if(res != MH_OK) LOGE("main", std::string("error ") + std::to_string(res) + " disabling hook at offset " + std::to_string(offset));
 		orig<offset, T> = nullptr;
 	}
 	else { // 执行 Hook 操作

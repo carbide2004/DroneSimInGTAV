@@ -43,6 +43,10 @@ def calculate_distance(pos1: Tuple[float, float, float], pos2: Tuple[float, floa
 def create_anomaly_at_position(cli, anomaly_type: str, position: Tuple[float, float, float]) -> Optional[Tuple]:
     x, y, z = position
 
+    if hasattr(cli, "clear_scene"):
+        cli.clear_scene()
+        time.sleep(0.5)
+
     cli.stop_camera()
     time.sleep(1.0)
 

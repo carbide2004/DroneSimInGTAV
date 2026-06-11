@@ -116,7 +116,8 @@ Python 客户端封装在 `agent_control/dronesim_client.py`，常用接口如�
 | `create_arrest()` | `MSG_CREATE_ARREST` | 在相机附近生成 arrest 场景 |
 | `create_accident()` | `MSG_CREATE_ACCIDENT` | 在相机附近生成事故场景 |
 | `teleport_player(x, y, z)` | `MSG_TELEPORT_PLAYER` | 将玩家传送到异常中心，并设为不可见/无敌 |
-| `restore_player()` | `MSG_RESTORE_PLAYER` | 验证结束后恢复玩家状态 |
+| `restore_player()` | `MSG_RESTORE_PLAYER` | 验证结束后恢复玩家状态，并清理插件生成的异常实体 |
+| `clear_scene()` | `MSG_CLEAR_SCENE` | 显式清理插件生成的车辆、行人和火焰 |
 | `set_recording_session(name, task)` | `MSG_SET_RECORDING_SESSION` | 设置下一次采集 session 名和任务描述 |
 | `get_recording_info()` | `MSG_GET_RECORDING_INFO` | 查询当前记录状态、步数和 session 路径 |
 
@@ -503,6 +504,43 @@ python agent_control\run_offline_verification.py --db_path data\verification\off
 ```powershell
 python agent_control\run_offline_verification.py --db_path data\verification\offline_replay.sqlite --dataset_root dataset --verification_file data\verification\samples.jsonl --output_file data\verification\results_offline.json --misses_file data\verification\coverage_misses.jsonl --sample_limit 5
 ```
+
+### 3. 根据 miss 列表回 GTA V 补采
+
+补采脚本需要在 4090 工作机上运行，并确认 GTA V、ScriptHookV、`DroneSim.asi` 插件已经启动。脚本会读取 `coverage_misses.jsonl`，按每条 miss 的 `wanted_pose` 设置相机位姿、采集 RGB/Depth，并把新 state 写回 offline replay DB。
+
+如果 replay DB 是用 `--store_images` 构建的，默认会继续把补采图片写成 DB BLOB：
+
+```powershell
+python agent_control\collect_miss_frames.py --misses_file data\verification\coverage_misses.jsonl --db_path data\verification\offline_replay.sqlite --verification_file data\verification\samples.jsonl
+```
+
+如果 replay DB 不内嵌图片，则把补采图片写入 `dataset/imgs/offline_miss`，DB 里只存相对路径：
+
+```powershell
+python agent_control\collect_miss_frames.py --misses_file data\verification\coverage_misses.jsonl --db_path data\verification\offline_replay.sqlite --verification_file data\verification\samples.jsonl --dataset_root dataset --image_storage files
+```
+
+先小规模补采：
+
+```powershell
+python agent_control\collect_miss_frames.py --misses_file data\verification\coverage_misses.jsonl --db_path data\verification\offline_replay.sqlite --verification_file data\verification\samples.jsonl --limit 5
+```
+
+默认情况下，脚本会：
+
+- 根据 `samples.jsonl` 里的 `scenario_id` 重建对应异常场景。
+- 对每个 miss 的 `wanted_pose` 设置相机位姿并截图。
+- 写入新的 `miss_<hash>` state。
+- 尝试添加 `current_state + action -> miss_state` transition，帮助下一轮 replay 直接走到补采帧。
+
+如果只想补 state、不写 transition，加：
+
+```powershell
+--no_add_transitions
+```
+
+补采完成后，把更新后的 DB 和新增图片同步回 5090 服务器，再重新运行离线验证。
 
 输出文件：
 

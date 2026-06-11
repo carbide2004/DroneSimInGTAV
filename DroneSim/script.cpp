@@ -3,7 +3,6 @@
 #include "main.h"
 #include "utils.h"
 #include "camera.h"
-#include "server.h"
 #include "server_v2.h"
 #include "logging.h"
 #include "keyboard.h"
@@ -978,6 +977,7 @@ static void run_continuous_manual_collection(AutoCollectEvent event_type, int co
                 stop_recording_session();
                 StopCamera();
                 scriptStatus = scriptStop;
+                clear_spawned_entities();
                 goto EXIT_MANUAL_COLLECTION;
             }
             
@@ -1121,6 +1121,7 @@ void scriptMain()
             StopCamera();
             scriptStatus = scriptStop;
             stop_recording_session();
+            clear_spawned_entities();
             LOGI("script", "Camera stopped and returned to player view");
         }
 
@@ -1155,16 +1156,24 @@ void scriptMain()
             // setStatusText("Camera mode disabled.");
             LOGI("script", "Camera stopped and returned to player view");
         }
+        else if (cmd == "CLEAR_SCENE")
+        {
+            clear_spawned_entities();
+            LOGI("script", "Cleared spawned anomaly entities");
+        }
         else if (cmd == "CREATE_FIRE")
         {
+            clear_spawned_entities();
             create_fire_near_camera();
         }
         else if (cmd == "CREATE_ARREST")
         {
+            clear_spawned_entities();
             create_arrest_near_camera();
         }
         else if (cmd == "CREATE_ACCIDENT")
         {
+            clear_spawned_entities();
             create_accident_near_camera();
         }
         else if (cmd == "GET_POSE")
@@ -1346,6 +1355,7 @@ void scriptMain()
                 
                 LOGI("script", std::string("Player restored to normal state at (") + std::to_string(safe_pos.x) + "," + std::to_string(safe_pos.y) + "," + std::to_string(safe_pos.z) + ")");
             }
+            clear_spawned_entities();
         }
 		WAIT(0);
 	}

@@ -23,6 +23,7 @@ TYPE_CREATE_ARREST = 15
 TYPE_SET_POSTURE = 16
 TYPE_TELEPORT_PLAYER = 17
 TYPE_RESTORE_PLAYER = 18
+TYPE_CLEAR_SCENE = 19
 
 def _pack_header(t, req_id, length):
     return struct.pack("4sBBBBQI", MAGIC, VERSION, t, 0, 0, req_id, length)
@@ -199,6 +200,12 @@ class DroneSimClient:
         s = self._send(TYPE_RESTORE_PLAYER, 18)
         self._recv(s)
         time.sleep(1.5)  # Longer wait for view switching and restoration
+
+    def clear_scene(self):
+        """清理插件创建的异常车辆、行人和火焰。"""
+        s = self._send(TYPE_CLEAR_SCENE, 19)
+        self._recv(s)
+        time.sleep(0.5)
 
 def visualize(rgb_bytes, depth_bytes, w, h):
     try:
