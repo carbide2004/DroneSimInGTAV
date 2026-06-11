@@ -4,7 +4,7 @@ import math
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from action_mapping import parse_action
 from offline_replay_db import OfflineReplayDB, ReplayState
@@ -88,7 +88,62 @@ def _miss_record(
         "distance_xyz": float(nearest.distance_xyz),
         "distance_yaw": float(nearest.distance_yaw),
         "nearest_score": float(nearest.score),
+        "repeat_count": 1,
     }
+
+
+def _quantize_float(value: float, decimals: int = 3) -> float:
+    return round(float(value), int(decimals))
+
+
+def _miss_key(record: Dict) -> Tuple:
+    wanted = record.get("wanted_pose") or {}
+    nearest_state = record.get("nearest_state") or {}
+    return (
+        record.get("reason"),
+        record.get("action"),
+        _quantize_float(wanted.get("x", 0.0)),
+        _quantize_float(wanted.get("y", 0.0)),
+        _quantize_float(wanted.get("z", 0.0)),
+        _quantize_float(wanted.get("rz", 0.0)),
+        nearest_state.get("state_id"),
+    )
+
+
+def _append_deduped_miss(misses: List[Dict], miss_index: Dict[Tuple, Dict], record: Dict):
+    key = _miss_key(record)
+    existing = miss_index.get(key)
+    if existing is None:
+        record["repeat_count"] = 1
+        record["first_step"] = int(record.get("step", 0))
+        record["last_step"] = int(record.get("step", 0))
+        miss_index[key] = record
+        misses.append(record)
+        return
+
+    existing["repeat_count"] = int(existing.get("repeat_count", 1)) + 1
+    existing["last_step"] = int(record.get("step", existing.get("last_step", existing.get("step", 0))))
+
+
+def _dedupe_misses(rows: List[Dict]) -> List[Dict]:
+    deduped = []
+    index: Dict[Tuple, Dict] = {}
+    for row in rows:
+        key = _miss_key(row)
+        existing = index.get(key)
+        scenario_id = row.get("scenario_id")
+        if existing is None:
+            merged = dict(row)
+            merged["repeat_count"] = int(merged.get("repeat_count", 1))
+            merged["scenario_ids"] = [scenario_id] if scenario_id else []
+            index[key] = merged
+            deduped.append(merged)
+            continue
+
+        existing["repeat_count"] = int(existing.get("repeat_count", 1)) + int(row.get("repeat_count", 1))
+        if scenario_id and scenario_id not in existing.setdefault("scenario_ids", []):
+            existing["scenario_ids"].append(scenario_id)
+    return deduped
 
 
 def _write_jsonl(path: Path, rows: List[Dict]):
@@ -125,6 +180,7 @@ def run_single_offline_verification(
     print(f"Start: ({start_pose['x']:.1f}, {start_pose['y']:.1f}, {start_pose['z']:.1f})")
 
     misses: List[Dict] = []
+    miss_index: Dict[Tuple, Dict] = {}
     fallback_hits = 0
     transition_hits = 0
     distance_xyz_values: List[float] = []
@@ -135,7 +191,7 @@ def run_single_offline_verification(
     distance_xyz_values.append(start_match.distance_xyz)
     distance_yaw_values.append(start_match.distance_yaw)
     if not start_match.within_threshold:
-        misses.append(_miss_record(sample, 0, "start_pose_miss", start_pose, start_match))
+        _append_deduped_miss(misses, miss_index, _miss_record(sample, 0, "start_pose_miss", start_pose, start_match))
         if strict_on_miss:
             return {
                 "scenario_id": scenario_id,
@@ -148,7 +204,7 @@ def run_single_offline_verification(
                 "path_efficiency": 0.0,
                 "anomaly_type": anomaly_type,
                 "task_description": task_desc,
-                "coverage": {"miss_count": len(misses), "fallback_hits": 0, "transition_hits": 0},
+                "coverage": {"miss_count": len(misses), "miss_occurrence_count": sum(int(m.get("repeat_count", 1)) for m in misses), "fallback_hits": 0, "transition_hits": 0},
                 "misses": misses,
             }
 
@@ -162,7 +218,18 @@ def run_single_offline_verification(
         try:
             rgb_pil, depth_pil = replay_db.load_images(current)
         except Exception as e:
-            misses.append(_miss_record(sample, steps, f"image_load_failed: {e}", _pose_from_state(current), replay_db.nearest(_pose_from_state(current)), current_state=current))
+            _append_deduped_miss(
+                misses,
+                miss_index,
+                _miss_record(
+                    sample,
+                    steps,
+                    f"image_load_failed: {e}",
+                    _pose_from_state(current),
+                    replay_db.nearest(_pose_from_state(current)),
+                    current_state=current,
+                ),
+            )
             break
 
         prompt = build_prompt(current.x, current.y, current.z, current.rz, task=task_desc)
@@ -196,7 +263,11 @@ def run_single_offline_verification(
         fallback_hits += 1
 
         if not nearest.within_threshold:
-            misses.append(_miss_record(sample, steps + 1, "transition_miss", wanted_pose, nearest, action=action, current_state=current))
+            _append_deduped_miss(
+                misses,
+                miss_index,
+                _miss_record(sample, steps + 1, "transition_miss", wanted_pose, nearest, action=action, current_state=current),
+            )
             if strict_on_miss:
                 break
 
@@ -215,6 +286,7 @@ def run_single_offline_verification(
     success = stopped_by_model and final_distance <= 20.0
     strict_success = success and not misses
     path_efficiency = min(1.0, expected_steps / max(1, steps)) if steps > 0 else 0.0
+    miss_occurrence_count = sum(int(miss.get("repeat_count", 1)) for miss in misses)
 
     result = {
         "scenario_id": scenario_id,
@@ -234,6 +306,7 @@ def run_single_offline_verification(
         } if final_pose else None,
         "coverage": {
             "miss_count": len(misses),
+            "miss_occurrence_count": int(miss_occurrence_count),
             "fallback_hits": int(fallback_hits),
             "transition_hits": int(transition_hits),
             "avg_nearest_distance_xyz": sum(distance_xyz_values) / len(distance_xyz_values) if distance_xyz_values else 0.0,
@@ -245,7 +318,7 @@ def run_single_offline_verification(
         "step_trace": step_trace,
     }
 
-    print(f"  Result: {'SUCCESS' if success else 'FAILED'}, strict={'YES' if strict_success else 'NO'}, misses={len(misses)}")
+    print(f"  Result: {'SUCCESS' if success else 'FAILED'}, strict={'YES' if strict_success else 'NO'}, misses={len(misses)}, miss_occurrences={miss_occurrence_count}")
     print(f"  Steps: {steps}/{expected_steps}, Distance: {final_distance:.1f}m, Efficiency: {path_efficiency:.2f}")
     return result
 
@@ -253,18 +326,21 @@ def run_single_offline_verification(
 def _offline_summary(results: List[Dict]) -> Dict:
     total = len(results)
     misses = [miss for result in results for miss in result.get("misses", [])]
+    deduped_misses = _dedupe_misses(misses)
     strict_success = sum(1 for result in results if result.get("strict_success"))
     relaxed_success = sum(1 for result in results if result.get("success"))
     fallback_hits = sum(int(result.get("coverage", {}).get("fallback_hits", 0)) for result in results)
     transition_hits = sum(int(result.get("coverage", {}).get("transition_hits", 0)) for result in results)
-    xyz = [float(miss.get("distance_xyz", 0.0)) for miss in misses]
-    yaw = [float(miss.get("distance_yaw", 0.0)) for miss in misses]
+    miss_occurrences = sum(int(miss.get("repeat_count", 1)) for miss in deduped_misses)
+    xyz = [float(miss.get("distance_xyz", 0.0)) for miss in deduped_misses]
+    yaw = [float(miss.get("distance_yaw", 0.0)) for miss in deduped_misses]
     return {
         "strict_successful_samples": strict_success,
         "strict_success_rate": strict_success / total if total else 0.0,
         "relaxed_successful_samples": relaxed_success,
         "relaxed_success_rate": relaxed_success / total if total else 0.0,
-        "coverage_miss_count": len(misses),
+        "coverage_miss_count": len(deduped_misses),
+        "coverage_miss_occurrence_count": int(miss_occurrences),
         "transition_hits": int(transition_hits),
         "fallback_hits": int(fallback_hits),
         "miss_p95_distance_xyz": _percentile(xyz, 0.95),
@@ -349,6 +425,7 @@ def main():
     finally:
         replay_db.close()
 
+    all_misses = _dedupe_misses(all_misses)
     summary_stats = calculate_summary_stats(results)
     result_data = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),

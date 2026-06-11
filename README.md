@@ -507,12 +507,13 @@ python agent_control\run_offline_verification.py --db_path data\verification\off
 输出文件：
 
 - `results_offline.json`：离线验证结果、宽松成功率、严格成功率、覆盖统计。
-- `coverage_misses.jsonl`：数据库缺覆盖的目标位姿，用于回到 GTA V 本地补采。
+- `coverage_misses.jsonl`：数据库缺覆盖的目标位姿，用于回到 GTA V 本地补采；相同 `reason/action/wanted_pose/nearest_state` 会去重，并用 `repeat_count` 记录重复出现次数。
 
 结果中：
 
 - `success` 表示允许跳到最近数据库状态后的宽松结果。
 - `strict_success` 表示全程没有 coverage miss 的严格结果。
+- `miss_count` 表示去重后的 miss 数量，`miss_occurrence_count` 表示原始重复出现次数。
 
 ## 常见注意事项
 
