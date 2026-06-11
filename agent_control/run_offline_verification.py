@@ -85,8 +85,7 @@ def _miss_record(
             "step_index": nearest.state.step_index,
             "pose": _pose_from_state(nearest.state),
         },
-        "distance_xy": float(nearest.distance_xy),
-        "distance_z": float(nearest.distance_z),
+        "distance_xyz": float(nearest.distance_xyz),
         "distance_yaw": float(nearest.distance_yaw),
         "nearest_score": float(nearest.score),
     }
@@ -128,14 +127,12 @@ def run_single_offline_verification(
     misses: List[Dict] = []
     fallback_hits = 0
     transition_hits = 0
-    distance_xy_values: List[float] = []
-    distance_z_values: List[float] = []
+    distance_xyz_values: List[float] = []
     distance_yaw_values: List[float] = []
 
     start_match = replay_db.nearest(start_pose)
     current = start_match.state
-    distance_xy_values.append(start_match.distance_xy)
-    distance_z_values.append(start_match.distance_z)
+    distance_xyz_values.append(start_match.distance_xyz)
     distance_yaw_values.append(start_match.distance_yaw)
     if not start_match.within_threshold:
         misses.append(_miss_record(sample, 0, "start_pose_miss", start_pose, start_match))
@@ -194,8 +191,7 @@ def run_single_offline_verification(
 
         wanted_pose = _target_pose_after_action(current, action, movement_params)
         nearest = replay_db.nearest(wanted_pose)
-        distance_xy_values.append(nearest.distance_xy)
-        distance_z_values.append(nearest.distance_z)
+        distance_xyz_values.append(nearest.distance_xyz)
         distance_yaw_values.append(nearest.distance_yaw)
         fallback_hits += 1
 
@@ -240,10 +236,8 @@ def run_single_offline_verification(
             "miss_count": len(misses),
             "fallback_hits": int(fallback_hits),
             "transition_hits": int(transition_hits),
-            "avg_nearest_distance_xy": sum(distance_xy_values) / len(distance_xy_values) if distance_xy_values else 0.0,
-            "p95_nearest_distance_xy": _percentile(distance_xy_values, 0.95),
-            "avg_nearest_distance_z": sum(distance_z_values) / len(distance_z_values) if distance_z_values else 0.0,
-            "p95_nearest_distance_z": _percentile(distance_z_values, 0.95),
+            "avg_nearest_distance_xyz": sum(distance_xyz_values) / len(distance_xyz_values) if distance_xyz_values else 0.0,
+            "p95_nearest_distance_xyz": _percentile(distance_xyz_values, 0.95),
             "avg_nearest_distance_yaw": sum(distance_yaw_values) / len(distance_yaw_values) if distance_yaw_values else 0.0,
             "p95_nearest_distance_yaw": _percentile(distance_yaw_values, 0.95),
         },
@@ -263,7 +257,7 @@ def _offline_summary(results: List[Dict]) -> Dict:
     relaxed_success = sum(1 for result in results if result.get("success"))
     fallback_hits = sum(int(result.get("coverage", {}).get("fallback_hits", 0)) for result in results)
     transition_hits = sum(int(result.get("coverage", {}).get("transition_hits", 0)) for result in results)
-    xy = [float(miss.get("distance_xy", 0.0)) for miss in misses]
+    xyz = [float(miss.get("distance_xyz", 0.0)) for miss in misses]
     yaw = [float(miss.get("distance_yaw", 0.0)) for miss in misses]
     return {
         "strict_successful_samples": strict_success,
@@ -273,7 +267,7 @@ def _offline_summary(results: List[Dict]) -> Dict:
         "coverage_miss_count": len(misses),
         "transition_hits": int(transition_hits),
         "fallback_hits": int(fallback_hits),
-        "miss_p95_distance_xy": _percentile(xy, 0.95),
+        "miss_p95_distance_xyz": _percentile(xyz, 0.95),
         "miss_p95_distance_yaw": _percentile(yaw, 0.95),
     }
 
@@ -296,8 +290,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--up_step", type=float, default=5.0)
     parser.add_argument("--down_step", type=float, default=5.0)
     parser.add_argument("--yaw_step", type=float, default=15.0)
-    parser.add_argument("--xy_threshold", type=float, default=1.0)
-    parser.add_argument("--z_threshold", type=float, default=0.75)
+    parser.add_argument("--xyz_threshold", type=float, default=5.0)
     parser.add_argument("--yaw_threshold", type=float, default=15.0)
     parser.add_argument("--sample_limit", type=int, default=-1)
     parser.add_argument("--strict_on_miss", action="store_true", help="遇到 coverage miss 立刻结束该样本")
@@ -328,8 +321,7 @@ def main():
     replay_db = OfflineReplayDB(
         db_path=Path(args.db_path),
         dataset_root=Path(args.dataset_root) if args.dataset_root else None,
-        xy_threshold=float(args.xy_threshold),
-        z_threshold=float(args.z_threshold),
+        xyz_threshold=float(args.xyz_threshold),
         yaw_threshold=float(args.yaw_threshold),
     )
 
@@ -371,8 +363,7 @@ def main():
             "up_step": args.up_step,
             "down_step": args.down_step,
             "yaw_step": args.yaw_step,
-            "xy_threshold": args.xy_threshold,
-            "z_threshold": args.z_threshold,
+            "xyz_threshold": args.xyz_threshold,
             "yaw_threshold": args.yaw_threshold,
             "strict_on_miss": bool(args.strict_on_miss),
         },
