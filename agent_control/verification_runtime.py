@@ -1,8 +1,15 @@
 import json
 import math
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+_SRC_ROOT = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
+
+from drone_event_nav.config import MovementConfig
 
 from action_mapping import dispatch_action, parse_action
 from prompting import build_prompt
@@ -77,12 +84,7 @@ def create_anomaly_at_position(cli, anomaly_type: str, position: Tuple[float, fl
 
 
 def build_movement_params(args) -> Dict:
-    return {
-        "forward_step": float(args.forward_step),
-        "up_step": float(args.down_step),
-        "down_step": float(args.down_step),
-        "yaw_step": float(args.yaw_step),
-    }
+    return MovementConfig.from_namespace(args).to_dispatch_kwargs()
 
 
 def run_single_verification(cli, model, sample: Dict, max_steps: int, movement_params: Dict) -> Dict:

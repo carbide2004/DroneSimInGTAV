@@ -51,7 +51,13 @@ def main():
     parser.add_argument("--sleep_s", type=float, default=3.0, help="Initial sleep time")
     parser.add_argument("--fov", type=float, default=None, help="Camera FOV")
     parser.add_argument("--forward_step", type=float, default=5.0, help="Forward step size")
-    parser.add_argument("--down_step", type=float, default=5.0, help="Vertical step size")
+    parser.add_argument(
+        "--up_step",
+        type=float,
+        default=None,
+        help="Upward step size; defaults to --down_step for backward compatibility",
+    )
+    parser.add_argument("--down_step", type=float, default=5.0, help="Downward step size")
     parser.add_argument("--yaw_step", type=float, default=15.0, help="Yaw step size")
     parser.add_argument("--sample_limit", type=int, default=-1, help="Limit number of samples to test (-1 for all)")
     
@@ -136,9 +142,10 @@ def main():
             "completed_samples": len(results),
             "parameters": {
                 "max_steps": args.max_steps,
-                "forward_step": args.forward_step,
-                "down_step": args.down_step,
-                "yaw_step": args.yaw_step,
+                "forward_step": movement_params["forward_step"],
+                "up_step": movement_params["up_step"],
+                "down_step": movement_params["down_step"],
+                "yaw_step": movement_params["yaw_step"],
             },
             "summary_statistics": summary_stats,
             "results": results
