@@ -13,7 +13,8 @@
 ```text
 DroneSim/
 ├── DroneSim/                 # C++ GTA V 插件源码
-├── agent_control/            # Python 控制、训练、验证脚本
+├── agent_control/            # Python 客户端、控制和训练脚本
+├── validation/               # 只读、无落盘的在线 RGB-D 验证脚本
 ├── data_processor/           # 数据转换、清洗、awareness 标注脚本
 ├── visualize/                # 数据和训练结果可视化脚本
 ├── docs/                     # 训练管线和设计说明
@@ -127,11 +128,12 @@ Python 客户端封装在 `agent_control/dronesim_client.py`，常用接口如�
 以下验证均直接消费内存中的 V3 数据，不保存 RGB、Depth、视频或点云文件：
 
 ```powershell
-python agent_control/validate_rgbd_pointcloud.py --pixel-stride 4 --max-view-depth 200
-python agent_control/validate_rgbd_stability.py --count 1000
+python validation/validate_rgbd_pointcloud.py --pixel-stride 4 --max-view-depth 200
+python validation/validate_rgbd_stability.py --count 1000
+python validation/validate_rgbd_yaw_sync.py --cycles 20 --yaw-delta 180
 ```
 
-点云脚本保持当前位置不变，按 45 度间隔采集八个方向并在 Open3D 中显示合并结果；稳定性脚本检查帧号、数据尺寸、深度数值、延迟和 GTA5.exe 内存变化。
+点云脚本保持当前位置不变，按 45 度间隔采集八个方向并在 Open3D 中显示合并结果；稳定性脚本检查帧号、数据尺寸、深度数值、延迟和 GTA5.exe 内存变化；双 yaw 脚本在两个差异明显的方向间交替，分别判别 RGB 和 Depth 所属视角，并将同帧边缘重合与一帧错配结果进行比较。
 
 最小连通性检查：
 

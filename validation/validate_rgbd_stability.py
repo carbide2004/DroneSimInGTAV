@@ -2,12 +2,17 @@
 
 import argparse
 import hashlib
+from pathlib import Path
+import sys
 import time
 
 import numpy as np
 import psutil
 
-from dronesim_client import DroneSimClient
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+from agent_control.dronesim_client import DroneSimClient
 
 
 def _find_process(name):

@@ -5,11 +5,16 @@ This script never writes RGB, depth, screenshots, videos, PLY, or PCD files.
 
 import argparse
 import math
+from pathlib import Path
+import sys
 import time
 
 import numpy as np
 
-from dronesim_client import DroneSimClient
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+from agent_control.dronesim_client import DroneSimClient
 
 
 def _angle_error_degrees(actual, expected):
