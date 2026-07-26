@@ -20,7 +20,8 @@ enum MsgType : uint8_t {
     MSG_SET_POSTURE = 16,
     MSG_TELEPORT_PLAYER = 17,
     MSG_RESTORE_PLAYER = 18,
-    MSG_CLEAR_SCENE = 19
+    MSG_CLEAR_SCENE = 19,
+    MSG_GET_CAMERA_STATE = 20
 };
 
 struct MsgHeader {

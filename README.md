@@ -37,18 +37,18 @@ DroneSim/
 
 ### Windows / GTA V 插件端
 
-插件端需要 Windows、GTA V、ScriptHookV 和 Visual Studio 2022。项目中已有 `DroneSim.sln`，通常用 Visual Studio 打开后选择 `x64 Release` 编译。
+插件端需要 Windows、GTA V、ScriptHookV 和带 C++ 桌面开发组件的 Visual Studio 2026。项目中已有 `DroneSim.sln`，通常用 Visual Studio 打开后选择 `x64 Release` 编译。
 
-命令行构建可使用 Visual Studio 2022 的 MSBuild：
+命令行构建可使用 Visual Studio 2026 的 MSBuild：
 
 ```powershell
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\amd64\MSBuild.exe" DroneSim.sln /p:Configuration=Release /p:Platform=x64
+& "C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe" DroneSim.sln /restore /p:RestorePackagesConfig=true /p:Configuration=Release /p:Platform=x64
 ```
 
 编译产物通常是：
 
 ```text
-DroneSim/x64/Release/DroneSim.asi
+x64/Release/DroneSim.asi
 ```
 
 把 `.asi` 放到 GTA V 可加载 ScriptHookV 插件的位置后，Python 控制端才能连接到插件服务。
@@ -61,7 +61,7 @@ DroneSim/x64/Release/DroneSim.asi
 127.0.0.5:23456
 ```
 
-Python 端的 `agent_control/dronesim_client.py` 使用同一套 `DSV2` 二进制协议连接插件。正常流程是先进入 GTA V，确认 `DroneSim.asi` 已加载，再运行 Python 控制或验证脚本。
+Python 端的 `agent_control/dronesim_client.py` 使用同一套 `DSV3` 二进制协议连接插件。正常流程是先进入 GTA V，确认 `DroneSim.asi` 已加载，再运行 Python 控制或验证脚本。
 
 ### 键盘控制
 
@@ -108,7 +108,8 @@ Python 客户端封装在 `agent_control/dronesim_client.py`，常用接口如�
 | `rotate(rx, ry, rz)` | `MSG_ROTATE` | 按增量旋转相机 |
 | `set_posture(x, y, z, rx, ry, rz)` | `MSG_SET_POSTURE` | 设置相机绝对位姿 |
 | `get_pose()` | `MSG_GET_POSE` | 读取当前相机位姿 |
-| `capture()` | `MSG_CAPTURE` | 获取当前 RGB/Depth buffer |
+| `is_camera_active()` | `MSG_GET_CAMERA_STATE` | 查询 DroneSim 脚本相机是否正在渲染；验证脚本会在采集前强制检查 |
+| `capture(timeout_ms=5000)` | `MSG_CAPTURE` | 获取请求后产生的同帧 RGB、米制 Depth、投影矩阵和视图矩阵；失败时抛出具体错误 |
 | `set_fov(fov)` | `MSG_SET_FOV` | 设置相机 FOV |
 | `set_time(h, m, s)` | `MSG_SET_TIME` | 设置游戏时间 |
 | `set_weather(name)` | `MSG_SET_WEATHER` | 设置天气 |
@@ -120,6 +121,17 @@ Python 客户端封装在 `agent_control/dronesim_client.py`，常用接口如�
 | `clear_scene()` | `MSG_CLEAR_SCENE` | 显式清理插件生成的车辆、行人和火焰 |
 | `set_recording_session(name, task)` | `MSG_SET_RECORDING_SESSION` | 设置下一次采集 session 名和任务描述 |
 | `get_recording_info()` | `MSG_GET_RECORDING_INFO` | 查询当前记录状态、步数和 session 路径 |
+
+### RGB-D 内存验证
+
+以下验证均直接消费内存中的 V3 数据，不保存 RGB、Depth、视频或点云文件：
+
+```powershell
+python agent_control/validate_rgbd_pointcloud.py --pixel-stride 4 --max-view-depth 200
+python agent_control/validate_rgbd_stability.py --count 1000
+```
+
+点云脚本保持当前位置不变，按 45 度间隔采集八个方向并在 Open3D 中显示合并结果；稳定性脚本检查帧号、数据尺寸、深度数值、延迟和 GTA5.exe 内存变化。
 
 最小连通性检查：
 

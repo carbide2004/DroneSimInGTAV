@@ -21,6 +21,8 @@ enum scriptStatusEnum {
 	scriptEndReady
 };
 extern scriptStatusEnum scriptStatus;
+extern std::atomic<bool> g_cameraStateReady;
+extern std::atomic<bool> g_cameraActive;
 extern std::atomic<bool> g_accidentReady;
 extern float g_accidentPos[3];
 

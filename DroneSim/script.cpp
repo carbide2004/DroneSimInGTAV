@@ -1,6 +1,6 @@
 ﻿#include "script.h"
-#include "export.h"
 #include "main.h"
+#include "rgbd_capture.h"
 #include "utils.h"
 #include "camera.h"
 #include "server_v2.h"
@@ -22,6 +22,8 @@
  
 std::atomic<bool> g_poseReady{false};
 float g_pose[6] = {0};
+std::atomic<bool> g_cameraStateReady{false};
+std::atomic<bool> g_cameraActive{false};
 
 std::atomic<bool> g_accidentReady{false};
 float g_accidentPos[3] = {0};
@@ -75,9 +77,47 @@ static int g_fireMaintenanceTimer = 0;
 
 scriptStatusEnum scriptStatus = scriptStop;
 
-extern std::atomic<catchState> cmdToCatch;
-
 static std::ofstream g_recordingStepsFile;
+static std::atomic<std::uint64_t> g_recordingCaptureId{1};
+
+static bool submit_current_camera(std::uint64_t request_id) {
+    Any cam = CAM::GET_RENDERING_CAM();
+    if (cam == 0) {
+        LOGE("script", "RGB-D capture requested without an active rendering camera");
+        RgbdCapture::instance().submit_camera(request_id, CaptureCamera{});
+        return false;
+    }
+
+    const Vector3 position = CAM::GET_CAM_COORD(cam);
+    const Vector3 rotation = CAM::GET_CAM_ROT(cam, 2);
+    const float fov = CAM::GET_CAM_FOV(cam);
+    const float near_clip = CAM::GET_CAM_NEAR_CLIP(cam);
+    const float far_clip = CAM::GET_CAM_FAR_CLIP(cam);
+
+    CaptureCamera camera;
+    std::string error;
+    const CaptureStatus status = build_capture_camera(
+        fov,
+        near_clip,
+        far_clip,
+        position.x,
+        position.y,
+        position.z,
+        rotation.x,
+        rotation.y,
+        rotation.z,
+        camera,
+        error);
+    if (status != CaptureStatus::Ok) {
+        LOGE(
+            "script",
+            std::string("Invalid capture camera: ") + error);
+        RgbdCapture::instance().submit_camera(request_id, CaptureCamera{});
+        return false;
+    }
+    RgbdCapture::instance().submit_camera(request_id, camera);
+    return true;
+}
 
 static bool ensure_dir(const std::string& path) {
     if (path.empty()) return false;
@@ -215,13 +255,56 @@ static void record_step(const char* action, float dx, float dy, float dz, float 
     // 转换为Position3D进行处理
     Position3D pos(cam_pos.x, cam_pos.y, cam_pos.z);
     Position3D rot(cam_rot.x, cam_rot.y, cam_rot.z);
-    makeCmdStart();
-    int tries = 0;
-    while (cmdToCatch.load(std::memory_order_acquire) != catchStop && tries < 6000) { WAIT(0); tries++; }
+    const std::uint64_t capture_id =
+        (std::uint64_t{1} << 63) |
+        g_recordingCaptureId.fetch_add(1, std::memory_order_relaxed);
+    CaptureStatus request_status = CaptureStatus::Ok;
+    std::string request_error;
+    CaptureResult capture;
+    bool capture_started = RgbdCapture::instance().begin_request(
+        capture_id,
+        6000,
+        request_status,
+        request_error);
+    if (capture_started) {
+        submit_current_camera(capture_id);
+        int tries = 0;
+        while (!RgbdCapture::instance().try_take_result(capture_id, capture) &&
+               tries < 6000) {
+            WAIT(0);
+            ++tries;
+        }
+        if (tries >= 6000) {
+            RgbdCapture::instance().cancel_request(capture_id);
+            capture_started = false;
+            request_error = "Recording RGB-D capture timed out";
+        }
+    }
+    if (!capture_started) {
+        LOGE(
+            "script",
+            std::string("Recording capture failed: ") + request_error);
+    }
     std::vector<unsigned char> rgb_data;
     std::vector<unsigned char> depth_data;
-    int w = 0, h = 0, depth_w = 0, depth_h = 0;
-    bool has_rgbd = export_copy_rgbd_snapshot(rgb_data, depth_data, w, h, depth_w, depth_h);
+    int w = 0;
+    int h = 0;
+    int depth_w = 0;
+    int depth_h = 0;
+    const bool has_rgbd =
+        capture_started && capture.status == CaptureStatus::Ok;
+    if (has_rgbd) {
+        rgb_data = std::move(capture.rgb);
+        depth_data.resize(capture.depth_meters.size() * sizeof(float));
+        std::memcpy(
+            depth_data.data(),
+            capture.depth_meters.data(),
+            depth_data.size());
+        w = static_cast<int>(capture.width);
+        h = static_cast<int>(capture.height);
+        depth_w = w;
+        depth_h = h;
+    }
     int rgb_size = has_rgbd ? static_cast<int>(rgb_data.size()) : -1;
     int depth_size = has_rgbd ? static_cast<int>(depth_data.size()) : -1;
     int step = g_recordingStep.load(std::memory_order_acquire);
@@ -1204,11 +1287,35 @@ void scriptMain()
                 g_poseReady.store(true, std::memory_order_release);
             }
         }
+        else if (cmd == "GET_CAMERA_STATE")
+        {
+            const Any rendering_cam = CAM::GET_RENDERING_CAM();
+            const bool active =
+                scriptStatus == cameraMode &&
+                rendering_cam != 0 &&
+                CAM::IS_CAM_ACTIVE(rendering_cam);
+            g_cameraActive.store(active, std::memory_order_release);
+            g_cameraStateReady.store(true, std::memory_order_release);
+            LOGD(
+                "script",
+                std::string("GET_CAMERA_STATE: ") +
+                    (active ? "active" : "inactive"));
+        }
         else if (scriptStatus == cameraMode) {
-            if (cmd == "REQUEST")
+            if (cmd.rfind("CAPTURE ", 0) == 0)
             {
-                LOGD("script", "start capture");
-                makeCmdStart();
+                std::uint64_t request_id = 0;
+                std::stringstream stream(cmd.substr(8));
+                stream >> request_id;
+                if (request_id == 0) {
+                    LOGE("script", "CAPTURE command contains an invalid request id");
+                } else {
+                    LOGD(
+                        "script",
+                        std::string("Submitting camera metadata for capture ") +
+                            std::to_string(request_id));
+                    submit_current_camera(request_id);
+                }
             }
             else if (cmd.rfind("MOVE ", 0) == 0)
             {

@@ -21,7 +21,7 @@
     <ClCompile Include="script.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="export.cpp">
+    <ClCompile Include="rgbd_capture.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="camera.cpp">
@@ -41,7 +41,7 @@
     <ClInclude Include="script.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="export.h">
+    <ClInclude Include="rgbd_capture.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="camera.h">

@@ -1,27 +1,75 @@
 #include "server_v2.h"
 #include "utils.h"
 #include "camera.h"
-#include "export.h"
+#include "rgbd_capture.h"
 #include "logging.h"
 #include "command_queue.h"
 #include <thread>
 #include <cstring>
 #include <algorithm>
 #include <atomic>
+#include <limits>
+#include <stdexcept>
 
 using namespace boost;
 
 static constexpr size_t kWireHeaderSize = 20;
+
+template <typename T>
+static void append_scalar(std::vector<unsigned char>& output, const T& value) {
+    const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
+    output.insert(output.end(), bytes, bytes + sizeof(T));
+}
+
+static std::vector<unsigned char> make_response(
+    std::uint8_t type,
+    std::uint64_t request_id,
+    const std::vector<unsigned char>& payload) {
+    if (payload.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::runtime_error("Response payload exceeds the V3 wire limit");
+    }
+    MsgHeader header{};
+    std::memcpy(header.magic, "DSV3", 4);
+    header.version = 3;
+    header.type = type;
+    header.request_id = request_id;
+    header.length = static_cast<std::uint32_t>(payload.size());
+
+    std::vector<unsigned char> response(kWireHeaderSize + payload.size());
+    std::memcpy(response.data(), header.magic, 4);
+    std::memcpy(response.data() + 4, &header.version, 1);
+    std::memcpy(response.data() + 5, &header.type, 1);
+    std::memcpy(response.data() + 6, &header.flags, 1);
+    std::memcpy(response.data() + 7, &header.reserved, 1);
+    std::memcpy(response.data() + 8, &header.request_id, 8);
+    std::memcpy(response.data() + 16, &header.length, 4);
+    if (!payload.empty()) {
+        std::memcpy(response.data() + kWireHeaderSize, payload.data(), payload.size());
+    }
+    return response;
+}
+
+static std::vector<unsigned char> make_capture_error_payload(
+    CaptureStatus status,
+    const std::string& error) {
+    std::vector<unsigned char> payload;
+    const std::uint32_t wire_status = static_cast<std::uint32_t>(status);
+    const std::uint32_t error_size = static_cast<std::uint32_t>(error.size());
+    append_scalar(payload, wire_status);
+    append_scalar(payload, error_size);
+    payload.insert(payload.end(), error.begin(), error.end());
+    return payload;
+}
 
 static std::unique_ptr<ServerV2> g_serverV2Instance;
 static asio::io_context g_io_v2;
 static std::unique_ptr<std::thread> g_thread_v2;
 static bool g_ws_inited_v2 = false;
 
-extern std::atomic<catchState> cmdToCatch;
-
 extern std::atomic<bool> g_poseReady;
 extern float g_pose[6];
+extern std::atomic<bool> g_cameraStateReady;
+extern std::atomic<bool> g_cameraActive;
 
 extern std::atomic<bool> g_accidentReady;
 extern float g_accidentPos[3];
@@ -99,8 +147,8 @@ void ServerV2::handle_client() {
             socket_.close(); start_accept(); return; 
         }
         
-        if (std::memcmp(hdr.magic, "DSV2", 4) != 0) { 
-            LOGE("server_v2", "Invalid magic bytes received");
+        if (std::memcmp(hdr.magic, "DSV3", 4) != 0 || hdr.version != 3) {
+            LOGE("server_v2", "Expected DSV3 protocol version 3");
             socket_.close(); start_accept(); return; 
         }
         
@@ -126,7 +174,7 @@ void ServerV2::handle_client() {
         case MSG_CREATE_CAMERA: {
             enqueue_command("CREATE_CAMERA");
             uint64_t cam_id = 1;
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_CAMERA; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = sizeof(cam_id);
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_CREATE_CAMERA; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = sizeof(cam_id);
             resp.resize(kWireHeaderSize + sizeof(cam_id));
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
@@ -156,7 +204,7 @@ void ServerV2::handle_client() {
             } else {
                 LOGE("server_v2", std::string("MSG_MOVE: Invalid payload size. Expected: ") + std::to_string(sizeof(float) * 3) + ", Got: " + std::to_string(hdr.length));
             }
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_MOVE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_MOVE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
@@ -177,7 +225,7 @@ void ServerV2::handle_client() {
                 enqueue_command(s);
                 LOGD("server_v2", std::string("Enqueue ") + s);
             }
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_ROTATE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_ROTATE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
@@ -195,7 +243,7 @@ void ServerV2::handle_client() {
                 std::string s = std::string("SETFOV:") + std::to_string(fov);
                 enqueue_command(s);
             }
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_FOV; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_SET_FOV; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
@@ -227,7 +275,7 @@ void ServerV2::handle_client() {
             }
             
             MsgHeader rh{}; 
-            std::memcpy(rh.magic, "DSV2", 4); 
+            std::memcpy(rh.magic, "DSV3", 4);
             rh.version = hdr.version; 
             rh.type = MSG_GET_POSE; 
             rh.flags = 0; 
@@ -262,6 +310,38 @@ void ServerV2::handle_client() {
             write_response(resp);
             return;
         }
+        case MSG_GET_CAMERA_STATE: {
+            g_cameraStateReady.store(false, std::memory_order_release);
+            enqueue_command("GET_CAMERA_STATE");
+
+            int tries = 0;
+            constexpr int max_tries = 600;
+            while (!g_cameraStateReady.load(std::memory_order_acquire) &&
+                   tries < max_tries) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                ++tries;
+            }
+
+            if (!g_cameraStateReady.load(std::memory_order_acquire)) {
+                resp = make_response(
+                    MSG_GET_CAMERA_STATE,
+                    hdr.request_id,
+                    {});
+                LOGE(
+                    "server_v2",
+                    "GET_CAMERA_STATE timed out waiting for the GTA script thread");
+            } else {
+                const std::vector<unsigned char> state{
+                    static_cast<unsigned char>(
+                        g_cameraActive.load(std::memory_order_acquire) ? 1 : 0)};
+                resp = make_response(
+                    MSG_GET_CAMERA_STATE,
+                    hdr.request_id,
+                    state);
+            }
+            write_response(resp);
+            return;
+        }
         case MSG_SET_TIME: {
             if (hdr.length >= 12) {
                 int h = *reinterpret_cast<int*>(&payload[0]);
@@ -270,7 +350,7 @@ void ServerV2::handle_client() {
                 std::string sCmd = std::string("SET_TIME ") + std::to_string(h) + " " + std::to_string(m) + " " + std::to_string(s);
                 enqueue_command(sCmd);
             }
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_TIME; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_SET_TIME; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
@@ -289,7 +369,7 @@ void ServerV2::handle_client() {
             }
             std::string sCmd = std::string("SET_WEATHER ") + name;
             enqueue_command(sCmd);
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_WEATHER; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_SET_WEATHER; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
@@ -303,7 +383,7 @@ void ServerV2::handle_client() {
         }
         case MSG_STOP_CAMERA: {
             enqueue_command("STOP_CAMERA");
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_STOP_CAMERA; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_STOP_CAMERA; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
@@ -323,7 +403,7 @@ void ServerV2::handle_client() {
             // 最多等待 20 秒，让事故场景完成设置并检测碰撞
             while (!g_accidentReady.load(std::memory_order_acquire) && tries < 4000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
             
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_ACCIDENT; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_CREATE_ACCIDENT; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
             
             bool accident_ready = g_accidentReady.load(std::memory_order_acquire);
             if (!accident_ready) {
@@ -358,7 +438,7 @@ void ServerV2::handle_client() {
             int32_t step = static_cast<int32_t>(g_recordingStep.load(std::memory_order_acquire));
             uint16_t path_len = static_cast<uint16_t>(std::min<size_t>(std::strlen(g_recordingSessionDir), 65535));
             uint32_t payload_len = 1 + 4 + 2 + path_len;
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_GET_RECORDING_INFO; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = payload_len;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_GET_RECORDING_INFO; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = payload_len;
             resp.resize(kWireHeaderSize + payload_len);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
@@ -395,7 +475,7 @@ void ServerV2::handle_client() {
                 std::memcpy(g_recordingRequestedTask, task.data(), tn);
                 g_recordingRequestedTask[tn] = '\0';
             }
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_RECORDING_SESSION; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_SET_RECORDING_SESSION; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
@@ -413,7 +493,7 @@ void ServerV2::handle_client() {
             int tries = 0;
             while (!g_fireReady.load(std::memory_order_acquire) && tries < 2000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
 
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_FIRE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_CREATE_FIRE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
             bool fire_ready = g_fireReady.load(std::memory_order_acquire);
             if (!fire_ready) {
                 rh.length = 0;
@@ -449,7 +529,7 @@ void ServerV2::handle_client() {
             int tries = 0;
             while (!g_arrestReady.load(std::memory_order_acquire) && tries < 2000) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tries++; }
 
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CREATE_ARREST; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_CREATE_ARREST; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id;
             bool arrest_ready = g_arrestReady.load(std::memory_order_acquire);
             if (!arrest_ready) {
                 rh.length = 0;
@@ -498,7 +578,7 @@ void ServerV2::handle_client() {
             } else {
                 LOGE("server_v2", std::string("MSG_SET_POSTURE: Invalid payload size. Expected: ") + std::to_string(sizeof(float) * 6) + ", Got: " + std::to_string(hdr.length));
             }
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_SET_POSTURE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_SET_POSTURE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
@@ -519,7 +599,7 @@ void ServerV2::handle_client() {
                 enqueue_command(s);
                 LOGD("server_v2", std::string("Enqueue ") + s);
             }
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_TELEPORT_PLAYER; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_TELEPORT_PLAYER; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
@@ -533,7 +613,7 @@ void ServerV2::handle_client() {
         }
         case MSG_RESTORE_PLAYER: {
             enqueue_command("RESTORE_PLAYER");
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_RESTORE_PLAYER; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_RESTORE_PLAYER; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
@@ -547,7 +627,7 @@ void ServerV2::handle_client() {
         }
         case MSG_CLEAR_SCENE: {
             enqueue_command("CLEAR_SCENE");
-            MsgHeader rh{}; std::memcpy(rh.magic, "DSV2", 4); rh.version = hdr.version; rh.type = MSG_CLEAR_SCENE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
+            MsgHeader rh{}; std::memcpy(rh.magic, "DSV3", 4); rh.version = hdr.version; rh.type = MSG_CLEAR_SCENE; rh.flags = 0; rh.reserved = 0; rh.request_id = hdr.request_id; rh.length = 0;
             resp.resize(kWireHeaderSize);
             std::memcpy(resp.data(), &rh.magic[0], 4);
             std::memcpy(resp.data() + 4, &rh.version, 1);
@@ -560,139 +640,139 @@ void ServerV2::handle_client() {
             return;
         }
         case MSG_CAPTURE: {
-            LOGD("server_v2", "Processing MSG_CAPTURE request");
-            enqueue_command("REQUEST");
-            int start_tries = 0;
-            while (cmdToCatch.load(std::memory_order_acquire) == catchStop && start_tries < 1000) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                start_tries++;
+            std::uint32_t timeout_ms = 5000;
+            if (payload.size() == sizeof(timeout_ms)) {
+                std::memcpy(&timeout_ms, payload.data(), sizeof(timeout_ms));
+            } else if (!payload.empty()) {
+                resp = make_response(
+                    MSG_CAPTURE,
+                    hdr.request_id,
+                    make_capture_error_payload(
+                        CaptureStatus::InternalError,
+                        "Capture payload must contain one uint32 timeout_ms"));
+                write_response(resp);
+                return;
             }
-            if (start_tries >= 1000) {
-                LOGW("server_v2", "MSG_CAPTURE: Timeout waiting for capture request to start");
+            if (timeout_ms == 0 || timeout_ms > 60000) {
+                resp = make_response(
+                    MSG_CAPTURE,
+                    hdr.request_id,
+                    make_capture_error_payload(
+                        CaptureStatus::InternalError,
+                        "timeout_ms must be in the range [1, 60000]"));
+                write_response(resp);
+                return;
             }
-            int tries = 0;
-            while (cmdToCatch.load(std::memory_order_acquire) != catchStop && tries < 3000) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                tries++;
+
+            CaptureStatus begin_status = CaptureStatus::Ok;
+            std::string begin_error;
+            if (!RgbdCapture::instance().begin_request(
+                    hdr.request_id,
+                    timeout_ms,
+                    begin_status,
+                    begin_error)) {
+                resp = make_response(
+                    MSG_CAPTURE,
+                    hdr.request_id,
+                    make_capture_error_payload(begin_status, begin_error));
+                write_response(resp);
+                return;
             }
-            
-            if (tries >= 3000) {
-                LOGW("server_v2", "MSG_CAPTURE: Timeout waiting for capture completion");
-            }
-            
+
+            enqueue_command(
+                std::string("CAPTURE ") + std::to_string(hdr.request_id));
             try {
-                std::vector<unsigned char> rgb_data;
-                std::vector<unsigned char> depth_data;
-                int w_rgb = 0;
-                int h_rgb = 0;
-                int w_depth = 0;
-                int h_depth = 0;
-                bool snapshot_ready = export_copy_rgbd_snapshot(rgb_data, depth_data, w_rgb, h_rgb, w_depth, h_depth);
-                int rgb_size = snapshot_ready ? static_cast<int>(rgb_data.size()) : -1;
-                int depth_size = snapshot_ready ? static_cast<int>(depth_data.size()) : -1;
-                
-                if (!snapshot_ready || rgb_data.empty() || depth_data.empty()) {
-                    LOGE("server_v2", "MSG_CAPTURE: RGBD snapshot is not ready");
-                    // 返回空响应
-                    MsgHeader rh{}; 
-                    std::memcpy(rh.magic, "DSV2", 4); 
-                    rh.version = hdr.version; 
-                    rh.type = MSG_CAPTURE; 
-                    rh.flags = 0; 
-                    rh.reserved = 0; 
-                    rh.request_id = hdr.request_id; 
-                    rh.length = 0;
-                    resp.resize(kWireHeaderSize);
-                    std::memcpy(resp.data(), &rh.magic[0], 4);
-                    std::memcpy(resp.data() + 4, &rh.version, 1);
-                    std::memcpy(resp.data() + 5, &rh.type, 1);
-                    std::memcpy(resp.data() + 6, &rh.flags, 1);
-                    std::memcpy(resp.data() + 7, &rh.reserved, 1);
-                    std::memcpy(resp.data() + 8, &rh.request_id, 8);
-                    std::memcpy(resp.data() + 16, &rh.length, 4);
+                CaptureResult capture;
+                const auto wait_timeout =
+                    std::chrono::milliseconds(timeout_ms) +
+                    std::chrono::milliseconds(250);
+                if (!RgbdCapture::instance().wait_result(
+                        hdr.request_id,
+                        wait_timeout,
+                        capture)) {
+                    RgbdCapture::instance().cancel_request(hdr.request_id);
+                    resp = make_response(
+                        MSG_CAPTURE,
+                        hdr.request_id,
+                        make_capture_error_payload(
+                            CaptureStatus::CaptureTimeout,
+                            "No fresh RGB-D frame completed before timeout"));
                     write_response(resp);
                     return;
                 }
-                
-                LOGD("server_v2", std::string("Capture: rgb_size=") + std::to_string(rgb_size) + ", depth_size=" + std::to_string(depth_size));
-                
-                // 验证尺寸的合理性
-                if (w_rgb <= 0 || h_rgb <= 0 || w_depth <= 0 || h_depth <= 0) {
-                    LOGE("server_v2", std::string("Invalid image dimensions: rgb(") + std::to_string(w_rgb) + "x" + std::to_string(h_rgb) + "), depth(" + std::to_string(w_depth) + "x" + std::to_string(h_depth) + ")");
-                    // 返回空响应
-                    MsgHeader rh{}; 
-                    std::memcpy(rh.magic, "DSV2", 4); 
-                    rh.version = hdr.version; 
-                    rh.type = MSG_CAPTURE; 
-                    rh.flags = 0; 
-                    rh.reserved = 0; 
-                    rh.request_id = hdr.request_id; 
-                    rh.length = 0;
-                    resp.resize(kWireHeaderSize);
-                    std::memcpy(resp.data(), &rh.magic[0], 4);
-                    std::memcpy(resp.data() + 4, &rh.version, 1);
-                    std::memcpy(resp.data() + 5, &rh.type, 1);
-                    std::memcpy(resp.data() + 6, &rh.flags, 1);
-                    std::memcpy(resp.data() + 7, &rh.reserved, 1);
-                    std::memcpy(resp.data() + 8, &rh.request_id, 8);
-                    std::memcpy(resp.data() + 16, &rh.length, 4);
+                if (capture.status != CaptureStatus::Ok) {
+                    resp = make_response(
+                        MSG_CAPTURE,
+                        hdr.request_id,
+                        make_capture_error_payload(
+                            capture.status,
+                            capture.error));
                     write_response(resp);
                     return;
                 }
-                
-                uint32_t hdr_len = sizeof(uint32_t) * 4 + rgb_size + depth_size;
-                MsgHeader rh{}; 
-                std::memcpy(rh.magic, "DSV2", 4); 
-                rh.version = hdr.version; 
-                rh.type = MSG_CAPTURE; 
-                rh.flags = 0; 
-                rh.reserved = 0; 
-                rh.request_id = hdr.request_id; 
-                rh.length = hdr_len;
-                
-                resp.resize(kWireHeaderSize + hdr_len);
-                std::memcpy(resp.data(), &rh.magic[0], 4);
-                std::memcpy(resp.data() + 4, &rh.version, 1);
-                std::memcpy(resp.data() + 5, &rh.type, 1);
-                std::memcpy(resp.data() + 6, &rh.flags, 1);
-                std::memcpy(resp.data() + 7, &rh.reserved, 1);
-                std::memcpy(resp.data() + 8, &rh.request_id, 8);
-                std::memcpy(resp.data() + 16, &rh.length, 4);
-                
-                uint32_t* p32 = reinterpret_cast<uint32_t*>(resp.data() + 20);
-                p32[0] = static_cast<uint32_t>(rgb_size);
-                p32[1] = static_cast<uint32_t>(depth_size);
-                p32[2] = static_cast<uint32_t>(w_rgb);
-                p32[3] = static_cast<uint32_t>(h_rgb);
-                
-                unsigned char* p = resp.data() + 20 + sizeof(uint32_t) * 4;
-                if (rgb_size > 0) {
-                    std::memcpy(p, rgb_data.data(), rgb_size);
+
+                const std::uint32_t rgb_size =
+                    static_cast<std::uint32_t>(capture.rgb.size());
+                const std::uint32_t depth_size =
+                    static_cast<std::uint32_t>(
+                        capture.depth_meters.size() * sizeof(float));
+                std::vector<unsigned char> capture_payload;
+                capture_payload.reserve(168ULL + rgb_size + depth_size);
+
+                append_scalar(
+                    capture_payload,
+                    static_cast<std::uint32_t>(CaptureStatus::Ok));
+                append_scalar(capture_payload, capture.frame_id);
+                append_scalar(capture_payload, capture.width);
+                append_scalar(capture_payload, capture.height);
+                append_scalar(capture_payload, rgb_size);
+                append_scalar(capture_payload, depth_size);
+                append_scalar(capture_payload, capture.camera.fov_degrees);
+                append_scalar(capture_payload, capture.camera.near_clip);
+                append_scalar(capture_payload, capture.camera.far_clip);
+                for (float value : capture.camera.projection) {
+                    append_scalar(capture_payload, value);
                 }
-                p += rgb_size;
-                if (depth_size > 0) {
-                    std::memcpy(p, depth_data.data(), depth_size);
+                for (float value : capture.camera.view) {
+                    append_scalar(capture_payload, value);
                 }
-                
-            } catch (const std::exception& e) {
-                LOGE("server_v2", std::string("Exception in MSG_CAPTURE: ") + e.what());
-                // 返回空响应
-                MsgHeader rh{}; 
-                std::memcpy(rh.magic, "DSV2", 4); 
-                rh.version = hdr.version; 
-                rh.type = MSG_CAPTURE; 
-                rh.flags = 0; 
-                rh.reserved = 0; 
-                rh.request_id = hdr.request_id; 
-                rh.length = 0;
-                resp.resize(kWireHeaderSize);
-                std::memcpy(resp.data(), &rh.magic[0], 4);
-                std::memcpy(resp.data() + 4, &rh.version, 1);
-                std::memcpy(resp.data() + 5, &rh.type, 1);
-                std::memcpy(resp.data() + 6, &rh.flags, 1);
-                std::memcpy(resp.data() + 7, &rh.reserved, 1);
-                std::memcpy(resp.data() + 8, &rh.request_id, 8);
-                std::memcpy(resp.data() + 16, &rh.length, 4);
+                capture_payload.insert(
+                    capture_payload.end(),
+                    capture.rgb.begin(),
+                    capture.rgb.end());
+                const auto* depth_bytes =
+                    reinterpret_cast<const unsigned char*>(
+                        capture.depth_meters.data());
+                capture_payload.insert(
+                    capture_payload.end(),
+                    depth_bytes,
+                    depth_bytes + depth_size);
+                resp = make_response(
+                    MSG_CAPTURE,
+                    hdr.request_id,
+                    capture_payload);
+            } catch (const std::exception& exception) {
+                RgbdCapture::instance().cancel_request(hdr.request_id);
+                resp = make_response(
+                    MSG_CAPTURE,
+                    hdr.request_id,
+                    make_capture_error_payload(
+                        CaptureStatus::InternalError,
+                        exception.what()));
+                LOGE(
+                    "server_v2",
+                    std::string("MSG_CAPTURE failed: ") +
+                        exception.what());
+                write_response(resp);
+                return;
+            } catch (...) {
+                RgbdCapture::instance().cancel_request(hdr.request_id);
+                resp = make_response(
+                    MSG_CAPTURE,
+                    hdr.request_id,
+                    make_capture_error_payload(
+                        CaptureStatus::InternalError,
+                        "Unknown capture exception"));
                 write_response(resp);
                 return;
             }

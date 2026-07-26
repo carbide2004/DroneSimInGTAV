@@ -146,13 +146,3 @@ enum eGameVersion : int
 };
 
 IMPORT eGameVersion getGameVersion();
-
-void catchCurveAndScreen(WCHAR *_imgpath, char *_rawPath, bool _forceSave, bool _onlyScreen = false);
-inline void makeCmdStart();
-
-enum catchState
-{
-	catchStop,
-	catchStart,
-	catchScreen
-};
