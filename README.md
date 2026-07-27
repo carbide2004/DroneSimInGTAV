@@ -53,7 +53,9 @@ The plugin listens on `127.0.0.5:23456` by default.
 
 Manual translation uses the same collision check as the network pose API.
 Each physical key press performs one step; holding a key does not repeatedly
-move the camera.
+move the camera. While the scripted camera is active, GTA gameplay controls
+are suppressed so these keys do not also move or operate the player. Pause
+menu controls remain available, and normal player input resumes after F11.
 
 The same camera operations are available through the Python client.
 

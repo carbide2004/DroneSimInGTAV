@@ -22,6 +22,7 @@ public:
     bool create(std::uint64_t& camera_id, std::string& error);
     bool stop(std::string& error);
     bool is_active() const;
+    void suppress_player_controls_for_frame() const;
     bool get_pose(RuntimePose& pose, std::string& error) const;
     CameraPoseStatus set_pose(
         float x,

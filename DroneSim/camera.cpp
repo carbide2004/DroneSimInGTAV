@@ -11,6 +11,21 @@ namespace {
 constexpr float kPositionToleranceMeters = 1.0e-3f;
 constexpr float kAngleToleranceDegrees = 1.0e-2f;
 constexpr int kMaximumPoseApplyFrames = 120;
+constexpr int kPlayerControlGroup = 0;
+constexpr int kPauseControl = 199;
+constexpr int kAlternatePauseControl = 200;
+
+void suppress_gameplay_controls_for_frame() {
+    CONTROLS::DISABLE_ALL_CONTROL_ACTIONS(kPlayerControlGroup);
+    CONTROLS::ENABLE_CONTROL_ACTION(
+        kPlayerControlGroup,
+        kPauseControl,
+        TRUE);
+    CONTROLS::ENABLE_CONTROL_ACTION(
+        kPlayerControlGroup,
+        kAlternatePauseControl,
+        TRUE);
+}
 
 bool finite_pose(float x, float y, float z, float yaw) {
     return std::isfinite(x) && std::isfinite(y) && std::isfinite(z) &&
@@ -62,6 +77,7 @@ RaycastStatus raycast_world(
     Vector3 hit_normal{};
     Entity hit_entity = 0;
     for (int frame = 0; frame < 8; ++frame) {
+        suppress_gameplay_controls_for_frame();
         if (cancelled.load(std::memory_order_acquire)) {
             error = "Camera pose request was cancelled";
             return RaycastStatus::Failed;
@@ -175,6 +191,12 @@ bool CameraController::is_active() const {
         CAM::IS_CAM_ACTIVE(camera_handle_);
 }
 
+void CameraController::suppress_player_controls_for_frame() const {
+    if (is_active()) {
+        suppress_gameplay_controls_for_frame();
+    }
+}
+
 bool CameraController::get_pose(
     RuntimePose& pose,
     std::string& error) const {
@@ -255,6 +277,7 @@ CameraPoseStatus CameraController::set_pose(
         // the engine and poll the actual pose instead of sleeping for a fixed
         // wall-clock duration.
         WAIT(0);
+        suppress_gameplay_controls_for_frame();
         if (cancelled.load(std::memory_order_acquire)) {
             CAM::SET_CAM_COORD(
                 camera_handle_,

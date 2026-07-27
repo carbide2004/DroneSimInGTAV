@@ -413,6 +413,7 @@ void scriptMain() {
     LOGI("script", "DroneSim Stage 0 runtime started");
 
     while (true) {
+        CameraController::instance().suppress_player_controls_for_frame();
         process_keyboard();
 
         RuntimeCommandPtr command;
