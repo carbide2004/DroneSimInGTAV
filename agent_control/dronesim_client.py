@@ -1,15 +1,14 @@
+import math
 import socket
 import struct
-import time
 from dataclasses import dataclass
 from itertools import count
+
 
 MAGIC = b"DSV3"
 VERSION = 3
 
 TYPE_CREATE_CAMERA = 1
-TYPE_MOVE = 2
-TYPE_ROTATE = 3
 TYPE_SET_FOV = 4
 TYPE_CAPTURE = 5
 TYPE_PING = 6
@@ -17,17 +16,22 @@ TYPE_GET_POSE = 7
 TYPE_SET_TIME = 8
 TYPE_SET_WEATHER = 9
 TYPE_STOP_CAMERA = 10
-TYPE_CREATE_ACCIDENT = 11
-TYPE_GET_RECORDING_INFO = 12
-TYPE_SET_RECORDING_SESSION = 13
-TYPE_CREATE_FIRE = 14
-TYPE_CREATE_ARREST = 15
-TYPE_SET_POSTURE = 16
 TYPE_TELEPORT_PLAYER = 17
 TYPE_RESTORE_PLAYER = 18
-TYPE_CLEAR_SCENE = 19
 TYPE_GET_CAMERA_STATE = 20
+TYPE_SET_CAMERA_POSE = 21
 
+COMMAND_STATUS = {
+    0: "OK",
+    1: "CAMERA_INACTIVE",
+    2: "INVALID_POSE",
+    3: "COLLISION_BLOCKED",
+    4: "COMMAND_TIMEOUT",
+    5: "POSE_APPLY_FAILED",
+    6: "POSE_MISMATCH",
+    7: "INVALID_REQUEST",
+    8: "INTERNAL_ERROR",
+}
 
 CAPTURE_STATUS = {
     0: "OK",
@@ -52,10 +56,21 @@ class DroneSimProtocolError(RuntimeError):
     pass
 
 
+class DroneSimCommandError(RuntimeError):
+    def __init__(self, status, message):
+        self.status = int(status)
+        self.status_name = COMMAND_STATUS.get(
+            self.status, "UNKNOWN_COMMAND_STATUS"
+        )
+        super().__init__(f"{self.status_name}: {message}")
+
+
 class CaptureError(RuntimeError):
     def __init__(self, status, message):
         self.status = int(status)
-        self.status_name = CAPTURE_STATUS.get(self.status, "UNKNOWN_CAPTURE_STATUS")
+        self.status_name = CAPTURE_STATUS.get(
+            self.status, "UNKNOWN_CAPTURE_STATUS"
+        )
         super().__init__(f"{self.status_name}: {message}")
 
 
@@ -74,8 +89,6 @@ class RgbdFrame:
     view_matrix: tuple
 
     def __iter__(self):
-        # Existing call sites that unpack w, h, rgb, depth keep working while
-        # V3 metadata remains available as named fields.
         yield self.width
         yield self.height
         yield self.rgb
@@ -111,146 +124,332 @@ class RgbdFrame:
         return depth
 
 
-def _pack_header(t, req_id, length):
-    return struct.pack("<4sBBBBQI", MAGIC, VERSION, t, 0, 0, req_id, length)
+def _pack_header(message_type, request_id, length):
+    return struct.pack(
+        "<4sBBBBQI",
+        MAGIC,
+        VERSION,
+        message_type,
+        0,
+        0,
+        request_id,
+        length,
+    )
 
-def _recv_exact(sock, n):
-    data = bytearray(n)
+
+def _recv_exact(sock, size):
+    data = bytearray(size)
     view = memoryview(data)
     received = 0
-    while received < n:
-        r = sock.recv_into(view[received:], n - received)
-        if not r:
+    while received < size:
+        count_received = sock.recv_into(
+            view[received:], size - received
+        )
+        if count_received == 0:
             return None
-        received += r
+        received += count_received
     return bytes(data)
 
+
+def _require_finite(*values):
+    if not all(math.isfinite(float(value)) for value in values):
+        raise ValueError("All pose values must be finite")
+
+
 class DroneSimClient:
-    def __init__(self, host="127.0.0.5", port=23456):
+    def __init__(
+        self,
+        host="127.0.0.5",
+        port=23456,
+        command_timeout=7.0,
+    ):
         self.host = host
-        self.port = port
+        self.port = int(port)
+        self.command_timeout = float(command_timeout)
+        if (
+            not math.isfinite(self.command_timeout)
+            or self.command_timeout <= 0
+        ):
+            raise ValueError("command_timeout must be a positive finite value")
         self._request_ids = count(1000)
 
-    def _send(self, t, req_id, payload=b"", timeout=None):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        if timeout is not None:
-            s.settimeout(timeout)
-        s.connect((self.host, self.port))
-        s.sendall(_pack_header(t, req_id, len(payload)) + payload)
-        return s
-
-    def _recv(self, s):
-        h = _recv_exact(s, 20)
-        if not h:
-            s.close()
-            raise DroneSimProtocolError(
-                "Connection closed before the response header was received"
-            )
-        magic, ver, t, flags, reserved, req_id, length = struct.unpack(
-            "<4sBBBBQI", h
+    def _exchange(
+        self,
+        message_type,
+        payload=b"",
+        timeout=None,
+    ):
+        request_id = next(self._request_ids)
+        effective_timeout = (
+            self.command_timeout if timeout is None else float(timeout)
         )
-        if magic != MAGIC or ver != VERSION:
-            s.close()
-            raise DroneSimProtocolError(
-                f"Expected {MAGIC!r}/v{VERSION}, received {magic!r}/v{ver}"
+        with socket.create_connection(
+            (self.host, self.port),
+            timeout=effective_timeout,
+        ) as sock:
+            sock.settimeout(effective_timeout)
+            sock.sendall(
+                _pack_header(
+                    message_type,
+                    request_id,
+                    len(payload),
+                )
+                + payload
             )
-        p = _recv_exact(s, length) if length else b""
-        s.close()
-        if p is None:
-            raise DroneSimProtocolError(
-                f"Connection closed while reading {length} response bytes"
+            header = _recv_exact(sock, 20)
+            if header is None:
+                raise DroneSimProtocolError(
+                    "Connection closed before the response header"
+                )
+            (
+                magic,
+                version,
+                response_type,
+                _flags,
+                _reserved,
+                response_id,
+                length,
+            ) = struct.unpack("<4sBBBBQI", header)
+            if magic != MAGIC or version != VERSION:
+                raise DroneSimProtocolError(
+                    f"Expected {MAGIC!r}/v{VERSION}, "
+                    f"received {magic!r}/v{version}"
+                )
+            if (
+                response_type != message_type
+                or response_id != request_id
+            ):
+                raise DroneSimProtocolError(
+                    "Response does not match request: "
+                    f"type={response_type}/{message_type}, "
+                    f"id={response_id}/{request_id}"
+                )
+            response_payload = (
+                _recv_exact(sock, length) if length else b""
             )
-        return t, req_id, p
+            if response_payload is None:
+                raise DroneSimProtocolError(
+                    f"Connection closed while reading {length} response bytes"
+                )
+            return request_id, response_payload
+
+    @staticmethod
+    def _command_data(payload):
+        if len(payload) < 8:
+            raise DroneSimProtocolError(
+                "Command response has no status/message header"
+            )
+        status, message_size = struct.unpack_from("<II", payload, 0)
+        if len(payload) < 8 + message_size:
+            raise DroneSimProtocolError(
+                "Command response message exceeds payload"
+            )
+        message = payload[8 : 8 + message_size].decode(
+            "utf-8", errors="strict"
+        )
+        if status != 0:
+            raise DroneSimCommandError(status, message)
+        return payload[8 + message_size :]
+
+    def _command(
+        self,
+        message_type,
+        payload=b"",
+        timeout=None,
+    ):
+        _request_id, response = self._exchange(
+            message_type,
+            payload,
+            timeout,
+        )
+        return self._command_data(response)
+
+    def ping(self, payload=b""):
+        if not isinstance(payload, bytes):
+            raise TypeError("ping payload must be bytes")
+        return self._command(TYPE_PING, payload)
 
     def create_camera(self):
-        s = self._send(TYPE_CREATE_CAMERA, 1)
-        t, rid, p = self._recv(s)
-        cam_id = struct.unpack("Q", p)[0] if p else 0
-        time.sleep(2.5) # 服务器端启动相机需要等待2秒
-        return cam_id
+        data = self._command(TYPE_CREATE_CAMERA)
+        if len(data) != 8:
+            raise DroneSimProtocolError(
+                f"CREATE_CAMERA returned {len(data)} data bytes; expected 8"
+            )
+        return struct.unpack("<Q", data)[0]
 
-    def move(self, dx, dy, dz):
-        payload = struct.pack("fff", dx, dy, dz)
-        s = self._send(TYPE_MOVE, 2, payload)
-        self._recv(s)
-        time.sleep(0.1)
+    def stop_camera(self):
+        data = self._command(TYPE_STOP_CAMERA)
+        if data:
+            raise DroneSimProtocolError(
+                "STOP_CAMERA returned unexpected data"
+            )
 
-    def move_to(self, x, y, z):
-        """将相机移动到绝对位置，保持当前旋转。"""
-        current_pose = self.get_pose()
-        if current_pose is None:
-            return
-        _, _, _, rx, ry, rz = current_pose
-        self.set_posture(x, y, z, rx, ry, rz)
+    def is_camera_active(self):
+        data = self._command(TYPE_GET_CAMERA_STATE)
+        if len(data) != 1 or data[0] not in (0, 1):
+            raise DroneSimProtocolError(
+                "GET_CAMERA_STATE returned an invalid boolean"
+            )
+        return data[0] == 1
 
-    def rotate(self, rx, ry, rz):
-        payload = struct.pack("fff", rx, ry, rz)
-        s = self._send(TYPE_ROTATE, 3, payload)
-        self._recv(s)
-        time.sleep(0.1)
+    def require_camera_active(self):
+        if not self.is_camera_active():
+            raise RuntimeError(
+                "DroneSim camera mode is inactive. Press F10 in GTA V or call "
+                "DroneSimClient.create_camera() before validation."
+            )
 
-    def set_rotation(self, rx, ry, rz):
-        """设置相机绝对旋转，保持当前位置。"""
-        current_pose = self.get_pose()
-        if current_pose is None:
-            return
-        x, y, z = current_pose[:3]
-        self.set_posture(x, y, z, rx, ry, rz)
+    def get_pose(self):
+        data = self._command(TYPE_GET_POSE)
+        if len(data) != 24:
+            raise DroneSimProtocolError(
+                f"GET_POSE returned {len(data)} data bytes; expected 24"
+            )
+        return struct.unpack("<6f", data)
 
-    def set_posture(self, x, y, z, rx, ry, rz):
-        """设置相机绝对位置和旋转。"""
-        payload = struct.pack("ffffff", x, y, z, rx, ry, rz)
-        s = self._send(TYPE_SET_POSTURE, 16, payload)
-        self._recv(s)
-        time.sleep(0.1)
+    def set_camera_pose(
+        self,
+        x_world,
+        y_world,
+        z_world,
+        yaw_degrees,
+        collision_check=True,
+    ):
+        _require_finite(x_world, y_world, z_world, yaw_degrees)
+        payload = struct.pack(
+            "<4fB",
+            float(x_world),
+            float(y_world),
+            float(z_world),
+            float(yaw_degrees),
+            1 if collision_check else 0,
+        )
+        data = self._command(TYPE_SET_CAMERA_POSE, payload)
+        if len(data) != 24:
+            raise DroneSimProtocolError(
+                "SET_CAMERA_POSE did not return the six-component actual pose"
+            )
+        return struct.unpack("<6f", data)
 
-    def set_fov(self, fov):
-        payload = struct.pack("f", fov)
-        s = self._send(TYPE_SET_FOV, 4, payload)
-        self._recv(s)
-        time.sleep(0.1)
+    def set_fov(self, fov_degrees):
+        _require_finite(fov_degrees)
+        data = self._command(
+            TYPE_SET_FOV,
+            struct.pack("<f", float(fov_degrees)),
+        )
+        if data:
+            raise DroneSimProtocolError(
+                "SET_FOV returned unexpected data"
+            )
+
+    def set_time(self, hour, minute, second):
+        values = (int(hour), int(minute), int(second))
+        if not (
+            0 <= values[0] <= 23
+            and 0 <= values[1] <= 59
+            and 0 <= values[2] <= 59
+        ):
+            raise ValueError(
+                "Time must satisfy hour 0..23 and minute/second 0..59"
+            )
+        data = self._command(
+            TYPE_SET_TIME,
+            struct.pack("<3i", *values),
+        )
+        if data:
+            raise DroneSimProtocolError(
+                "SET_TIME returned unexpected data"
+            )
+
+    def set_weather(self, name):
+        if not isinstance(name, str):
+            raise TypeError("Weather name must be a string")
+        encoded = name.encode("ascii", errors="strict")
+        if (
+            not encoded
+            or len(encoded) > 32
+            or any(
+                not (
+                    65 <= value <= 90
+                    or 48 <= value <= 57
+                    or value == 95
+                )
+                for value in encoded
+            )
+        ):
+            raise ValueError(
+                "Weather must contain 1..32 uppercase ASCII letters, "
+                "digits, or underscores"
+            )
+        data = self._command(TYPE_SET_WEATHER, encoded)
+        if data:
+            raise DroneSimProtocolError(
+                "SET_WEATHER returned unexpected data"
+            )
+
+    def teleport_player(self, x_world, y_world, z_world):
+        _require_finite(x_world, y_world, z_world)
+        data = self._command(
+            TYPE_TELEPORT_PLAYER,
+            struct.pack(
+                "<3f",
+                float(x_world),
+                float(y_world),
+                float(z_world),
+            ),
+        )
+        if data:
+            raise DroneSimProtocolError(
+                "TELEPORT_PLAYER returned unexpected data"
+            )
+
+    def restore_player(self):
+        data = self._command(TYPE_RESTORE_PLAYER)
+        if data:
+            raise DroneSimProtocolError(
+                "RESTORE_PLAYER returned unexpected data"
+            )
 
     def capture(self, timeout_ms=5000):
         timeout_ms = int(timeout_ms)
         if timeout_ms <= 0 or timeout_ms > 60000:
-            raise ValueError("timeout_ms must be in the range [1, 60000]")
-        request_id = next(self._request_ids)
-        s = self._send(
+            raise ValueError(
+                "timeout_ms must be in the range [1, 60000]"
+            )
+        request_id, payload = self._exchange(
             TYPE_CAPTURE,
-            request_id,
             struct.pack("<I", timeout_ms),
             timeout=timeout_ms / 1000.0 + 2.0,
         )
-        t, rid, p = self._recv(s)
-        if t != TYPE_CAPTURE or rid != request_id:
+        if len(payload) < 4:
             raise DroneSimProtocolError(
-                f"Capture response mismatch: type={t}, request_id={rid}"
+                "Capture response has no status field"
             )
-        if len(p) < 4:
-            raise DroneSimProtocolError("Capture response has no status field")
 
-        status = struct.unpack_from("<I", p, 0)[0]
+        status = struct.unpack_from("<I", payload, 0)[0]
         if status != 0:
-            if len(p) < 8:
+            if len(payload) < 8:
                 raise DroneSimProtocolError(
                     "Failed capture response has no error length"
                 )
-            error_size = struct.unpack_from("<I", p, 4)[0]
-            if len(p) != 8 + error_size:
+            error_size = struct.unpack_from("<I", payload, 4)[0]
+            if len(payload) != 8 + error_size:
                 raise DroneSimProtocolError(
                     "Failed capture response length does not match error length"
                 )
-            message = p[8:].decode("utf-8", errors="strict")
+            message = payload[8:].decode("utf-8", errors="strict")
             raise CaptureError(status, message)
 
-        if len(p) < CAPTURE_METADATA_SIZE:
+        if len(payload) < CAPTURE_METADATA_SIZE:
             raise DroneSimProtocolError(
-                f"Capture metadata has {len(p)} bytes; "
+                f"Capture metadata has {len(payload)} bytes; "
                 f"expected at least {CAPTURE_METADATA_SIZE}"
             )
-        fields = struct.unpack_from(CAPTURE_METADATA_FORMAT, p, 0)
+        fields = struct.unpack_from(
+            CAPTURE_METADATA_FORMAT, payload, 0
+        )
         (
-            _,
+            _status,
             frame_id,
             width,
             height,
@@ -263,26 +462,32 @@ class DroneSimClient:
         ) = fields
         expected_rgb = width * height * 3
         expected_depth = width * height * 4
-        if rgb_size != expected_rgb or depth_size != expected_depth:
+        if (
+            rgb_size != expected_rgb
+            or depth_size != expected_depth
+        ):
             raise DroneSimProtocolError(
-                "Capture payload sizes do not match declared dimensions: "
+                "Capture sizes do not match declared dimensions: "
                 f"rgb={rgb_size}/{expected_rgb}, "
                 f"depth={depth_size}/{expected_depth}"
             )
-        expected_total = CAPTURE_METADATA_SIZE + rgb_size + depth_size
-        if len(p) != expected_total:
+        expected_total = (
+            CAPTURE_METADATA_SIZE + rgb_size + depth_size
+        )
+        if len(payload) != expected_total:
             raise DroneSimProtocolError(
-                f"Capture response has {len(p)} bytes; expected {expected_total}"
+                f"Capture response has {len(payload)} bytes; "
+                f"expected {expected_total}"
             )
         rgb_offset = CAPTURE_METADATA_SIZE
         depth_offset = rgb_offset + rgb_size
         return RgbdFrame(
-            request_id=rid,
+            request_id=request_id,
             frame_id=frame_id,
             width=width,
             height=height,
-            rgb=p[rgb_offset:depth_offset],
-            depth=p[depth_offset:],
+            rgb=payload[rgb_offset:depth_offset],
+            depth=payload[depth_offset:],
             fov_degrees=fov,
             near_clip=near_clip,
             far_clip=far_clip,
@@ -290,141 +495,71 @@ class DroneSimClient:
             view_matrix=tuple(matrices[16:]),
         )
 
-    def get_pose(self):
-        s = self._send(TYPE_GET_POSE, 6)
-        t, rid, p = self._recv(s)
-        if not p or len(p) < 24:
-            return None
-        x,y,z,rx,ry,rz = struct.unpack("ffffff", p)
-        time.sleep(0.1)
-        return x,y,z,rx,ry,rz
 
-    def is_camera_active(self):
-        request_id = next(self._request_ids)
-        s = self._send(TYPE_GET_CAMERA_STATE, request_id)
-        t, rid, payload = self._recv(s)
-        if t != TYPE_GET_CAMERA_STATE or rid != request_id:
-            raise DroneSimProtocolError(
-                f"Camera-state response mismatch: type={t}, request_id={rid}"
-            )
-        if len(payload) != 1:
-            raise DroneSimProtocolError(
-                "Camera-state query timed out or returned an invalid payload"
-            )
-        if payload[0] not in (0, 1):
-            raise DroneSimProtocolError(
-                f"Camera-state response has invalid value {payload[0]}"
-            )
-        return payload[0] == 1
+class RelativePoseController:
+    """Agent-facing continuous relative-pose wrapper.
 
-    def require_camera_active(self):
-        if not self.is_camera_active():
+    dx_body is forward, dy_body is right, dz_world is vertical, and dyaw is
+    added in degrees. The plugin receives only the resulting absolute pose.
+    """
+
+    def __init__(self, client, collision_check=True):
+        if not isinstance(client, DroneSimClient):
+            raise TypeError("client must be a DroneSimClient")
+        self.client = client
+        self.collision_check = bool(collision_check)
+        self._pose = None
+
+    @property
+    def pose(self):
+        if self._pose is None:
             raise RuntimeError(
-                "DroneSim camera mode is inactive. Press F10 in GTA V or call "
-                "DroneSimClient.create_camera() before running validation."
+                "RelativePoseController is not synchronized"
             )
+        return self._pose
 
-    def set_time(self, hour, minute, second):
-        payload = struct.pack("iii", int(hour), int(minute), int(second))
-        s = self._send(TYPE_SET_TIME, 7, payload)
-        self._recv(s)
-        time.sleep(0.1)
+    def synchronize(self):
+        self._pose = self.client.get_pose()
+        return self._pose
 
-    def set_weather(self, name):
-        data = name.encode('ascii')
-        s = self._send(TYPE_SET_WEATHER, 8, data)
-        self._recv(s)
-        time.sleep(0.1)
+    def step_relative(
+        self,
+        dx_body,
+        dy_body,
+        dz_world,
+        dyaw,
+    ):
+        _require_finite(dx_body, dy_body, dz_world, dyaw)
+        if self._pose is None:
+            self.synchronize()
 
-    def stop_camera(self):
-        s = self._send(TYPE_STOP_CAMERA, 9)
-        self._recv(s)
-        time.sleep(0.1)
-
-    def create_accident(self):
-        s = self._send(TYPE_CREATE_ACCIDENT, 11)
-        t, rid, p = self._recv(s)
-        if not p or len(p) < 12:
-            return None
-        x, y, z = struct.unpack("fff", p[:12])
-        return x, y, z
-
-    def get_recording_info(self):
-        s = self._send(TYPE_GET_RECORDING_INFO, 12)
-        t, rid, p = self._recv(s)
-        if not p or len(p) < 7:
-            return None
-        enabled = struct.unpack("B", p[:1])[0]
-        step = struct.unpack("i", p[1:5])[0]
-        path_len = struct.unpack("H", p[5:7])[0]
-        path = p[7:7+path_len].decode("utf-8", errors="replace") if path_len else ""
-        return {"enabled": bool(enabled), "step": int(step), "session_dir": path}
-
-    def set_recording_session(self, session_name, task=None):
-        if task is None:
-            payload = str(session_name).encode("utf-8")
-        else:
-            payload = (str(session_name) + "\n" + str(task)).encode("utf-8")
-        s = self._send(TYPE_SET_RECORDING_SESSION, 13, payload)
-        self._recv(s)
-        time.sleep(0.1)
-
-    def create_fire(self):
-        s = self._send(TYPE_CREATE_FIRE, 14)
-        t, rid, p = self._recv(s)
-        if not p or len(p) < 16:
-            return None
-        x, y, z = struct.unpack("fff", p[:12])
-        fire_id = struct.unpack("i", p[12:16])[0]
-        return x, y, z, fire_id
-
-    def create_arrest(self):
-        s = self._send(TYPE_CREATE_ARREST, 15)
-        t, rid, p = self._recv(s)
-        if not p or len(p) < 12:
-            return None
-        x, y, z = struct.unpack("fff", p[:12])
-        return x, y, z
-    
-    def teleport_player(self, x, y, z):
-        """将玩家角色传送到异常中心，并设置为无敌和不可见。"""
-        payload = struct.pack("fff", x, y, z)
-        s = self._send(TYPE_TELEPORT_PLAYER, 17, payload)
-        self._recv(s)
-        time.sleep(1.5)  # Longer wait for view switching and teleportation
-
-    def restore_player(self):
-        """验证结束后恢复玩家正常状态。"""
-        s = self._send(TYPE_RESTORE_PLAYER, 18)
-        self._recv(s)
-        time.sleep(1.5)  # Longer wait for view switching and restoration
-
-    def clear_scene(self):
-        """清理插件创建的异常车辆、行人和火焰。"""
-        s = self._send(TYPE_CLEAR_SCENE, 19)
-        self._recv(s)
-        time.sleep(0.5)
-
-def visualize(rgb_bytes, depth_bytes, w, h):
-    try:
-        import numpy as np
-        import matplotlib.pyplot as plt
-    except ImportError:
-        return False
-    expected_rgb = int(w) * int(h) * 3
-    expected_depth = int(w) * int(h) * 4
-    if len(rgb_bytes) != expected_rgb or len(depth_bytes) != expected_depth:
-        raise DroneSimProtocolError(
-            "RGB-D byte counts do not match the declared dimensions"
+        x, y, z, _pitch, _roll, yaw = self._pose
+        yaw_radians = math.radians(yaw)
+        forward_x = -math.sin(yaw_radians)
+        forward_y = math.cos(yaw_radians)
+        right_x = math.cos(yaw_radians)
+        right_y = math.sin(yaw_radians)
+        target_x = (
+            x
+            + forward_x * float(dx_body)
+            + right_x * float(dy_body)
         )
-    rgb = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape((h, w, 3))
-    depth = np.frombuffer(depth_bytes, dtype=np.float32).reshape((h, w))
-    vmin = float(np.percentile(depth, 5))
-    vmax = float(np.percentile(depth, 95))
-    if vmin == vmax:
-        vmin, vmax = float(depth.min()), float(depth.max())
-    plt.figure(figsize=(12,5))
-    plt.subplot(1,2,1); plt.title("RGB"); plt.imshow(rgb); plt.axis('off')
-    plt.subplot(1,2,2); plt.title("Depth"); im = plt.imshow(depth, cmap='magma', vmin=vmin, vmax=vmax); plt.colorbar(im, fraction=0.046, pad=0.04)
-    plt.tight_layout(); plt.show()
-    return True
+        target_y = (
+            y
+            + forward_y * float(dx_body)
+            + right_y * float(dy_body)
+        )
+        target_z = z + float(dz_world)
+        target_yaw = (
+            yaw + float(dyaw) + 180.0
+        ) % 360.0 - 180.0
+
+        actual_pose = self.client.set_camera_pose(
+            target_x,
+            target_y,
+            target_z,
+            target_yaw,
+            collision_check=self.collision_check,
+        )
+        self._pose = actual_pose
+        return actual_pose

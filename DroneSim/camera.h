@@ -1,33 +1,41 @@
 #pragma once
 
-#include "natives.h"
+#include "command_queue.h"
 #include "types.h"
-#include "enums.h"
-#include "main.h"
-#include <cmath>
+
+#include <atomic>
 #include <string>
 
-const float PI = acos(1.0) * 2;
-const float cameraSpeedFactor = 1;
-const float STEPSIZE = 5.0;
-const float YAW_STEPSIZE = 15.0;
+enum class CameraPoseStatus {
+    Ok,
+    CameraInactive,
+    InvalidPose,
+    CollisionBlocked,
+    ApplyFailed,
+    PoseMismatch,
+};
 
-extern int adjustCameraFinished;
+class CameraController {
+public:
+    static CameraController& instance();
 
-void startNewCamera();
-void moveCameraDelta(float dx, float dy, float dz);
-void rotateCameraDelta(float rx, float ry, float rz);
-void setCameraFov(float fov);
-void StopCamera(int foldNo = 0);
+    bool create(std::uint64_t& camera_id, std::string& error);
+    bool stop(std::string& error);
+    bool is_active() const;
+    bool get_pose(RuntimePose& pose, std::string& error) const;
+    CameraPoseStatus set_pose(
+        float x,
+        float y,
+        float z,
+        float yaw_degrees,
+        bool collision_check,
+        const std::atomic<bool>& cancelled,
+        RuntimePose& actual_pose,
+        std::string& error);
+    bool set_fov(float fov_degrees, std::string& error);
 
-bool showCamera();
-void showCamera(float &camX, float &camY);
+private:
+    CameraController() = default;
 
-void getCameraLoc(float &camX, float &camY);
-void getCameraLoc(float &camX, float &camY, float &camZ);
-
-void show2False();
-void showCamera4(int No = adjustCameraFinished);
-bool saveCamera4(int No = adjustCameraFinished);
-void gobackcamera();
-//bool cameraToOrigin();
+    Any camera_handle_ = 0;
+};

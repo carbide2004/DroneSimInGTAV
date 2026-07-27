@@ -1,58 +1,64 @@
-#include "server_v2.h"
 #include "keyboard.h"
-#include "types.h"
-#include "script.h"
-#include "main.h"
-#include "camera.h"
-#include "utils.h"
-#include "logging.h"
 
-const int keyInfo::MAX_DOWN = 500; //ms
+KeyState F9;
+KeyState F10;
+KeyState F11;
+KeyState MoveForward;
+KeyState MoveBackward;
+KeyState StrafeLeft;
+KeyState StrafeRight;
+KeyState YawLeft;
+KeyState YawRight;
+KeyState MoveUp;
+KeyState MoveDown;
 
-keyInfo::keyInfo() {
-	time = 0;
-	isConsumed = TRUE;
+bool KeyState::consume_press() {
+    if (consumed) {
+        return false;
+    }
+    consumed = TRUE;
+    return !is_up && GetTickCount() < time + kMaxDownMilliseconds;
 }
-bool keyInfo::isKeyDown() {
-	if (isConsumed) return false;
-	isConsumed = TRUE;
-	return ((GetTickCount() < time + MAX_DOWN) && !isUpNow);
-}
-void keyInfo::pushDown(BOOL _isUpNow, BOOL _isWithAlt, BOOL _wasDownBefore) {
-	time = GetTickCount();
-	isConsumed = FALSE;
-	isWithAlt = _isWithAlt;
-	wasDownBefore = _wasDownBefore;
-	isUpNow = _isUpNow;
-}
-keyInfo W, A, S, D, Q, E, V, shift, ctrl, tab, oemPlus, oemMinus, F12, F5, F6, F7, F10, I, F11, numKey[10];
 
-void OnKeyboardMessage(DWORD key, WORD repeats, BYTE scanCode, BOOL isExtended, BOOL isWithAlt, BOOL wasDownBefore, BOOL isUpNow)
-{
-	bool updown = !wasDownBefore && !isUpNow;
-	auto push = [&key, &updown](char mykey) {
-		return key == mykey && updown;
-	};
-	
-	if (scriptStatus == scriptStop && push(VK_F10)) {
-		F10.pushDown(isUpNow, isWithAlt, wasDownBefore);
-	}
-	if (scriptStatus == cameraMode) {
-		if (key == 'W') W.pushDown(isUpNow, isWithAlt, wasDownBefore);
-		if (key == 'A') A.pushDown(isUpNow, isWithAlt, wasDownBefore);
-		if (key == 'S') S.pushDown(isUpNow, isWithAlt, wasDownBefore);
-		if (key == 'D') D.pushDown(isUpNow, isWithAlt, wasDownBefore);
-		if (key == 'V') V.pushDown(isUpNow, isWithAlt, wasDownBefore);
-		if (key == 'Q') Q.pushDown(isUpNow, isWithAlt, wasDownBefore);
-		if (key == 'E') E.pushDown(isUpNow, isWithAlt, wasDownBefore);
+void KeyState::push(BOOL is_up_now) {
+    time = GetTickCount();
+    is_up = is_up_now;
+    consumed = FALSE;
+}
 
-		if (key == VK_SHIFT) shift.pushDown(isUpNow, isWithAlt, wasDownBefore);
-		if (key == VK_CONTROL) ctrl.pushDown(isUpNow, isWithAlt, wasDownBefore);
-		if (push(VK_F12)) F12.pushDown(isUpNow, isWithAlt, wasDownBefore);
-		if (push(VK_F5)) F5.pushDown(isUpNow, isWithAlt, wasDownBefore);
-		if (push(VK_F6)) F6.pushDown(isUpNow, isWithAlt, wasDownBefore);
-		if (push(VK_F7)) F7.pushDown(isUpNow, isWithAlt, wasDownBefore);
-		if (push(VK_F11)) F11.pushDown(isUpNow, isWithAlt, wasDownBefore);
-		if (key == VK_TAB) tab.pushDown(isUpNow, isWithAlt, wasDownBefore);
-	}
+void OnKeyboardMessage(
+    DWORD key,
+    WORD,
+    BYTE,
+    BOOL,
+    BOOL,
+    BOOL was_down_before,
+    BOOL is_up_now) {
+    const bool first_press = !was_down_before && !is_up_now;
+    if (!first_press) {
+        return;
+    }
+    if (key == VK_F9) {
+        F9.push(is_up_now);
+    } else if (key == VK_F10) {
+        F10.push(is_up_now);
+    } else if (key == VK_F11) {
+        F11.push(is_up_now);
+    } else if (key == 'W') {
+        MoveForward.push(is_up_now);
+    } else if (key == 'S') {
+        MoveBackward.push(is_up_now);
+    } else if (key == 'A') {
+        StrafeLeft.push(is_up_now);
+    } else if (key == 'D') {
+        StrafeRight.push(is_up_now);
+    } else if (key == 'Q') {
+        YawLeft.push(is_up_now);
+    } else if (key == 'E') {
+        YawRight.push(is_up_now);
+    } else if (key == 'Z') {
+        MoveUp.push(is_up_now);
+    } else if (key == 'C') {
+        MoveDown.push(is_up_now);
+    }
 }

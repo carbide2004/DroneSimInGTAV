@@ -152,9 +152,7 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="rgbd_capture.cpp" />
     <ClCompile Include="script.cpp" />
-    
-    <ClCompile Include="server_v2.cpp" />
-    <ClCompile Include="utils.cpp" />
+    <ClCompile Include="server.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -166,10 +164,8 @@
     <ClInclude Include="logging.h" />
     <ClInclude Include="rgbd_capture.h" />
     <ClInclude Include="script.h" />
-    
-    <ClInclude Include="server_v2.h" />
+    <ClInclude Include="server.h" />
     <ClInclude Include="proto.h" />
-    <ClInclude Include="utils.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

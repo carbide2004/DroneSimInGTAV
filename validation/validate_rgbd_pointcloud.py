@@ -7,7 +7,6 @@ import argparse
 import math
 from pathlib import Path
 import sys
-import time
 
 import numpy as np
 
@@ -15,31 +14,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from agent_control.dronesim_client import DroneSimClient
-
-
-def _angle_error_degrees(actual, expected):
-    return abs((float(actual) - float(expected) + 180.0) % 360.0 - 180.0)
-
-
-def _wait_for_posture(client, target, timeout_seconds):
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        pose = client.get_pose()
-        if pose is None:
-            raise RuntimeError("GET_POSE returned no camera pose")
-        position_error = np.linalg.norm(
-            np.asarray(pose[:3], dtype=np.float64)
-            - np.asarray(target[:3], dtype=np.float64)
-        )
-        rotation_error = max(
-            _angle_error_degrees(pose[3], target[3]),
-            _angle_error_degrees(pose[4], target[4]),
-            _angle_error_degrees(pose[5], target[5]),
-        )
-        if position_error <= 1.0e-3 and rotation_error <= 1.0e-2:
-            return pose
-        time.sleep(0.01)
-    raise TimeoutError(f"Camera did not reach requested posture {target}")
 
 
 def _frame_to_world_points(frame, pixel_stride, max_view_depth):
@@ -113,7 +87,6 @@ def main():
     parser.add_argument("--pixel-stride", type=int, default=4)
     parser.add_argument("--max-view-depth", type=float, default=200.0)
     parser.add_argument("--capture-timeout-ms", type=int, default=5000)
-    parser.add_argument("--posture-timeout", type=float, default=3.0)
     args = parser.parse_args()
     if args.pixel_stride <= 0:
         raise ValueError("--pixel-stride must be positive")
@@ -141,8 +114,13 @@ def main():
         for step in range(8):
             yaw = initial_yaw + 45.0 * step
             target = (x, y, z, pitch, roll, yaw)
-            client.set_posture(*target)
-            _wait_for_posture(client, target, args.posture_timeout)
+            client.set_camera_pose(
+                target[0],
+                target[1],
+                target[2],
+                target[5],
+                collision_check=False,
+            )
             frame = client.capture(args.capture_timeout_ms)
             if frame_ids and frame.frame_id <= frame_ids[-1]:
                 raise RuntimeError(
@@ -162,8 +140,13 @@ def main():
                 f"frame={frame.frame_id} points={len(points)}"
             )
     finally:
-        client.set_posture(*original_pose)
-        _wait_for_posture(client, original_pose, args.posture_timeout)
+        client.set_camera_pose(
+            original_pose[0],
+            original_pose[1],
+            original_pose[2],
+            original_pose[5],
+            collision_check=False,
+        )
 
     cloud = o3d.geometry.PointCloud()
     cloud.points = o3d.utility.Vector3dVector(np.concatenate(point_batches, axis=0))
