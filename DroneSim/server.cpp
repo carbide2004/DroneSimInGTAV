@@ -20,7 +20,7 @@ using boost::asio::ip::tcp;
 
 constexpr std::size_t kWireHeaderSize = 20;
 constexpr std::uint32_t kMaximumRequestPayload = 64 * 1024;
-constexpr auto kCommandTimeout = std::chrono::milliseconds(5000);
+constexpr auto kCommandTimeout = std::chrono::milliseconds(7000);
 constexpr auto kCaptureSubmitTimeout = std::chrono::milliseconds(2000);
 
 std::unique_ptr<Server> g_server;
@@ -159,6 +159,100 @@ std::vector<unsigned char> pose_bytes(const RuntimePose& pose) {
     append_scalar(data, pose.pitch);
     append_scalar(data, pose.roll);
     append_scalar(data, pose.yaw);
+    return data;
+}
+
+void append_vector3(
+    std::vector<unsigned char>& data,
+    const ScenarioVector3& value) {
+    append_scalar(data, value.x);
+    append_scalar(data, value.y);
+    append_scalar(data, value.z);
+}
+
+std::vector<unsigned char> scenario_start_bytes(
+    const ScenarioStartInfo& info) {
+    std::vector<unsigned char> data;
+    data.reserve(16);
+    append_scalar(data, info.scenario_id);
+    append_scalar(data, info.game_timer_ms);
+    append_scalar(data, info.frame_count);
+    return data;
+}
+
+std::vector<unsigned char> scenario_snapshot_bytes(
+    const ScenarioSnapshot& snapshot) {
+    std::vector<unsigned char> data;
+    data.reserve(
+        89 +
+        snapshot.protected_entities.size() * 25 +
+        snapshot.entities.size() * 93);
+    append_scalar(data, snapshot.scenario_id);
+    append_scalar(data, snapshot.seed);
+    append_scalar(
+        data,
+        static_cast<std::uint32_t>(snapshot.lifecycle));
+    append_scalar(data, snapshot.game_timer_ms);
+    append_scalar(data, snapshot.frame_count);
+    append_scalar(data, snapshot.start_game_timer_ms);
+    append_scalar(data, snapshot.start_frame_count);
+    append_vector3(data, snapshot.requested_anchor);
+    append_vector3(data, snapshot.event_position);
+    data.push_back(snapshot.event_active ? 1 : 0);
+    append_scalar(data, snapshot.removed_pedestrians);
+    append_scalar(data, snapshot.removed_vehicles);
+    append_scalar(data, snapshot.ambient_pedestrians);
+    append_scalar(data, snapshot.ambient_vehicles);
+    append_scalar(
+        data,
+        static_cast<std::uint32_t>(
+            snapshot.failure_message.size()));
+    data.insert(
+        data.end(),
+        snapshot.failure_message.begin(),
+        snapshot.failure_message.end());
+    append_scalar(
+        data,
+        static_cast<std::uint32_t>(
+            snapshot.protected_entities.size()));
+    for (const ScenarioProtectedEntitySnapshot& entity :
+         snapshot.protected_entities) {
+        append_scalar(data, entity.gta_handle);
+        append_scalar(data, entity.model_hash);
+        append_scalar(
+            data,
+            static_cast<std::uint32_t>(entity.kind));
+        data.push_back(entity.exists ? 1 : 0);
+        append_vector3(data, entity.position);
+    }
+    append_scalar(
+        data,
+        static_cast<std::uint32_t>(snapshot.entities.size()));
+
+    for (const ScenarioEntitySnapshot& entity : snapshot.entities) {
+        append_scalar(data, entity.stable_id);
+        append_scalar(data, entity.gta_handle);
+        append_scalar(data, entity.model_hash);
+        append_scalar(
+            data,
+            static_cast<std::uint32_t>(entity.kind));
+        append_scalar(
+            data,
+            static_cast<std::uint32_t>(entity.role));
+        append_scalar(data, entity.event_id);
+        append_scalar(
+            data,
+            static_cast<std::uint32_t>(entity.task_state));
+        data.push_back(entity.exists ? 1 : 0);
+        append_vector3(data, entity.position);
+        append_vector3(data, entity.velocity);
+        append_scalar(data, entity.speed);
+        append_scalar(data, entity.heading);
+        append_scalar(data, entity.spawn_game_timer_ms);
+        append_scalar(data, entity.task_start_game_timer_ms);
+        append_scalar(data, entity.response_start_game_timer_ms);
+        append_vector3(data, entity.task_target);
+    }
     return data;
 }
 
@@ -357,6 +451,22 @@ void Server::handle_client() {
                 }
                 break;
             }
+            case MSG_SET_CAMERA_PITCH: {
+                if (payload.size() != sizeof(float)) {
+                    result = invalid_request(
+                        "SET_CAMERA_PITCH expects one float32 value");
+                    break;
+                }
+                auto command = make_runtime_command(
+                    RuntimeCommandType::SetCameraPitch,
+                    header.request_id);
+                read_scalar(payload, 0, command->floats[0]);
+                result = run_command(command);
+                if (result.status == RuntimeCommandStatus::Ok) {
+                    data = pose_bytes(result.pose);
+                }
+                break;
+            }
             case MSG_SET_FOV: {
                 if (payload.size() != sizeof(float)) {
                     result = invalid_request(
@@ -438,6 +548,85 @@ void Server::handle_client() {
                     result = run_command(make_runtime_command(
                         RuntimeCommandType::RestorePlayer,
                         header.request_id));
+                }
+                break;
+            }
+            case MSG_PREPARE_FIRE_SCENARIO: {
+                constexpr std::size_t expected_size =
+                    sizeof(float) * 3 +
+                    sizeof(std::uint64_t) +
+                    sizeof(std::uint16_t) * 2;
+                if (payload.size() != expected_size) {
+                    result = invalid_request(
+                        "PREPARE_FIRE_SCENARIO expects anchor float32[3], "
+                        "seed uint64, firetruck_count uint16, and "
+                        "pedestrian_count uint16");
+                    break;
+                }
+                auto command = make_runtime_command(
+                    RuntimeCommandType::PrepareFireScenario,
+                    header.request_id);
+                read_scalar(
+                    payload,
+                    0,
+                    command->fire_scenario_config.anchor.x);
+                read_scalar(
+                    payload,
+                    sizeof(float),
+                    command->fire_scenario_config.anchor.y);
+                read_scalar(
+                    payload,
+                    sizeof(float) * 2,
+                    command->fire_scenario_config.anchor.z);
+                read_scalar(
+                    payload,
+                    sizeof(float) * 3,
+                    command->fire_scenario_config.seed);
+                read_scalar(
+                    payload,
+                    sizeof(float) * 3 + sizeof(std::uint64_t),
+                    command->fire_scenario_config.firetruck_count);
+                read_scalar(
+                    payload,
+                    sizeof(float) * 3 + sizeof(std::uint64_t) +
+                        sizeof(std::uint16_t),
+                    command->fire_scenario_config.pedestrian_count);
+                result = run_command(command);
+                if (result.status == RuntimeCommandStatus::Ok) {
+                    append_scalar(data, result.value);
+                }
+                break;
+            }
+            case MSG_GET_SCENARIO_STATE:
+            case MSG_START_SCENARIO:
+            case MSG_RESET_SCENARIO: {
+                if (payload.size() != sizeof(std::uint64_t)) {
+                    result = invalid_request(
+                        "Scenario command expects one uint64 scenario_id");
+                    break;
+                }
+                std::uint64_t scenario_id = 0;
+                read_scalar(payload, 0, scenario_id);
+                RuntimeCommandType command_type =
+                    RuntimeCommandType::GetScenarioState;
+                if (header.type == MSG_START_SCENARIO) {
+                    command_type = RuntimeCommandType::StartScenario;
+                } else if (header.type == MSG_RESET_SCENARIO) {
+                    command_type = RuntimeCommandType::ResetScenario;
+                }
+                auto command = make_runtime_command(
+                    command_type,
+                    header.request_id);
+                command->scenario_id = scenario_id;
+                result = run_command(command);
+                if (result.status == RuntimeCommandStatus::Ok) {
+                    if (header.type == MSG_GET_SCENARIO_STATE) {
+                        data = scenario_snapshot_bytes(
+                            result.scenario_snapshot);
+                    } else if (header.type == MSG_START_SCENARIO) {
+                        data = scenario_start_bytes(
+                            result.scenario_start);
+                    }
                 }
                 break;
             }

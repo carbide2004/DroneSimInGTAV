@@ -1,7 +1,9 @@
 import math
 import socket
 import struct
+import time
 from dataclasses import dataclass
+from enum import IntEnum
 from itertools import count
 
 
@@ -20,6 +22,11 @@ TYPE_TELEPORT_PLAYER = 17
 TYPE_RESTORE_PLAYER = 18
 TYPE_GET_CAMERA_STATE = 20
 TYPE_SET_CAMERA_POSE = 21
+TYPE_PREPARE_FIRE_SCENARIO = 22
+TYPE_GET_SCENARIO_STATE = 23
+TYPE_START_SCENARIO = 24
+TYPE_RESET_SCENARIO = 25
+TYPE_SET_CAMERA_PITCH = 26
 
 COMMAND_STATUS = {
     0: "OK",
@@ -31,6 +38,13 @@ COMMAND_STATUS = {
     6: "POSE_MISMATCH",
     7: "INVALID_REQUEST",
     8: "INTERNAL_ERROR",
+    9: "SCENARIO_ALREADY_ACTIVE",
+    10: "SCENARIO_NOT_FOUND",
+    11: "SCENARIO_NOT_READY",
+    12: "SCENARIO_AREA_NOT_READY",
+    13: "SCENARIO_PREPARE_FAILED",
+    14: "SCENARIO_START_FAILED",
+    15: "WORLD_AREA_NOT_READY",
 }
 
 CAPTURE_STATUS = {
@@ -50,6 +64,11 @@ CAPTURE_STATUS = {
 
 CAPTURE_METADATA_FORMAT = "<IQIIIIfff32f"
 CAPTURE_METADATA_SIZE = struct.calcsize(CAPTURE_METADATA_FORMAT)
+MAX_FIRETRUCK_COUNT = 4
+MAX_PEDESTRIAN_COUNT = 32
+MAX_SCENARIO_OWNED_ENTITY_COUNT = (
+    1 + 2 * MAX_FIRETRUCK_COUNT + MAX_PEDESTRIAN_COUNT
+)
 
 
 class DroneSimProtocolError(RuntimeError):
@@ -72,6 +91,92 @@ class CaptureError(RuntimeError):
             self.status, "UNKNOWN_CAPTURE_STATUS"
         )
         super().__init__(f"{self.status_name}: {message}")
+
+
+class ScenarioLifecycle(IntEnum):
+    EMPTY = 0
+    PREPARING = 1
+    READY = 2
+    RUNNING = 3
+    FAILED = 4
+
+
+class ScenarioEntityKind(IntEnum):
+    VEHICLE = 1
+    PEDESTRIAN = 2
+
+
+class ScenarioEntityRole(IntEnum):
+    FIRE_SOURCE_VEHICLE = 1
+    FIRE_TRUCK = 2
+    FIREFIGHTER_DRIVER = 3
+    FLEEING_PEDESTRIAN = 4
+
+
+class ScenarioTaskState(IntEnum):
+    NONE = 0
+    PENDING = 1
+    ACTIVE = 2
+    SUCCEEDED = 3
+    FAILED = 4
+    LOST = 5
+
+
+@dataclass(frozen=True)
+class ScenarioEntitySnapshot:
+    stable_id: int
+    gta_handle: int
+    model_hash: int
+    kind: ScenarioEntityKind
+    role: ScenarioEntityRole
+    event_id: int
+    task_state: ScenarioTaskState
+    exists: bool
+    position: tuple
+    velocity: tuple
+    speed: float
+    heading: float
+    spawn_game_timer_ms: int
+    task_start_game_timer_ms: int
+    response_start_game_timer_ms: int
+    task_target: tuple
+
+
+@dataclass(frozen=True)
+class ScenarioProtectedEntitySnapshot:
+    gta_handle: int
+    model_hash: int
+    kind: ScenarioEntityKind
+    exists: bool
+    position: tuple
+
+
+@dataclass(frozen=True)
+class ScenarioSnapshot:
+    scenario_id: int
+    seed: int
+    lifecycle: ScenarioLifecycle
+    game_timer_ms: int
+    frame_count: int
+    start_game_timer_ms: int
+    start_frame_count: int
+    requested_anchor: tuple
+    event_position: tuple
+    event_active: bool
+    removed_pedestrians: int
+    removed_vehicles: int
+    ambient_pedestrians: int
+    ambient_vehicles: int
+    failure_message: str
+    protected_entities: tuple
+    entities: tuple
+
+
+@dataclass(frozen=True)
+class ScenarioStartInfo:
+    scenario_id: int
+    game_timer_ms: int
+    frame_count: int
 
 
 @dataclass(frozen=True)
@@ -154,6 +259,230 @@ def _recv_exact(sock, size):
 def _require_finite(*values):
     if not all(math.isfinite(float(value)) for value in values):
         raise ValueError("All pose values must be finite")
+
+
+class _PayloadReader:
+    def __init__(self, payload):
+        self.payload = payload
+        self.offset = 0
+
+    def unpack(self, format_string):
+        size = struct.calcsize(format_string)
+        if len(self.payload) - self.offset < size:
+            raise DroneSimProtocolError(
+                "Scenario response ended before all declared fields"
+            )
+        values = struct.unpack_from(
+            format_string, self.payload, self.offset
+        )
+        self.offset += size
+        return values
+
+    def text(self):
+        (size,) = self.unpack("<I")
+        if len(self.payload) - self.offset < size:
+            raise DroneSimProtocolError(
+                "Scenario failure message exceeds its payload"
+            )
+        value = self.payload[
+            self.offset : self.offset + size
+        ].decode("utf-8", errors="strict")
+        self.offset += size
+        return value
+
+    def finish(self):
+        if self.offset != len(self.payload):
+            raise DroneSimProtocolError(
+                f"Scenario response has "
+                f"{len(self.payload) - self.offset} trailing bytes"
+            )
+
+
+def _finite_tuple(name, values):
+    result = tuple(float(value) for value in values)
+    if not all(math.isfinite(value) for value in result):
+        raise DroneSimProtocolError(
+            f"{name} contains a non-finite value"
+        )
+    return result
+
+
+def _decode_scenario_snapshot(payload):
+    reader = _PayloadReader(payload)
+    scenario_id, seed = reader.unpack("<QQ")
+    (
+        lifecycle_value,
+        game_timer_ms,
+        frame_count,
+        start_game_timer_ms,
+        start_frame_count,
+    ) = reader.unpack("<5I")
+    requested_anchor = _finite_tuple(
+        "requested_anchor", reader.unpack("<3f")
+    )
+    event_position = _finite_tuple(
+        "event_position", reader.unpack("<3f")
+    )
+    (event_active_value,) = reader.unpack("<B")
+    if event_active_value not in (0, 1):
+        raise DroneSimProtocolError(
+            "Scenario event_active is not a boolean"
+        )
+    (
+        removed_pedestrians,
+        removed_vehicles,
+        ambient_pedestrians,
+        ambient_vehicles,
+    ) = reader.unpack("<4I")
+    failure_message = reader.text()
+    (protected_entity_count,) = reader.unpack("<I")
+    if protected_entity_count > 2048:
+        raise DroneSimProtocolError(
+            "Scenario declares "
+            f"{protected_entity_count} protected entities; maximum is 2048"
+        )
+    protected_entities = []
+    protected_handles = set()
+    for _ in range(protected_entity_count):
+        (
+            gta_handle,
+            model_hash,
+            kind_value,
+            exists_value,
+            x,
+            y,
+            z,
+        ) = reader.unpack("<iIIB3f")
+        if exists_value not in (0, 1):
+            raise DroneSimProtocolError(
+                "Protected entity exists field is not a boolean"
+            )
+        if gta_handle == 0 or gta_handle in protected_handles:
+            raise DroneSimProtocolError(
+                f"Invalid or duplicate protected handle {gta_handle}"
+            )
+        protected_handles.add(gta_handle)
+        try:
+            kind = ScenarioEntityKind(kind_value)
+        except ValueError as error:
+            raise DroneSimProtocolError(
+                f"Unknown protected entity kind {kind_value}"
+            ) from error
+        protected_entities.append(
+            ScenarioProtectedEntitySnapshot(
+                gta_handle=gta_handle,
+                model_hash=model_hash,
+                kind=kind,
+                exists=bool(exists_value),
+                position=_finite_tuple(
+                    "protected entity position", (x, y, z)
+                ),
+            )
+        )
+    (entity_count,) = reader.unpack("<I")
+    if entity_count > MAX_SCENARIO_OWNED_ENTITY_COUNT:
+        raise DroneSimProtocolError(
+            "Scenario declares "
+            f"{entity_count} owned entities; maximum is "
+            f"{MAX_SCENARIO_OWNED_ENTITY_COUNT}"
+        )
+
+    try:
+        lifecycle = ScenarioLifecycle(lifecycle_value)
+    except ValueError as error:
+        raise DroneSimProtocolError(
+            f"Unknown scenario lifecycle {lifecycle_value}"
+        ) from error
+
+    entities = []
+    stable_ids = set()
+    for _ in range(entity_count):
+        (
+            stable_id,
+            gta_handle,
+            model_hash,
+            kind_value,
+            role_value,
+            event_id,
+            task_state_value,
+            exists_value,
+        ) = reader.unpack("<QiIIIQIB")
+        if exists_value not in (0, 1):
+            raise DroneSimProtocolError(
+                "Scenario entity exists field is not a boolean"
+            )
+        if stable_id == 0 or stable_id in stable_ids:
+            raise DroneSimProtocolError(
+                f"Invalid or duplicate stable entity ID {stable_id}"
+            )
+        stable_ids.add(stable_id)
+        try:
+            kind = ScenarioEntityKind(kind_value)
+            role = ScenarioEntityRole(role_value)
+            task_state = ScenarioTaskState(task_state_value)
+        except ValueError as error:
+            raise DroneSimProtocolError(
+                "Scenario entity contains an unknown enum value"
+            ) from error
+        position = _finite_tuple(
+            "entity position", reader.unpack("<3f")
+        )
+        velocity = _finite_tuple(
+            "entity velocity", reader.unpack("<3f")
+        )
+        speed, heading = reader.unpack("<2f")
+        if not math.isfinite(speed) or not math.isfinite(heading):
+            raise DroneSimProtocolError(
+                "Scenario entity speed/heading is not finite"
+            )
+        (
+            spawn_game_timer_ms,
+            task_start_game_timer_ms,
+            response_start_game_timer_ms,
+        ) = reader.unpack("<3I")
+        task_target = _finite_tuple(
+            "entity task target", reader.unpack("<3f")
+        )
+        entities.append(
+            ScenarioEntitySnapshot(
+                stable_id=stable_id,
+                gta_handle=gta_handle,
+                model_hash=model_hash,
+                kind=kind,
+                role=role,
+                event_id=event_id,
+                task_state=task_state,
+                exists=bool(exists_value),
+                position=position,
+                velocity=velocity,
+                speed=float(speed),
+                heading=float(heading),
+                spawn_game_timer_ms=spawn_game_timer_ms,
+                task_start_game_timer_ms=task_start_game_timer_ms,
+                response_start_game_timer_ms=response_start_game_timer_ms,
+                task_target=task_target,
+            )
+        )
+    reader.finish()
+    return ScenarioSnapshot(
+        scenario_id=scenario_id,
+        seed=seed,
+        lifecycle=lifecycle,
+        game_timer_ms=game_timer_ms,
+        frame_count=frame_count,
+        start_game_timer_ms=start_game_timer_ms,
+        start_frame_count=start_frame_count,
+        requested_anchor=requested_anchor,
+        event_position=event_position,
+        event_active=bool(event_active_value),
+        removed_pedestrians=removed_pedestrians,
+        removed_vehicles=removed_vehicles,
+        ambient_pedestrians=ambient_pedestrians,
+        ambient_vehicles=ambient_vehicles,
+        failure_message=failure_message,
+        protected_entities=tuple(protected_entities),
+        entities=tuple(entities),
+    )
 
 
 class DroneSimClient:
@@ -331,6 +660,20 @@ class DroneSimClient:
             )
         return struct.unpack("<6f", data)
 
+    def set_camera_pitch(self, pitch_degrees):
+        _require_finite(pitch_degrees)
+        if not -90.0 <= float(pitch_degrees) <= 90.0:
+            raise ValueError("pitch_degrees must be within [-90, 90]")
+        data = self._command(
+            TYPE_SET_CAMERA_PITCH,
+            struct.pack("<f", float(pitch_degrees)),
+        )
+        if len(data) != 24:
+            raise DroneSimProtocolError(
+                "SET_CAMERA_PITCH did not return the six-component actual pose"
+            )
+        return struct.unpack("<6f", data)
+
     def set_fov(self, fov_degrees):
         _require_finite(fov_degrees)
         data = self._command(
@@ -409,6 +752,127 @@ class DroneSimClient:
             raise DroneSimProtocolError(
                 "RESTORE_PLAYER returned unexpected data"
             )
+
+    def prepare_fire_scenario(
+        self,
+        anchor_world_xyz,
+        seed,
+        firetruck_count=1,
+        pedestrian_count=32,
+    ):
+        if len(anchor_world_xyz) != 3:
+            raise ValueError("anchor_world_xyz must contain three values")
+        _require_finite(*anchor_world_xyz)
+        seed = int(seed)
+        firetruck_count = int(firetruck_count)
+        pedestrian_count = int(pedestrian_count)
+        if not 0 <= seed <= 0xFFFFFFFFFFFFFFFF:
+            raise ValueError("seed must fit uint64")
+        if not 0 <= firetruck_count <= MAX_FIRETRUCK_COUNT:
+            raise ValueError(
+                "firetruck_count must be in "
+                f"[0, {MAX_FIRETRUCK_COUNT}]"
+            )
+        if not 0 <= pedestrian_count <= MAX_PEDESTRIAN_COUNT:
+            raise ValueError(
+                "pedestrian_count must be in "
+                f"[0, {MAX_PEDESTRIAN_COUNT}]"
+            )
+        data = self._command(
+            TYPE_PREPARE_FIRE_SCENARIO,
+            struct.pack(
+                "<3fQHH",
+                *(float(value) for value in anchor_world_xyz),
+                seed,
+                firetruck_count,
+                pedestrian_count,
+            ),
+        )
+        if len(data) != 8:
+            raise DroneSimProtocolError(
+                "PREPARE_FIRE_SCENARIO did not return a uint64 scenario_id"
+            )
+        return struct.unpack("<Q", data)[0]
+
+    def get_scenario_state(self, scenario_id):
+        data = self._command(
+            TYPE_GET_SCENARIO_STATE,
+            struct.pack("<Q", int(scenario_id)),
+        )
+        snapshot = _decode_scenario_snapshot(data)
+        if snapshot.scenario_id != int(scenario_id):
+            raise DroneSimProtocolError(
+                "Scenario snapshot ID does not match the request"
+            )
+        return snapshot
+
+    def start_scenario(self, scenario_id):
+        data = self._command(
+            TYPE_START_SCENARIO,
+            struct.pack("<Q", int(scenario_id)),
+        )
+        if len(data) != 16:
+            raise DroneSimProtocolError(
+                "START_SCENARIO did not return uint64+uint32+uint32"
+            )
+        returned_id, game_timer_ms, frame_count = struct.unpack(
+            "<QII", data
+        )
+        if returned_id != int(scenario_id):
+            raise DroneSimProtocolError(
+                "Scenario start ID does not match the request"
+            )
+        return ScenarioStartInfo(
+            scenario_id=returned_id,
+            game_timer_ms=game_timer_ms,
+            frame_count=frame_count,
+        )
+
+    def reset_scenario(self, scenario_id):
+        data = self._command(
+            TYPE_RESET_SCENARIO,
+            struct.pack("<Q", int(scenario_id)),
+        )
+        if data:
+            raise DroneSimProtocolError(
+                "RESET_SCENARIO returned unexpected data"
+            )
+
+    def wait_scenario_ready(
+        self,
+        scenario_id,
+        timeout=15.0,
+        poll_interval=0.05,
+    ):
+        timeout = float(timeout)
+        poll_interval = float(poll_interval)
+        if (
+            not math.isfinite(timeout)
+            or timeout <= 0
+            or not math.isfinite(poll_interval)
+            or poll_interval <= 0
+        ):
+            raise ValueError(
+                "timeout and poll_interval must be positive finite values"
+            )
+        deadline = time.monotonic() + timeout
+        while True:
+            snapshot = self.get_scenario_state(scenario_id)
+            if snapshot.lifecycle == ScenarioLifecycle.READY:
+                return snapshot
+            if snapshot.lifecycle == ScenarioLifecycle.FAILED:
+                raise RuntimeError(
+                    "Fire scenario preparation failed: "
+                    f"{snapshot.failure_message or 'unknown failure'}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Scenario {scenario_id} did not become READY "
+                    f"within {timeout:.3f} seconds; "
+                    f"last state={snapshot.lifecycle.name}"
+                )
+            time.sleep(min(poll_interval, remaining))
 
     def capture(self, timeout_ms=5000):
         timeout_ms = int(timeout_ms)

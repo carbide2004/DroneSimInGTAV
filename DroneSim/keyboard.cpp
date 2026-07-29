@@ -13,17 +13,11 @@ KeyState MoveUp;
 KeyState MoveDown;
 
 bool KeyState::consume_press() {
-    if (consumed) {
-        return false;
-    }
-    consumed = TRUE;
-    return !is_up && GetTickCount() < time + kMaxDownMilliseconds;
+    return pending_.exchange(false, std::memory_order_acq_rel);
 }
 
-void KeyState::push(BOOL is_up_now) {
-    time = GetTickCount();
-    is_up = is_up_now;
-    consumed = FALSE;
+void KeyState::push() {
+    pending_.store(true, std::memory_order_release);
 }
 
 void OnKeyboardMessage(
@@ -34,31 +28,30 @@ void OnKeyboardMessage(
     BOOL,
     BOOL was_down_before,
     BOOL is_up_now) {
-    const bool first_press = !was_down_before && !is_up_now;
-    if (!first_press) {
+    if (was_down_before || is_up_now) {
         return;
     }
     if (key == VK_F9) {
-        F9.push(is_up_now);
+        F9.push();
     } else if (key == VK_F10) {
-        F10.push(is_up_now);
+        F10.push();
     } else if (key == VK_F11) {
-        F11.push(is_up_now);
+        F11.push();
     } else if (key == 'W') {
-        MoveForward.push(is_up_now);
+        MoveForward.push();
     } else if (key == 'S') {
-        MoveBackward.push(is_up_now);
+        MoveBackward.push();
     } else if (key == 'A') {
-        StrafeLeft.push(is_up_now);
+        StrafeLeft.push();
     } else if (key == 'D') {
-        StrafeRight.push(is_up_now);
+        StrafeRight.push();
     } else if (key == 'Q') {
-        YawLeft.push(is_up_now);
+        YawLeft.push();
     } else if (key == 'E') {
-        YawRight.push(is_up_now);
+        YawRight.push();
     } else if (key == 'Z') {
-        MoveUp.push(is_up_now);
+        MoveUp.push();
     } else if (key == 'C') {
-        MoveDown.push(is_up_now);
+        MoveDown.push();
     }
 }

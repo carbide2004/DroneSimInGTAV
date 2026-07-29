@@ -1,5 +1,7 @@
 #pragma once
 
+#include "scenario_types.h"
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -15,12 +17,17 @@ enum class RuntimeCommandType {
     GetCameraState,
     GetCameraPose,
     SetCameraPose,
+    SetCameraPitch,
     SetFov,
     SetTime,
     SetWeather,
     TeleportPlayer,
     RestorePlayer,
     Capture,
+    PrepareFireScenario,
+    GetScenarioState,
+    StartScenario,
+    ResetScenario,
 };
 
 enum class RuntimeCommandStatus : std::uint32_t {
@@ -33,6 +40,13 @@ enum class RuntimeCommandStatus : std::uint32_t {
     PoseMismatch = 6,
     InvalidRequest = 7,
     InternalError = 8,
+    ScenarioAlreadyActive = 9,
+    ScenarioNotFound = 10,
+    ScenarioNotReady = 11,
+    ScenarioAreaNotReady = 12,
+    ScenarioPrepareFailed = 13,
+    ScenarioStartFailed = 14,
+    WorldAreaNotReady = 15,
 };
 
 struct RuntimePose {
@@ -48,6 +62,8 @@ struct RuntimeCommandResult {
     RuntimeCommandStatus status = RuntimeCommandStatus::InternalError;
     std::string message;
     RuntimePose pose;
+    ScenarioSnapshot scenario_snapshot;
+    ScenarioStartInfo scenario_start;
     std::uint64_t value = 0;
     bool bool_value = false;
 };
@@ -62,6 +78,8 @@ struct RuntimeCommand {
     std::array<std::int32_t, 3> integers{};
     bool flag = false;
     std::string text;
+    FireScenarioConfig fire_scenario_config;
+    std::uint64_t scenario_id = 0;
 
     std::atomic<bool> cancelled{false};
     std::mutex completion_mutex;

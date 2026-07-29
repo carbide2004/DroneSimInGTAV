@@ -154,6 +154,9 @@ bool CameraController::create(
     }
 
     CAM::SET_CAM_ACTIVE(camera_handle_, TRUE);
+    CAM::SET_CAM_MOTION_BLUR_STRENGTH(camera_handle_, 0.0f);
+    CAM::SET_CAM_DOF_STRENGTH(camera_handle_, 0.0f);
+    CAM::SET_CAM_USE_SHALLOW_DOF_MODE(camera_handle_, FALSE);
     CAM::RENDER_SCRIPT_CAMS(TRUE, FALSE, 0, TRUE, FALSE);
     if (!CAM::IS_CAM_ACTIVE(camera_handle_)) {
         CAM::DESTROY_CAM(camera_handle_, FALSE);
@@ -317,6 +320,69 @@ CameraPoseStatus CameraController::set_pose(
         std::to_string(position_error) +
         " m, yaw error=" +
         std::to_string(yaw_error) +
+        " deg";
+    return CameraPoseStatus::PoseMismatch;
+}
+
+CameraPoseStatus CameraController::set_pitch(
+    float pitch_degrees,
+    const std::atomic<bool>& cancelled,
+    RuntimePose& actual_pose,
+    std::string& error) {
+    if (!std::isfinite(pitch_degrees) ||
+        pitch_degrees < -90.0f ||
+        pitch_degrees > 90.0f) {
+        error = "Camera pitch must be finite and within [-90, 90] degrees";
+        return CameraPoseStatus::InvalidPose;
+    }
+
+    RuntimePose current;
+    if (!get_pose(current, error)) {
+        return CameraPoseStatus::CameraInactive;
+    }
+    if (cancelled.load(std::memory_order_acquire)) {
+        error = "Camera pitch request was cancelled before application";
+        return CameraPoseStatus::ApplyFailed;
+    }
+
+    CAM::SET_CAM_ROT(
+        camera_handle_,
+        pitch_degrees,
+        current.roll,
+        current.yaw,
+        2);
+
+    float pitch_error = 0.0f;
+    for (int frame = 0; frame < kMaximumPoseApplyFrames; ++frame) {
+        WAIT(0);
+        suppress_gameplay_controls_for_frame();
+        if (cancelled.load(std::memory_order_acquire)) {
+            CAM::SET_CAM_ROT(
+                camera_handle_,
+                current.pitch,
+                current.roll,
+                current.yaw,
+                2);
+            error =
+                "Camera pitch request was cancelled while awaiting GTA";
+            return CameraPoseStatus::ApplyFailed;
+        }
+        if (!get_pose(actual_pose, error)) {
+            error =
+                "Camera became inactive while applying the requested pitch";
+            return CameraPoseStatus::ApplyFailed;
+        }
+        pitch_error = std::fabs(actual_pose.pitch - pitch_degrees);
+        if (pitch_error <= kAngleToleranceDegrees) {
+            return CameraPoseStatus::Ok;
+        }
+    }
+
+    error =
+        "Requested camera pitch did not settle within " +
+        std::to_string(kMaximumPoseApplyFrames) +
+        " game frames; pitch error=" +
+        std::to_string(pitch_error) +
         " deg";
     return CameraPoseStatus::PoseMismatch;
 }

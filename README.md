@@ -1,9 +1,9 @@
 # DroneSimInGTAV
 
 DroneSimInGTAV is a small GTA V research runtime for controlling a scripted
-camera and acquiring synchronized RGB-D observations. The current Stage 0
-codebase intentionally contains no anomaly scenarios, trajectory recorder,
-navigation policy, training pipeline, or dataset conversion code.
+camera, acquiring synchronized RGB-D observations, and running a minimal
+controlled fire-response experiment. Stage 1 adds structured event/entity
+truth without restoring the old oracle recorder or training pipeline.
 
 The research direction is hidden-event localization from event-induced dynamic
 responses. See [docs/research_direction.md](docs/research_direction.md).
@@ -15,6 +15,9 @@ DroneSim/                  GTA V ASI plugin
   camera.*                 camera lifecycle and absolute pose control
   command_queue.*          request-correlated GTA-thread commands
   rgbd_capture.*           synchronized Capture V3 implementation
+  scenario_manager.*       single-scenario lifecycle coordinator
+  fire_scenario.*          asynchronous controlled fire experiment
+  entity_registry.*        stable entity IDs and response truth
   script.*                 minimal GTA script runtime
   server.*                 DSV3 TCP protocol server
 agent_control/
@@ -25,6 +28,7 @@ validation/
   validate_rgbd_pointcloud.py
   validate_rgbd_stability.py
   validate_rgbd_yaw_sync.py
+  validate_fire_scenario.py
 ```
 
 ## Build and install
@@ -45,7 +49,7 @@ The plugin listens on `127.0.0.5:23456` by default.
 - F9 shows the current GTA world position and camera rotation in the
   bottom-left notification feed.
 - F10 creates the scripted camera.
-- F11 stops the scripted camera.
+- F11 stops the scripted camera and restores the player after validation teleportation.
 - W/S move forward/backward by 1 metre.
 - A/D strafe left/right by 1 metre.
 - Q/E turn left/right by 15 degrees.
@@ -113,6 +117,34 @@ raises `DroneSimCommandError` with one of:
 Capture keeps the existing V3 response: request/frame IDs, RGB, metric depth,
 FOV, clip planes, projection matrix, and world-to-view matrix.
 
+## Controlled fire scenario
+
+The experiment lifecycle is `PREPARING -> READY -> RUNNING`, followed by an
+explicit Reset. Prepare snaps the requested anchor to a nearby road, resolves
+a deterministic blueprint, loads models, clears the controlled area, and
+places a damaged `blista`, `firetruk` actors, and civilian pedestrians. Start
+records one GTA timer/frame origin, activates the fire, and issues each
+response task exactly once.
+
+The Python client exposes:
+
+```python
+scenario_id = client.prepare_fire_scenario(
+    anchor_world_xyz=(x, y, z),
+    seed=1,
+    firetruck_count=1,
+    pedestrian_count=32,
+)
+ready = client.wait_scenario_ready(scenario_id)
+start = client.start_scenario(scenario_id)
+snapshot = client.get_scenario_state(scenario_id)
+client.reset_scenario(scenario_id)
+```
+
+The caller must first teleport the player to the event area so GTA has loaded
+collision there. Scenario truth is intended for experiment control and
+evaluation; it is not exposed by `RelativePoseController`.
+
 ## Online validation
 
 Every validation consumes RGB-D in memory. No image, depth map, video, PLY,
@@ -124,7 +156,27 @@ python validation\validate_pose_control.py
 python validation\validate_rgbd_yaw_sync.py
 python validation\validate_rgbd_pointcloud.py --pixel-stride 4 --max-view-depth 200
 python validation\validate_rgbd_stability.py --count 1000
+python validation\validate_fire_scenario.py --anchor X Y Z
+python validation\validate_fire_scenario.py --anchor X Y Z --cycles 50
+python validation\validate_fire_scenario.py --anchor X Y Z --rgbd-captures 1000
+python validation\validate_fire_scenario.py --anchor X Y Z --require-clean-area
 ```
+
+Mission entities inside the controlled radius are never deleted. They are
+preserved and reported separately in `snapshot.protected_entities`; the normal
+validator prints a warning and continues. Formal clean-area collection should
+use `--require-clean-area`. While a scenario is active, all ambient and
+scenario-ped density multipliers are set to zero each frame. Existing ordinary
+entities that cross into the 120-metre controlled area are removed by periodic
+area maintenance; protected mission entities remain registered.
+
+When the scripted camera is active, the fire-scenario validator moves it once,
+after Prepare reaches READY, directly above the resolved event position. This
+avoids a second visible relocation while the scene is starting. The default
+observer view is 40 metres above the event at a -70 degree pitch. Use
+`--camera-height` and `--camera-pitch` to adjust the overview;
+`--camera-pitch -90` looks straight down. Pitch control is a validation utility
+and does not change the agent-facing relative-pose action.
 
 To validate collision rejection, choose a world coordinate beyond a nearby
 wall or inside solid geometry. A simpler option is to place the camera in front
@@ -154,7 +206,9 @@ The transport remains DSV3. Retained commands are:
 - set FOV, time, and weather
 - teleport/protect and restore the player
 - synchronized RGB-D capture
+- prepare/query/start/reset a controlled fire scenario
 - ping
 
-Removed message IDs are unsupported. There is no compatibility fallback for
-the old scene, recording, or discrete-action interfaces.
+Capture V3 is unchanged. The fire lifecycle uses new message IDs 22 through
+25. Removed message IDs remain unsupported, with no compatibility fallback
+for the old scene, recording, or discrete-action interfaces.

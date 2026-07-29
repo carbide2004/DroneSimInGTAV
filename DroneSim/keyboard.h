@@ -4,15 +4,14 @@
 
 #include <WinUser.h>
 
+#include <atomic>
+
 struct KeyState {
-    static constexpr DWORD kMaxDownMilliseconds = 500;
-
-    DWORD time = 0;
-    BOOL is_up = TRUE;
-    BOOL consumed = TRUE;
-
     bool consume_press();
-    void push(BOOL is_up_now);
+    void push();
+
+private:
+    std::atomic<bool> pending_{false};
 };
 
 extern KeyState F9;

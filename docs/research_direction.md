@@ -49,6 +49,9 @@ are also insufficient evidence of causal use.
 8. Add structured Awareness as a decision bottleneck and test it through direct
    intervention.
 
-The next milestone after Stage 0 is therefore a new `ScenarioManager` and
-event-response ground-truth interface, beginning with one fire event. The old
-static anomaly generators and oracle collection code must not be restored.
+Stage 1 implements item 2 with an explicitly orchestrated firetruck and
+pedestrian response. It deliberately does not claim that GTA's native response
+ecology is reliable. The next milestone is state-only response-ecology
+measurement, including a native-observe control using the same truth schema.
+The old static anomaly generators and oracle collection code must not be
+restored.

@@ -147,10 +147,13 @@
   <ItemGroup>
     <ClCompile Include="camera.cpp" />
     <ClCompile Include="command_queue.cpp" />
+    <ClCompile Include="entity_registry.cpp" />
+    <ClCompile Include="fire_scenario.cpp" />
     <ClCompile Include="keyboard.cpp" />
     <ClCompile Include="logging.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="rgbd_capture.cpp" />
+    <ClCompile Include="scenario_manager.cpp" />
     <ClCompile Include="script.cpp" />
     <ClCompile Include="server.cpp" />
   </ItemGroup>
@@ -160,9 +163,13 @@
   <ItemGroup>
     <ClInclude Include="camera.h" />
     <ClInclude Include="command_queue.h" />
+    <ClInclude Include="entity_registry.h" />
+    <ClInclude Include="fire_scenario.h" />
     <ClInclude Include="keyboard.h" />
     <ClInclude Include="logging.h" />
     <ClInclude Include="rgbd_capture.h" />
+    <ClInclude Include="scenario_manager.h" />
+    <ClInclude Include="scenario_types.h" />
     <ClInclude Include="script.h" />
     <ClInclude Include="server.h" />
     <ClInclude Include="proto.h" />

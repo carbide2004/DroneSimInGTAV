@@ -7,8 +7,10 @@
 #include "main.h"
 #include "natives.h"
 #include "rgbd_capture.h"
+#include "scenario_manager.h"
 #include "server.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <exception>
@@ -55,6 +57,30 @@ RuntimeCommandStatus map_pose_status(CameraPoseStatus status) {
     }
 }
 
+RuntimeCommandStatus map_scenario_status(
+    ScenarioOperationStatus status) {
+    switch (status) {
+        case ScenarioOperationStatus::Ok:
+            return RuntimeCommandStatus::Ok;
+        case ScenarioOperationStatus::AlreadyActive:
+            return RuntimeCommandStatus::ScenarioAlreadyActive;
+        case ScenarioOperationStatus::InvalidConfig:
+            return RuntimeCommandStatus::InvalidRequest;
+        case ScenarioOperationStatus::AreaNotReady:
+            return RuntimeCommandStatus::ScenarioAreaNotReady;
+        case ScenarioOperationStatus::IdMismatch:
+            return RuntimeCommandStatus::ScenarioNotFound;
+        case ScenarioOperationStatus::NotReady:
+            return RuntimeCommandStatus::ScenarioNotReady;
+        case ScenarioOperationStatus::PrepareFailed:
+            return RuntimeCommandStatus::ScenarioPrepareFailed;
+        case ScenarioOperationStatus::StartFailed:
+            return RuntimeCommandStatus::ScenarioStartFailed;
+        default:
+            return RuntimeCommandStatus::InternalError;
+    }
+}
+
 RuntimeCommandResult submit_capture_camera(std::uint64_t request_id) {
     if (!CameraController::instance().is_active()) {
         return error_result(
@@ -94,6 +120,12 @@ RuntimeCommandResult submit_capture_camera(std::uint64_t request_id) {
 }
 
 RuntimeCommandResult teleport_player(const RuntimeCommand& command) {
+    if (ScenarioManager::instance().lifecycle() !=
+        ScenarioLifecycle::Empty) {
+        return error_result(
+            RuntimeCommandStatus::ScenarioAlreadyActive,
+            "Reset the active scenario before teleporting the player");
+    }
     const float x = command.floats[0];
     const float y = command.floats[1];
     const float z = command.floats[2];
@@ -125,7 +157,27 @@ RuntimeCommandResult teleport_player(const RuntimeCommand& command) {
     PLAYER::SET_MAX_WANTED_LEVEL(0);
     PLAYER::SET_POLICE_IGNORE_PLAYER(PLAYER::PLAYER_ID(), TRUE);
     ENTITY::SET_ENTITY_COORDS(player, x, y, z, TRUE, FALSE, FALSE, TRUE);
-    return ok_result();
+
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (command.cancelled.load(std::memory_order_acquire)) {
+            return error_result(
+                RuntimeCommandStatus::CommandTimeout,
+                "Player teleport was cancelled while loading collision");
+        }
+        STREAMING::REQUEST_COLLISION_AT_COORD(x, y, z);
+        if (ENTITY::HAS_COLLISION_LOADED_AROUND_ENTITY(player)) {
+            return ok_result();
+        }
+        CameraController::instance()
+            .suppress_player_controls_for_frame();
+        WAIT(0);
+    }
+    return error_result(
+        RuntimeCommandStatus::WorldAreaNotReady,
+        "Collision did not load around the teleported player within 5 seconds");
 }
 
 RuntimeCommandResult restore_player() {
@@ -203,6 +255,17 @@ RuntimeCommandResult execute_command(const RuntimeCommand& command) {
             result.message = error;
             return result;
         }
+        case RuntimeCommandType::SetCameraPitch: {
+            RuntimeCommandResult result = ok_result();
+            const CameraPoseStatus status = camera.set_pitch(
+                command.floats[0],
+                command.cancelled,
+                result.pose,
+                error);
+            result.status = map_pose_status(status);
+            result.message = error;
+            return result;
+        }
         case RuntimeCommandType::SetFov:
             if (!camera.is_active()) {
                 return error_result(
@@ -237,6 +300,51 @@ RuntimeCommandResult execute_command(const RuntimeCommand& command) {
             return restore_player();
         case RuntimeCommandType::Capture:
             return submit_capture_camera(command.request_id);
+        case RuntimeCommandType::PrepareFireScenario: {
+            RuntimeCommandResult result = ok_result();
+            std::uint64_t scenario_id = 0;
+            const ScenarioOperationStatus status =
+                ScenarioManager::instance().prepare_fire(
+                    command.fire_scenario_config,
+                    scenario_id,
+                    error);
+            result.status = map_scenario_status(status);
+            result.message = error;
+            result.value = scenario_id;
+            return result;
+        }
+        case RuntimeCommandType::GetScenarioState: {
+            RuntimeCommandResult result = ok_result();
+            const ScenarioOperationStatus status =
+                ScenarioManager::instance().snapshot(
+                    command.scenario_id,
+                    result.scenario_snapshot,
+                    error);
+            result.status = map_scenario_status(status);
+            result.message = error;
+            return result;
+        }
+        case RuntimeCommandType::StartScenario: {
+            RuntimeCommandResult result = ok_result();
+            const ScenarioOperationStatus status =
+                ScenarioManager::instance().start(
+                    command.scenario_id,
+                    result.scenario_start,
+                    error);
+            result.status = map_scenario_status(status);
+            result.message = error;
+            return result;
+        }
+        case RuntimeCommandType::ResetScenario: {
+            RuntimeCommandResult result = ok_result();
+            const ScenarioOperationStatus status =
+                ScenarioManager::instance().reset(
+                    command.scenario_id,
+                    error);
+            result.status = map_scenario_status(status);
+            result.message = error;
+            return result;
+        }
         default:
             return error_result(
                 RuntimeCommandStatus::InvalidRequest,
@@ -396,11 +504,35 @@ void process_keyboard() {
         std::uint64_t camera_id = 0;
         if (!CameraController::instance().create(camera_id, error)) {
             LOGE("script", "F10 camera creation failed: " + error);
+            show_notification(
+                "DroneSim camera creation failed: " + error);
+        } else {
+            show_notification("DroneSim camera mode active");
         }
     }
     if (F11.consume_press()) {
+        bool succeeded = true;
         if (!CameraController::instance().stop(error)) {
+            succeeded = false;
             LOGE("script", "F11 camera stop failed: " + error);
+            show_notification(
+                "DroneSim camera stop failed: " + error);
+        }
+        const RuntimeCommandResult restore_result =
+            restore_player();
+        if (restore_result.status != RuntimeCommandStatus::Ok) {
+            succeeded = false;
+            LOGE(
+                "script",
+                "F11 player restore failed: " +
+                    restore_result.message);
+            show_notification(
+                "DroneSim player restore failed: " +
+                restore_result.message);
+        }
+        if (succeeded) {
+            show_notification(
+                "DroneSim camera stopped; player restored");
         }
     }
     process_manual_camera_controls();
@@ -410,7 +542,7 @@ void process_keyboard() {
 
 void scriptMain() {
     InitializeServer();
-    LOGI("script", "DroneSim Stage 0 runtime started");
+    LOGI("script", "DroneSim Stage 1 runtime started");
 
     while (true) {
         CameraController::instance().suppress_player_controls_for_frame();
@@ -420,6 +552,7 @@ void scriptMain() {
         while (try_dequeue_command(command)) {
             process_command(command);
         }
+        ScenarioManager::instance().tick();
         WAIT(0);
     }
 }

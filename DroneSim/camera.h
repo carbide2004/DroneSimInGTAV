@@ -33,6 +33,11 @@ public:
         const std::atomic<bool>& cancelled,
         RuntimePose& actual_pose,
         std::string& error);
+    CameraPoseStatus set_pitch(
+        float pitch_degrees,
+        const std::atomic<bool>& cancelled,
+        RuntimePose& actual_pose,
+        std::string& error);
     bool set_fov(float fov_degrees, std::string& error);
 
 private:

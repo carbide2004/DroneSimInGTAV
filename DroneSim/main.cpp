@@ -13,19 +13,16 @@
 #include <exception>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 namespace {
 
 constexpr std::size_t kClearDepthStencilViewOffset = 53;
 
-template <std::size_t Offset, typename Interface>
-void* g_original = nullptr;
-
-template <std::size_t Offset, typename Interface>
-void* g_target = nullptr;
-
 std::once_flag g_minhook_once;
 std::atomic<bool> g_minhook_ready{false};
+std::mutex g_depth_hooks_mutex;
+std::unordered_map<void*, void*> g_depth_originals;
 
 bool ensure_minhook() {
     std::call_once(g_minhook_once, []() {
@@ -41,63 +38,59 @@ bool ensure_minhook() {
     });
     return g_minhook_ready.load(std::memory_order_acquire);
 }
-template <std::size_t Offset, typename Interface>
-bool install_hook(Interface* instance, void* hook) {
-    if (instance == nullptr || hook == nullptr || !ensure_minhook()) {
+bool install_depth_hook(
+    ID3D11DeviceContext* context,
+    void* hook) {
+    if (context == nullptr || hook == nullptr || !ensure_minhook()) {
         return false;
     }
-    void** vtable = *reinterpret_cast<void***>(instance);
-    if (vtable == nullptr || vtable[Offset] == nullptr) {
+    void** vtable = *reinterpret_cast<void***>(context);
+    if (vtable == nullptr ||
+        vtable[kClearDepthStencilViewOffset] == nullptr) {
         return false;
     }
-    void* target = vtable[Offset];
-    if (g_target<Offset, Interface> == target &&
-        g_original<Offset, Interface> != nullptr) {
+    void* target = vtable[kClearDepthStencilViewOffset];
+    std::lock_guard<std::mutex> lock(g_depth_hooks_mutex);
+    if (g_depth_originals.find(target) != g_depth_originals.end()) {
         return true;
     }
-    if (g_target<Offset, Interface> != nullptr) {
-        MH_DisableHook(g_target<Offset, Interface>);
-        MH_RemoveHook(g_target<Offset, Interface>);
-        g_target<Offset, Interface> = nullptr;
-        g_original<Offset, Interface> = nullptr;
-    }
 
+    void* original = nullptr;
     MH_STATUS status = MH_CreateHook(
         target,
         hook,
-        &g_original<Offset, Interface>);
+        &original);
     if (status != MH_OK) {
         LOGE(
             "main",
             std::string("MH_CreateHook failed: ") +
                 std::to_string(static_cast<int>(status)));
-        g_original<Offset, Interface> = nullptr;
         return false;
     }
+    g_depth_originals.emplace(target, original);
     status = MH_EnableHook(target);
     if (status != MH_OK && status != MH_ERROR_ENABLED) {
         LOGE(
             "main",
             std::string("MH_EnableHook failed: ") +
                 std::to_string(static_cast<int>(status)));
+        g_depth_originals.erase(target);
         MH_RemoveHook(target);
-        g_original<Offset, Interface> = nullptr;
         return false;
     }
-    g_target<Offset, Interface> = target;
-    LOGI("main", "Installed D3D11 ClearDepthStencilView hook");
+    LOGI(
+        "main",
+        "Installed D3D11 ClearDepthStencilView hook for a new context");
     return true;
 }
 
 void remove_depth_hook() {
-    void* target =
-        g_target<kClearDepthStencilViewOffset, ID3D11DeviceContext>;
-    if (target != nullptr) {
-        MH_DisableHook(target);
-        MH_RemoveHook(target);
-        g_target<kClearDepthStencilViewOffset, ID3D11DeviceContext> = nullptr;
-        g_original<kClearDepthStencilViewOffset, ID3D11DeviceContext> = nullptr;
+    std::lock_guard<std::mutex> lock(g_depth_hooks_mutex);
+    for (const auto& hook : g_depth_originals) {
+        MH_DisableHook(hook.first);
+        MH_RemoveHook(hook.first);
     }
+    g_depth_originals.clear();
     if (g_minhook_ready.load(std::memory_order_acquire)) {
         MH_Uninitialize();
         g_minhook_ready.store(false, std::memory_order_release);
@@ -116,8 +109,19 @@ void clear_depth_stencil_view_hook(
         UINT,
         float,
         UINT8);
-    auto original = reinterpret_cast<Hook>(
-        g_original<kClearDepthStencilViewOffset, ID3D11DeviceContext>);
+    Hook original = nullptr;
+    if (context != nullptr) {
+        void** vtable = *reinterpret_cast<void***>(context);
+        if (vtable != nullptr) {
+            void* target = vtable[kClearDepthStencilViewOffset];
+            std::lock_guard<std::mutex> lock(g_depth_hooks_mutex);
+            const auto iterator = g_depth_originals.find(target);
+            if (iterator != g_depth_originals.end()) {
+                original =
+                    reinterpret_cast<Hook>(iterator->second);
+            }
+        }
+    }
     if (original == nullptr) {
         return;
     }
@@ -154,7 +158,7 @@ void present_callback(void* chain) {
             LOGE("main", "D3D11 immediate context is null");
             return;
         }
-        if (!install_hook<kClearDepthStencilViewOffset>(
+        if (!install_depth_hook(
                 context.Get(),
                 reinterpret_cast<void*>(&clear_depth_stencil_view_hook))) {
             LOGE("main", "Could not install the depth-target observation hook");
