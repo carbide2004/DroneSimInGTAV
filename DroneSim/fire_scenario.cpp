@@ -37,6 +37,12 @@ constexpr std::uint32_t kFireActivationTimeoutMilliseconds = 3000;
 constexpr auto kModelLoadTimeout = std::chrono::seconds(10);
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kVisualFireRangeMeters = 500.0f;
+constexpr std::uint64_t kFiretruckRandomStreamTag =
+    0x4649524554525543ULL;  // "FIRETRUC"
+constexpr std::uint64_t kPedestrianPositionRandomStreamTag =
+    0x5045445F504F5349ULL;  // "PED_POSI"
+constexpr std::uint64_t kPedestrianModelRandomStreamTag =
+    0x5045445F4D4F444CULL;  // "PED_MODL"
 char kFirePtfxAsset[] = "core";
 char kFirePtfxEffect[] = "ent_ray_ch2_farm_fire_dble";
 char kLargeFirePtfxEffect[] = "ent_ray_ch2_farm_fire_l_l_l";
@@ -47,6 +53,20 @@ const std::array<const char*, 4> kCivilianModels = {
     "a_m_y_hipster_01",
     "a_f_y_hipster_01",
 };
+
+std::uint64_t derive_random_stream_seed(
+    std::uint64_t master_seed,
+    std::uint64_t stream_tag) {
+    // SplitMix64 finalization gives each named subsystem a stable random
+    // stream without depending on implementation-defined std::hash values.
+    std::uint64_t value =
+        (master_seed ^ stream_tag) + 0x9E3779B97F4A7C15ULL;
+    value =
+        (value ^ (value >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+    value =
+        (value ^ (value >> 27U)) * 0x94D049BB133111EBULL;
+    return value ^ (value >> 31U);
+}
 
 bool finite_vector(const ScenarioVector3& value) {
     return std::isfinite(value.x) &&
@@ -130,7 +150,15 @@ ScenarioOperationStatus FireScenario::prepare(
     config_ = config;
     scenario_id_ = scenario_id;
     event_id_ = (scenario_id << 8U) | 1U;
-    random_.seed(config.seed);
+    firetruck_random_.seed(derive_random_stream_seed(
+        config.seed,
+        kFiretruckRandomStreamTag));
+    pedestrian_position_random_.seed(derive_random_stream_seed(
+        config.seed,
+        kPedestrianPositionRandomStreamTag));
+    pedestrian_model_random_.seed(derive_random_stream_seed(
+        config.seed,
+        kPedestrianModelRandomStreamTag));
     failure_.clear();
     removed_pedestrians_ = 0;
     removed_vehicles_ = 0;
@@ -138,21 +166,43 @@ ScenarioOperationStatus FireScenario::prepare(
     start_frame_count_ = 0;
 
     const ScenarioOperationStatus validation_status =
-        validate_and_build_blueprint(error);
+        validate_area(error);
     if (validation_status != ScenarioOperationStatus::Ok) {
         reset();
         return validation_status;
     }
+    if (config.blueprint_id != 0) {
+        if (!reuse_blueprint(error)) {
+            reset();
+            return ScenarioOperationStatus::PrepareFailed;
+        }
+    } else {
+        const ScenarioOperationStatus resolve_status =
+            resolve_event(error);
+        if (resolve_status != ScenarioOperationStatus::Ok) {
+            reset();
+            return resolve_status;
+        }
+        blueprint_id_ = scenario_id_;
+        building_blueprint_ = true;
+        firetruck_spawns_.clear();
+        pedestrian_spawns_.clear();
+    }
+    placement_attempts_ = 0;
+    pedestrian_query_failures_ = 0;
+    pedestrian_bounds_rejections_ = 0;
+    pedestrian_duplicate_rejections_ = 0;
 
     lifecycle_ = ScenarioLifecycle::Preparing;
-    prepare_stage_ = PrepareStage::ResolveFireTruckSpawns;
+    prepare_stage_ = PrepareStage::CleanAmbient;
     LOGI(
         "scenario",
-        "Preparing fire scenario " + std::to_string(scenario_id_));
+        "Preparing fire scenario " + std::to_string(scenario_id_) +
+            " from blueprint " + std::to_string(blueprint_id_));
     return ScenarioOperationStatus::Ok;
 }
 
-ScenarioOperationStatus FireScenario::validate_and_build_blueprint(
+ScenarioOperationStatus FireScenario::validate_area(
     std::string& error) {
     const Ped player = PLAYER::PLAYER_PED_ID();
     if (player == 0 || !ENTITY::DOES_ENTITY_EXIST(player)) {
@@ -187,6 +237,11 @@ ScenarioOperationStatus FireScenario::validate_and_build_blueprint(
         return ScenarioOperationStatus::AreaNotReady;
     }
 
+    return ScenarioOperationStatus::Ok;
+}
+
+ScenarioOperationStatus FireScenario::resolve_event(
+    std::string& error) {
     Vector3 event_node{};
     float event_heading = 0.0f;
     if (!PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(
@@ -211,13 +266,71 @@ ScenarioOperationStatus FireScenario::validate_and_build_blueprint(
         return ScenarioOperationStatus::PrepareFailed;
     }
 
-    firetruck_spawns_.clear();
-    pedestrian_spawns_.clear();
-    placement_attempts_ = 0;
-    pedestrian_query_failures_ = 0;
-    pedestrian_bounds_rejections_ = 0;
-    pedestrian_duplicate_rejections_ = 0;
     return ScenarioOperationStatus::Ok;
+}
+
+bool FireScenario::reuse_blueprint(std::string& error) {
+    if (!cached_blueprint_.valid ||
+        cached_blueprint_.id != config_.blueprint_id) {
+        error =
+            "Requested blueprint_id is not present in the single-slot "
+            "blueprint cache";
+        return false;
+    }
+    if (cached_blueprint_.seed != config_.seed) {
+        error = "Requested blueprint seed does not match the cached blueprint";
+        return false;
+    }
+    if (distance_between(
+            cached_blueprint_.requested_anchor,
+            config_.anchor) > 1.0e-3f) {
+        error =
+            "Requested blueprint anchor does not match the cached blueprint";
+        return false;
+    }
+    if (config_.firetruck_count >
+            cached_blueprint_.firetruck_spawns.size() ||
+        config_.pedestrian_count >
+            cached_blueprint_.pedestrian_spawns.size()) {
+        error =
+            "Requested actor counts exceed cached blueprint capacity; "
+            "create a new superset blueprint first";
+        return false;
+    }
+
+    blueprint_id_ = cached_blueprint_.id;
+    building_blueprint_ = false;
+    event_position_ = cached_blueprint_.event_position;
+    event_heading_ = cached_blueprint_.event_heading;
+    firetruck_spawns_.assign(
+        cached_blueprint_.firetruck_spawns.begin(),
+        cached_blueprint_.firetruck_spawns.begin() +
+            config_.firetruck_count);
+    pedestrian_spawns_.assign(
+        cached_blueprint_.pedestrian_spawns.begin(),
+        cached_blueprint_.pedestrian_spawns.begin() +
+            config_.pedestrian_count);
+    return true;
+}
+
+void FireScenario::commit_blueprint() {
+    cached_blueprint_.valid = true;
+    cached_blueprint_.id = blueprint_id_;
+    cached_blueprint_.seed = config_.seed;
+    cached_blueprint_.requested_anchor = config_.anchor;
+    cached_blueprint_.event_position = event_position_;
+    cached_blueprint_.event_heading = event_heading_;
+    cached_blueprint_.firetruck_spawns = firetruck_spawns_;
+    cached_blueprint_.pedestrian_spawns = pedestrian_spawns_;
+    building_blueprint_ = false;
+    LOGI(
+        "scenario",
+        "Committed immutable blueprint " +
+            std::to_string(blueprint_id_) + " with capacity " +
+            std::to_string(firetruck_spawns_.size()) +
+            " firetrucks and " +
+            std::to_string(pedestrian_spawns_.size()) +
+            " pedestrians");
 }
 
 bool FireScenario::resolve_firetruck_spawns(
@@ -241,8 +354,10 @@ bool FireScenario::resolve_firetruck_spawns(
                 "with a finite inbound route to the event";
             return false;
         }
-        const float angle = angle_distribution(random_);
-        const float radius = radius_distribution(random_);
+        const float angle =
+            angle_distribution(firetruck_random_);
+        const float radius =
+            radius_distribution(firetruck_random_);
         Vector3 node{};
         float heading = 0.0f;
         if (!PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(
@@ -329,9 +444,11 @@ bool FireScenario::resolve_pedestrian_spawns(
                 std::to_string(pedestrian_duplicate_rejections_);
             return false;
         }
-        const float angle = angle_distribution(random_);
+        const float angle =
+            angle_distribution(pedestrian_position_random_);
         const float radius =
-            pedestrian_radius_distribution(random_);
+            pedestrian_radius_distribution(
+                pedestrian_position_random_);
         const float candidate_x =
             event_position_.x + std::cos(angle) * radius;
         const float candidate_y =
@@ -381,7 +498,8 @@ bool FireScenario::resolve_pedestrian_spawns(
             const Hash model = GAMEPLAY::GET_HASH_KEY(
                 const_cast<char*>(
                     kCivilianModels[
-                        model_distribution(random_)]));
+                        model_distribution(
+                            pedestrian_model_random_)]));
             pedestrian_spawns_.push_back(
                 {
                     position,
@@ -495,6 +613,17 @@ void FireScenario::tick() {
 
     std::string error;
     switch (prepare_stage_) {
+        case PrepareStage::CleanAmbient:
+            if (!clear_ambient(error)) {
+                fail(error);
+                return;
+            }
+            ambient_suppression_active_ = true;
+            prepare_stage_ =
+                building_blueprint_
+                    ? PrepareStage::ResolveFireTruckSpawns
+                    : PrepareStage::RequestModels;
+            break;
         case PrepareStage::ResolveFireTruckSpawns:
             if (!resolve_firetruck_spawns(error)) {
                 fail(error);
@@ -513,6 +642,7 @@ void FireScenario::tick() {
             }
             if (pedestrian_spawns_.size() >=
                 config_.pedestrian_count) {
+                commit_blueprint();
                 prepare_stage_ = PrepareStage::RequestModels;
             }
             break;
@@ -525,7 +655,7 @@ void FireScenario::tick() {
             break;
         case PrepareStage::WaitModels:
             if (models_loaded()) {
-                prepare_stage_ = PrepareStage::CleanAmbient;
+                prepare_stage_ = PrepareStage::SpawnSource;
                 break;
             }
             for (const Hash model : requested_models_) {
@@ -538,14 +668,6 @@ void FireScenario::tick() {
                     "Scenario models or fire particle asset did not load "
                     "within 10 seconds");
             }
-            break;
-        case PrepareStage::CleanAmbient:
-            if (!clear_ambient(error)) {
-                fail(error);
-                return;
-            }
-            ambient_suppression_active_ = true;
-            prepare_stage_ = PrepareStage::SpawnSource;
             break;
         case PrepareStage::SpawnSource:
             if (!spawn_source(error)) {
@@ -1105,6 +1227,7 @@ ScenarioOperationStatus FireScenario::snapshot(
     }
     output = {};
     output.scenario_id = scenario_id_;
+    output.blueprint_id = blueprint_id_;
     output.seed = config_.seed;
     output.lifecycle = lifecycle_;
     output.game_timer_ms =
@@ -1319,6 +1442,8 @@ void FireScenario::reset() {
     config_ = {};
     scenario_id_ = 0;
     event_id_ = 0;
+    blueprint_id_ = 0;
+    building_blueprint_ = false;
     event_position_ = {};
     event_heading_ = 0.0f;
     firetruck_spawns_.clear();

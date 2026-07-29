@@ -203,6 +203,35 @@ The caller must first teleport the player to the event area so GTA has loaded
 collision there. Scenario truth is intended for experiment control and
 evaluation; it is not exposed by `RelativePoseController`.
 
+The supplied master seed is deterministically expanded into independent
+firetruck-placement, pedestrian-placement, and pedestrian-model random streams.
+Prepare with `blueprint_id=0` creates a new immutable blueprint after clearing
+the controlled area. Its ID is returned in `ScenarioSnapshot.blueprint_id` and
+survives Reset in a single-slot cache. A later Prepare can pass that ID and
+instantiate any prefix of its actor capacity:
+
+```python
+superset_id = client.prepare_fire_scenario(
+    (x, y, z), seed=1, firetruck_count=1, pedestrian_count=32
+)
+superset = client.wait_scenario_ready(superset_id)
+client.reset_scenario(superset_id)
+
+no_truck_id = client.prepare_fire_scenario(
+    (x, y, z),
+    seed=1,
+    firetruck_count=0,
+    pedestrian_count=32,
+    blueprint_id=superset.blueprint_id,
+)
+```
+
+The second instance reuses the exact pedestrian positions, headings, and
+models; it does not call GTA safe-coordinate queries again. A reuse request
+must match the cached anchor and seed and cannot exceed its actor counts. The
+seed controls scene construction, not GTA AI pathfinding or frame-by-frame
+response trajectories.
+
 ## Online validation
 
 Every validation consumes RGB-D in memory. No image, depth map, video, PLY,
@@ -218,6 +247,7 @@ python validation\validate_fire_scenario.py --anchor X Y Z
 python validation\validate_fire_scenario.py --anchor X Y Z --cycles 50
 python validation\validate_fire_scenario.py --anchor X Y Z --rgbd-captures 1000
 python validation\validate_fire_scenario.py --anchor X Y Z --require-clean-area
+python validation\validate_fire_scenario.py --anchor X Y Z --verify-seed-isolation
 ```
 
 Mission entities inside the controlled radius are never deleted. They are

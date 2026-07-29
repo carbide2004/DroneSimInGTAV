@@ -430,6 +430,114 @@ def _place_observer_camera(client, center, args, label):
     )
 
 
+def _prepare_seed_probe(
+    client,
+    args,
+    firetruck_count,
+    blueprint_id=0,
+):
+    scenario_id = None
+    try:
+        scenario_id = client.prepare_fire_scenario(
+            args.anchor,
+            args.seed,
+            firetruck_count,
+            args.pedestrians,
+            blueprint_id=blueprint_id,
+        )
+        ready = client.wait_scenario_ready(
+            scenario_id,
+            timeout=args.prepare_timeout,
+            poll_interval=args.poll_interval,
+        )
+        _validate_ready(
+            ready,
+            firetruck_count,
+            args.pedestrians,
+            args.require_clean_area,
+        )
+        return ready
+    finally:
+        if scenario_id is not None:
+            client.reset_scenario(scenario_id)
+
+
+def _validate_seed_isolation(client, args):
+    with_firetruck = _prepare_seed_probe(client, args, 1)
+    without_firetruck = _prepare_seed_probe(
+        client,
+        args,
+        0,
+        blueprint_id=with_firetruck.blueprint_id,
+    )
+    if without_firetruck.blueprint_id != with_firetruck.blueprint_id:
+        raise RuntimeError(
+            "Matched instances did not reuse the same blueprint_id"
+        )
+    if not np.allclose(
+        without_firetruck.event_position,
+        with_firetruck.event_position,
+        rtol=0.0,
+        atol=1e-4,
+    ):
+        raise RuntimeError(
+            "Seed isolation changed the resolved event position"
+        )
+
+    left = _entities_by_role(
+        without_firetruck,
+        ScenarioEntityRole.FLEEING_PEDESTRIAN,
+    )
+    right = _entities_by_role(
+        with_firetruck,
+        ScenarioEntityRole.FLEEING_PEDESTRIAN,
+    )
+    if len(left) != len(right):
+        raise RuntimeError(
+            "Seed isolation produced different pedestrian counts"
+        )
+    for index, (left_entity, right_entity) in enumerate(
+        zip(left, right)
+    ):
+        if left_entity.model_hash != right_entity.model_hash:
+            raise RuntimeError(
+                "Seed isolation changed pedestrian "
+                f"{index} model: {left_entity.model_hash} != "
+                f"{right_entity.model_hash}"
+            )
+        if not np.allclose(
+            left_entity.position,
+            right_entity.position,
+            rtol=0.0,
+            atol=1e-3,
+        ):
+            raise RuntimeError(
+                "Seed isolation changed pedestrian "
+                f"{index} position: {left_entity.position} != "
+                f"{right_entity.position}"
+            )
+        heading_error = abs(
+            (
+                left_entity.heading
+                - right_entity.heading
+                + 180.0
+            )
+            % 360.0
+            - 180.0
+        )
+        if heading_error > 1e-3:
+            raise RuntimeError(
+                "Seed isolation changed pedestrian "
+                f"{index} heading by {heading_error:.6f} degrees"
+            )
+    print(
+        "PASS seed isolation "
+        f"blueprint={with_firetruck.blueprint_id} "
+        f"seed={args.seed} pedestrians={len(left)} "
+        "firetruck_count=0/1"
+    )
+
+
 def _run_cycle(client, args, cycle_index):
     scenario_id = None
     try:
@@ -537,6 +645,14 @@ def main():
     parser.add_argument("--process-name", default="GTA5.exe")
     parser.add_argument("--max-memory-growth-mb", type=float, default=512.0)
     parser.add_argument(
+        "--verify-seed-isolation",
+        action="store_true",
+        help=(
+            "Prepare matched 0/1-firetruck blueprints and require identical "
+            "pedestrian models, positions, and headings"
+        ),
+    )
+    parser.add_argument(
         "--camera-height",
         type=float,
         default=40.0,
@@ -563,6 +679,10 @@ def main():
         parser.error("--firetrucks must be within [0, 4]")
     if not 0 <= args.pedestrians <= 32:
         parser.error("--pedestrians must be within [0, 32]")
+    if args.verify_seed_isolation and args.pedestrians == 0:
+        parser.error(
+            "--verify-seed-isolation requires at least one pedestrian"
+        )
     if args.observe_seconds <= 0:
         parser.error("--observe-seconds must be positive")
     if args.rgbd_captures < 0:
@@ -586,6 +706,8 @@ def main():
     initial_rss = args.gta_process.memory_info().rss
     try:
         client.teleport_player(*args.anchor)
+        if args.verify_seed_isolation:
+            _validate_seed_isolation(client, args)
         for cycle_index in range(args.cycles):
             _run_cycle(client, args, cycle_index)
         total_growth_mb = (

@@ -184,10 +184,11 @@ std::vector<unsigned char> scenario_snapshot_bytes(
     const ScenarioSnapshot& snapshot) {
     std::vector<unsigned char> data;
     data.reserve(
-        89 +
+        97 +
         snapshot.protected_entities.size() * 25 +
         snapshot.entities.size() * 93);
     append_scalar(data, snapshot.scenario_id);
+    append_scalar(data, snapshot.blueprint_id);
     append_scalar(data, snapshot.seed);
     append_scalar(
         data,
@@ -554,13 +555,13 @@ void Server::handle_client() {
             case MSG_PREPARE_FIRE_SCENARIO: {
                 constexpr std::size_t expected_size =
                     sizeof(float) * 3 +
-                    sizeof(std::uint64_t) +
+                    sizeof(std::uint64_t) * 2 +
                     sizeof(std::uint16_t) * 2;
                 if (payload.size() != expected_size) {
                     result = invalid_request(
                         "PREPARE_FIRE_SCENARIO expects anchor float32[3], "
                         "seed uint64, firetruck_count uint16, and "
-                        "pedestrian_count uint16");
+                        "pedestrian_count uint16, and blueprint_id uint64");
                     break;
                 }
                 auto command = make_runtime_command(
@@ -591,6 +592,11 @@ void Server::handle_client() {
                     sizeof(float) * 3 + sizeof(std::uint64_t) +
                         sizeof(std::uint16_t),
                     command->fire_scenario_config.pedestrian_count);
+                read_scalar(
+                    payload,
+                    sizeof(float) * 3 + sizeof(std::uint64_t) +
+                        sizeof(std::uint16_t) * 2,
+                    command->fire_scenario_config.blueprint_id);
                 result = run_command(command);
                 if (result.status == RuntimeCommandStatus::Ok) {
                     append_scalar(data, result.value);

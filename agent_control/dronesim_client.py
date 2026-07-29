@@ -154,6 +154,7 @@ class ScenarioProtectedEntitySnapshot:
 @dataclass(frozen=True)
 class ScenarioSnapshot:
     scenario_id: int
+    blueprint_id: int
     seed: int
     lifecycle: ScenarioLifecycle
     game_timer_ms: int
@@ -309,7 +310,11 @@ def _finite_tuple(name, values):
 
 def _decode_scenario_snapshot(payload):
     reader = _PayloadReader(payload)
-    scenario_id, seed = reader.unpack("<QQ")
+    scenario_id, blueprint_id, seed = reader.unpack("<QQQ")
+    if blueprint_id == 0:
+        raise DroneSimProtocolError(
+            "Scenario snapshot contains a zero blueprint_id"
+        )
     (
         lifecycle_value,
         game_timer_ms,
@@ -466,6 +471,7 @@ def _decode_scenario_snapshot(payload):
     reader.finish()
     return ScenarioSnapshot(
         scenario_id=scenario_id,
+        blueprint_id=blueprint_id,
         seed=seed,
         lifecycle=lifecycle,
         game_timer_ms=game_timer_ms,
@@ -759,6 +765,7 @@ class DroneSimClient:
         seed,
         firetruck_count=1,
         pedestrian_count=32,
+        blueprint_id=0,
     ):
         if len(anchor_world_xyz) != 3:
             raise ValueError("anchor_world_xyz must contain three values")
@@ -766,6 +773,7 @@ class DroneSimClient:
         seed = int(seed)
         firetruck_count = int(firetruck_count)
         pedestrian_count = int(pedestrian_count)
+        blueprint_id = int(blueprint_id)
         if not 0 <= seed <= 0xFFFFFFFFFFFFFFFF:
             raise ValueError("seed must fit uint64")
         if not 0 <= firetruck_count <= MAX_FIRETRUCK_COUNT:
@@ -778,14 +786,17 @@ class DroneSimClient:
                 "pedestrian_count must be in "
                 f"[0, {MAX_PEDESTRIAN_COUNT}]"
             )
+        if not 0 <= blueprint_id <= 0xFFFFFFFFFFFFFFFF:
+            raise ValueError("blueprint_id must fit uint64")
         data = self._command(
             TYPE_PREPARE_FIRE_SCENARIO,
             struct.pack(
-                "<3fQHH",
+                "<3fQHHQ",
                 *(float(value) for value in anchor_world_xyz),
                 seed,
                 firetruck_count,
                 pedestrian_count,
+                blueprint_id,
             ),
         )
         if len(data) != 8:

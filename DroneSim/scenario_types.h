@@ -55,6 +55,9 @@ struct FireScenarioConfig {
     std::uint64_t seed = 0;
     std::uint16_t firetruck_count = 1;
     std::uint16_t pedestrian_count = 32;
+    // Zero creates a new immutable blueprint. A non-zero value reuses the
+    // matching cached blueprint and treats the actor counts as instance masks.
+    std::uint64_t blueprint_id = 0;
 };
 
 struct ScenarioStartInfo {
@@ -93,6 +96,7 @@ struct ScenarioProtectedEntitySnapshot {
 
 struct ScenarioSnapshot {
     std::uint64_t scenario_id = 0;
+    std::uint64_t blueprint_id = 0;
     std::uint64_t seed = 0;
     ScenarioLifecycle lifecycle = ScenarioLifecycle::Empty;
     std::uint32_t game_timer_ms = 0;

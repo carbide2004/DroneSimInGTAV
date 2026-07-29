@@ -33,11 +33,11 @@ public:
 private:
     enum class PrepareStage {
         None,
+        CleanAmbient,
         ResolveFireTruckSpawns,
         ResolvePedestrianSpawns,
         RequestModels,
         WaitModels,
-        CleanAmbient,
         SpawnSource,
         SpawnFireTrucks,
         SpawnPedestrians,
@@ -50,6 +50,17 @@ private:
         Hash model_hash = 0;
     };
 
+    struct Blueprint {
+        bool valid = false;
+        std::uint64_t id = 0;
+        std::uint64_t seed = 0;
+        ScenarioVector3 requested_anchor;
+        ScenarioVector3 event_position;
+        float event_heading = 0.0f;
+        std::vector<SpawnPoint> firetruck_spawns;
+        std::vector<SpawnPoint> pedestrian_spawns;
+    };
+
     struct FireTruckActor {
         Vehicle vehicle = 0;
         Ped driver = 0;
@@ -57,8 +68,12 @@ private:
         std::uint64_t driver_id = 0;
     };
 
-    ScenarioOperationStatus validate_and_build_blueprint(
+    ScenarioOperationStatus validate_area(
         std::string& error);
+    ScenarioOperationStatus resolve_event(
+        std::string& error);
+    bool reuse_blueprint(std::string& error);
+    void commit_blueprint();
     bool resolve_firetruck_spawns(std::string& error);
     bool resolve_pedestrian_spawns(std::string& error);
     bool request_models(std::string& error);
@@ -87,7 +102,12 @@ private:
     FireScenarioConfig config_;
     std::uint64_t scenario_id_ = 0;
     std::uint64_t event_id_ = 0;
-    std::mt19937_64 random_;
+    std::uint64_t blueprint_id_ = 0;
+    bool building_blueprint_ = false;
+    Blueprint cached_blueprint_;
+    std::mt19937_64 firetruck_random_;
+    std::mt19937_64 pedestrian_position_random_;
+    std::mt19937_64 pedestrian_model_random_;
     ScenarioVector3 event_position_;
     float event_heading_ = 0.0f;
     std::vector<SpawnPoint> firetruck_spawns_;
