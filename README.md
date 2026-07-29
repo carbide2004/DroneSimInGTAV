@@ -8,6 +8,64 @@ truth without restoring the old oracle recorder or training pipeline.
 The research direction is hidden-event localization from event-induced dynamic
 responses. See [docs/research_direction.md](docs/research_direction.md).
 
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Python["Python control and evaluation"]
+        Agent["Agent environment"]
+        Validation["Online validation"]
+        Relative["RelativePoseController<br/>body-frame delta to world pose"]
+        Client["DroneSimClient<br/>strict DSV3 codec"]
+
+        Agent --> Relative --> Client
+        Validation --> Client
+    end
+
+    subgraph Runtime["GTA V ASI plugin"]
+        Server["ProtocolServer<br/>network thread"]
+        Queue["Typed command queue<br/>request ID and completion result"]
+        Script["ScriptRuntime<br/>GTA script thread and per-frame tick"]
+        Camera["CameraController"]
+        Manager["ScenarioManager"]
+        Fire["FireScenario"]
+        Truth["EntityRegistry<br/>structured response truth"]
+
+        Server --> Queue --> Script
+        Script --> Camera
+        Script --> Manager --> Fire --> Truth
+    end
+
+    subgraph Capture["Synchronized RGB-D pipeline"]
+        Hook["D3D11 depth hook<br/>observe current-cycle DSV"]
+        Present["Present callback<br/>copy same-frame RGB and depth"]
+        Ring["Three-slot staging ring<br/>event queries"]
+        Worker["Worker thread<br/>RGB conversion and metric depth"]
+
+        Hook --> Present --> Ring --> Worker
+    end
+
+    World["GTA world and ScriptHookV natives"]
+
+    Client <-->|"DSV3 TCP"| Server
+    Camera --> World
+    Fire --> World
+    World --> Hook
+    Script -->|"same-frame camera metadata"| Present
+    Worker -->|"frame ID, RGB, depth, matrices"| Server
+    Truth -.->|"evaluation only"| Validation
+```
+
+The network thread never calls GTA natives directly. It validates each request,
+places a typed command in the queue, and waits for the GTA script thread to
+return a correlated result. Scenario preparation and maintenance advance from
+the per-frame runtime tick. RGB-D capture remains a separate render-thread
+pipeline, so scenario logic cannot manufacture or cache observations.
+
+`RelativePoseController` and Capture V3 form the agent-facing boundary.
+Scenario snapshots contain privileged event and entity truth for experiment
+control and evaluation; they must not be included in an agent observation.
+
 ## Repository layout
 
 ```text
