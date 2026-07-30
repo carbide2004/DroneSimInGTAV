@@ -65,8 +65,9 @@ AND its world-space 3D Euclidean error is at most 5 m
 
 The fire must be active at the terminal step. Seeing only a distant smoke
 column is not sufficient terminal confirmation. `task-observable` means that
-the target has at least two unoccluded in-frustum geometry samples and a
-projected bounding span of at least 12 pixels in either named view.
+the target has at least four unoccluded in-frustum geometry samples, a
+projected bounding span of at least 24 pixels, and a projected clear-sample
+box at least 12 pixels inside every image border in either named view.
 
 The following terms are deliberately distinct:
 
@@ -420,6 +421,7 @@ python validation\validate_fire_scenario.py --anchor X Y Z --require-clean-area
 python validation\validate_fire_scenario.py --anchor X Y Z --verify-seed-isolation
 python validation\validate_lockstep_clock.py --anchor X Y Z
 python validation\validate_visibility_starts.py --anchor X Y Z
+python validation\validate_visibility_starts.py --anchor X Y Z --show-starts
 python validation\validate_visibility_starts.py --anchor X Y Z --queries 1000
 ```
 

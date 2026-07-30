@@ -34,8 +34,9 @@ TASK_MIN_EVENT_DISTANCE_METERS = 60.0
 TASK_MAX_EVENT_DISTANCE_METERS = 100.0
 TASK_MIN_ALTITUDE_AGL_METERS = 25.0
 TASK_MAX_ALTITUDE_AGL_METERS = 60.0
-TASK_MIN_PROJECTED_SPAN_PIXELS = 12.0
-TASK_MIN_CLEAR_SAMPLES = 2
+TASK_MIN_PROJECTED_SPAN_PIXELS = 24.0
+TASK_MIN_CLEAR_SAMPLES = 4
+TASK_IMAGE_BORDER_MARGIN_PIXELS = 12.0
 TASK_LOCALIZATION_TOLERANCE_METERS = 5.0
 TASK_MAX_START_CANDIDATES = 256
 
@@ -58,6 +59,9 @@ class ObservationSpec:
         TASK_MIN_PROJECTED_SPAN_PIXELS
     )
     min_clear_samples: int = TASK_MIN_CLEAR_SAMPLES
+    image_border_margin_pixels: float = (
+        TASK_IMAGE_BORDER_MARGIN_PIXELS
+    )
     weather: str = "EXTRASUNNY"
     hour: int = 12
     minute: int = 0
@@ -95,6 +99,7 @@ class ObservationSpec:
             self.oblique_pitch_degrees,
             self.nadir_pitch_degrees,
             self.min_projected_span_pixels,
+            self.image_border_margin_pixels,
         )
         if not all(math.isfinite(float(value)) for value in values):
             raise ValueError("ObservationSpec contains non-finite values")
@@ -108,6 +113,15 @@ class ObservationSpec:
             raise ValueError("Projected-span threshold must be positive")
         if self.min_clear_samples <= 0:
             raise ValueError("Clear-sample threshold must be positive")
+        if self.image_border_margin_pixels < 0:
+            raise ValueError("Image-border margin cannot be negative")
+        if (
+            self.image_border_margin_pixels * 2 >= self.width
+            or self.image_border_margin_pixels * 2 >= self.height
+        ):
+            raise ValueError(
+                "Image-border margin leaves no observable image area"
+            )
 
 
 @dataclass(frozen=True)
@@ -130,6 +144,7 @@ class ViewTargetVisibility:
     clear_in_frustum_samples: int
     projected_bbox: tuple | None
     projected_span_pixels: float
+    inside_image_margin: bool
     task_observable: bool
 
 
@@ -535,15 +550,28 @@ def _assess_target_view(target, matrices, spec):
             projected_bbox[3] - projected_bbox[1],
         )
     clear_count = int(np.count_nonzero(clear_in_frustum))
+    inside_image_margin = (
+        projected_bbox is not None
+        and projected_bbox[0]
+        >= spec.image_border_margin_pixels
+        and projected_bbox[1]
+        >= spec.image_border_margin_pixels
+        and projected_bbox[2]
+        <= spec.width - 1 - spec.image_border_margin_pixels
+        and projected_bbox[3]
+        <= spec.height - 1 - spec.image_border_margin_pixels
+    )
     return ViewTargetVisibility(
         in_frustum_samples=int(np.count_nonzero(in_frustum)),
         clear_in_frustum_samples=clear_count,
         projected_bbox=projected_bbox,
         projected_span_pixels=float(projected_span),
+        inside_image_margin=inside_image_margin,
         task_observable=(
             clear_count >= spec.min_clear_samples
             and projected_span
             >= spec.min_projected_span_pixels
+            and inside_image_margin
         ),
     )
 

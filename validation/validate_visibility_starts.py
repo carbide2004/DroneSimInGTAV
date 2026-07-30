@@ -18,6 +18,7 @@ from agent_control.dronesim_client import (  # noqa: E402
     DroneSimClient,
     LockstepSession,
     OBLIQUE_PITCH_DEGREES,
+    VisibilityTargetRole,
 )
 from agent_control.task_starts import (  # noqa: E402
     ObservationSpec,
@@ -135,6 +136,125 @@ def _visibility_digest(digest, visibility):
             )
 
 
+def _show_start_views(generated):
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+    except ImportError as error:
+        raise RuntimeError(
+            "--show-starts requires matplotlib"
+        ) from error
+
+    response_roles = {
+        VisibilityTargetRole.FIRE_TRUCK,
+        VisibilityTargetRole.FLEEING_PEDESTRIAN,
+    }
+    figure, axes = plt.subplots(
+        1,
+        2,
+        figsize=(16, 7),
+        constrained_layout=True,
+    )
+    views = (
+        (
+            "oblique",
+            generated.rgbd_pair.oblique,
+        ),
+        (
+            "nadir",
+            generated.rgbd_pair.nadir,
+        ),
+    )
+    for axis, (view_name, frame) in zip(axes, views):
+        axis.imshow(frame.rgb_array())
+        axis.set_title(
+            f"{generated.blueprint.visibility_stratum.name} "
+            f"{view_name} frame={frame.frame_id}"
+        )
+        axis.set_xlim(0, frame.width - 1)
+        axis.set_ylim(frame.height - 1, 0)
+        axis.set_axis_off()
+        for target in generated.assessment.targets:
+            view = getattr(target, view_name)
+            if view.projected_bbox is None:
+                continue
+            x_min, y_min, x_max, y_max = view.projected_bbox
+            is_response = target.role in response_roles
+            if is_response and view.task_observable:
+                color = "lime"
+                linewidth = 2.5
+            elif target.role == VisibilityTargetRole.FIRE_SOURCE_VEHICLE:
+                color = "red"
+                linewidth = 1.5
+            elif target.role == VisibilityTargetRole.FIRE_ENVELOPE:
+                color = "orange"
+                linewidth = 1.5
+            else:
+                color = "yellow"
+                linewidth = 1.0
+            axis.add_patch(
+                Rectangle(
+                    (x_min, y_min),
+                    x_max - x_min,
+                    y_max - y_min,
+                    fill=False,
+                    edgecolor=color,
+                    linewidth=linewidth,
+                )
+            )
+            center_x = (x_min + x_max) * 0.5
+            center_y = (y_min + y_max) * 0.5
+            axis.plot(
+                center_x,
+                center_y,
+                marker="+",
+                color=color,
+                markersize=8,
+                markeredgewidth=linewidth,
+            )
+            label = (
+                f"{target.role.name} id={target.stable_id} "
+                f"clear={view.clear_in_frustum_samples}/"
+                f"{view.in_frustum_samples} "
+                f"span={view.projected_span_pixels:.1f}px "
+                "margin="
+                f"{'yes' if view.inside_image_margin else 'no'}"
+            )
+            if is_response and view.task_observable:
+                label += " CUE_VISIBLE"
+            x_offset = -12 if center_x > frame.width * 0.65 else 12
+            y_offset = -22 if center_y < frame.height * 0.2 else 18
+            axis.annotate(
+                label,
+                xy=(center_x, center_y),
+                xytext=(x_offset, y_offset),
+                textcoords="offset points",
+                ha="right" if x_offset < 0 else "left",
+                va="top" if y_offset < 0 else "bottom",
+                color="black",
+                fontsize=7,
+                bbox={
+                    "facecolor": color,
+                    "alpha": 0.75,
+                    "edgecolor": "none",
+                    "pad": 1.5,
+                },
+                arrowprops={
+                    "arrowstyle": "->",
+                    "color": color,
+                    "linewidth": linewidth,
+                },
+            )
+    figure.suptitle(
+        f"start={generated.blueprint.start_id} "
+        f"event bearing="
+        f"{generated.blueprint.event_bearing_body_degrees:.1f} deg | "
+        "green=response target that satisfies CUE_VISIBLE"
+    )
+    plt.show()
+    plt.close(figure)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -173,6 +293,14 @@ def main():
     parser.add_argument(
         "--verify-determinism",
         action="store_true",
+    )
+    parser.add_argument(
+        "--show-starts",
+        action="store_true",
+        help=(
+            "Show in-memory oblique/nadir RGB with projected "
+            "visibility boxes; close each window to continue"
+        ),
     )
     args = parser.parse_args()
 
@@ -277,6 +405,8 @@ def main():
                 f"{generated.assessment.fire_envelope_clear_fraction:.3f} "
                 f"rejections={dict(generated.rejection_counts)}"
             )
+            if args.show_starts:
+                _show_start_views(generated)
 
             if args.verify_determinism:
                 repeated = generate_task_start(
