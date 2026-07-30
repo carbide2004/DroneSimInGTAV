@@ -45,12 +45,32 @@ instant:
 - `oblique`: pitch `-45 degrees`;
 - `nadir`: pitch `-90 degrees`.
 
-The canonical research action is a continuous relative-pose increment with a
-three-dimensional translation norm no greater than `2 m` and an absolute yaw
-increment no greater than `15 degrees`. One action advances exactly `250 ms`
-of GTA simulation time. The canonical horizon is 40 actions, or 10 seconds of
-simulation time. These research limits are separate from the `1 m / 15 degree`
-manual keyboard controls.
+The canonical research actions are mutually exclusive:
+
+- `TRANSLATE(dx_body, dy_body, dz_world)` changes position only, with a
+  three-dimensional translation norm no greater than `2 m`;
+- `ROTATE(dyaw)` changes yaw only, by no more than `15 degrees`;
+- `HOLD` keeps the pose fixed while acquiring the next observation;
+- `STOP(event_estimate_local)` terminates on the current frozen observation.
+
+`TRANSLATE`, `ROTATE`, and `HOLD` each advance exactly `250 ms` of GTA
+simulation time and produce a new dual-view observation. `STOP` consumes one
+action but does not advance simulation time. Translation and yaw rotation
+cannot occur in the same research action. The canonical horizon is 65 actions,
+including `STOP`. These limits are separate from the low-level absolute-pose
+API and the `1 m / 15 degree` manual keyboard controls.
+
+A valid consecutive dynamic cue uses the same ACTIVE response actor in two
+adjacent frozen observations. The actor must be task-observable in both,
+move at least `0.4 m` horizontally over the `250 ms` interval, and have a
+horizontal response-direction cosine of at least `0.5` relative to the event.
+Stage 2D requires this cue in the search rollout that establishes the witness.
+Independent replay strictly verifies action decomposition, camera poses,
+lockstep advancement, direct source observability, STOP, and localization.
+Whether an independently reconstructed GTA AI rollout presents the same cue
+at the same steps is reported as `cue_reproduced`; it is not a Stage 2D hard
+condition because blueprints do not promise frame-identical AI trajectories.
+Cross-rollout cue reliability is measured later as response-ecology evidence.
 
 The agent must express its event estimate in the start-local coordinate frame.
 An episode succeeds only when all of the following hold at the same terminal
@@ -105,13 +125,14 @@ lockstep and synchronized RGB-D
 flowchart LR
     subgraph Python["Python control and evaluation"]
         Agent["Agent environment"]
+        Actions["ResearchActionExecutor<br/>translate / rotate / hold / stop"]
         Validation["Online validation"]
         Pair["LockstepRgbdPair<br/>oblique + nadir"]
         Starts["TaskStartGenerator<br/>virtual viewpoints and local frame"]
         Relative["RelativePoseController<br/>body-frame delta to world pose"]
         Client["DroneSimClient<br/>strict DSV3 codec"]
 
-        Agent --> Relative --> Client
+        Agent --> Actions --> Relative --> Client
         Agent --> Pair --> Client
         Starts --> Client
         Validation --> Client
@@ -164,9 +185,10 @@ return a correlated result. Scenario preparation and maintenance advance from
 the per-frame runtime tick. RGB-D capture remains a separate render-thread
 pipeline, so scenario logic cannot manufacture or cache observations.
 
-`RelativePoseController` and Capture V3 form the agent-facing boundary.
-Scenario snapshots contain privileged event and entity truth for experiment
-control and evaluation; they must not be included in an agent observation.
+`ResearchActionExecutor` and the stripped dual-view observation form the
+agent-facing boundary. `RelativePoseController`, raw Capture V3 view matrices,
+scenario snapshots, and visibility truth are privileged runtime/evaluation
+interfaces and must not be included in an agent observation.
 
 ## Repository layout
 
@@ -185,6 +207,8 @@ DroneSim/                  GTA V ASI plugin
 agent_control/
   dronesim_client.py       strict Python client and relative-pose wrapper
   task_starts.py           evaluation-only starts and local task boundary
+  research_actions.py      mutually exclusive research actions
+  feasibility.py           Stage 2D bounded joint-witness search
   requirements.txt         online validation dependencies
 validation/
   rgbd_geometry.py
@@ -196,6 +220,7 @@ validation/
   validate_rgbd_yaw_sync.py
   validate_fire_scenario.py
   validate_visibility_starts.py
+  validate_spatiotemporal_feasibility.py
 ```
 
 ## Build and install
@@ -246,6 +271,13 @@ from agent_control.dronesim_client import (
     LockstepSession,
     RelativePoseController,
 )
+from agent_control.research_actions import (
+    HoldAction,
+    ResearchActionExecutor,
+    RotateAction,
+    StopAction,
+    TranslateAction,
+)
 
 client = DroneSimClient()
 client.create_camera()
@@ -263,10 +295,10 @@ actual = client.set_camera_pose(
     collision_check=False,
 )
 
-# Agent-facing wrapper: forward, right, vertical, yaw delta.
+# Low-level wrapper: forward, right, vertical, yaw delta.
 controller = RelativePoseController(client, collision_check=True)
 controller.synchronize()
-controller.step_relative(0.5, 0.0, 0.0, 10.0)
+controller.step_relative(0.5, 0.0, 0.0, 0.0)
 
 # A scene must be Reset while frozen before this context can exit.
 with LockstepSession(client) as lockstep:
@@ -275,6 +307,14 @@ with LockstepSession(client) as lockstep:
     oblique = views.oblique
     nadir = views.nadir
 ```
+
+`RelativePoseController` is a low-level utility and can still set translation
+and yaw together. Research agents must use `ResearchActionExecutor`, which
+rejects mixed translation/yaw actions, reserves one action for `STOP`, advances
+lockstep exactly once for every non-terminal action, and treats a zero-motion
+observation as an explicit `HoldAction`. Its agent result contains start-local
+odometry and RGB-D without the absolute world view matrices; raw pairs remain
+available only to evaluation code.
 
 All non-capture commands acknowledge only after the GTA script thread has
 executed them. The Python client contains no settling sleeps. A failed command
@@ -423,6 +463,7 @@ python validation\validate_lockstep_clock.py --anchor X Y Z
 python validation\validate_visibility_starts.py --anchor X Y Z
 python validation\validate_visibility_starts.py --anchor X Y Z --show-starts
 python validation\validate_visibility_starts.py --anchor X Y Z --queries 1000
+python validation\validate_spatiotemporal_feasibility.py --anchor X Y Z
 ```
 
 The lockstep validator also reuses one immutable scenario blueprint for a
@@ -479,8 +520,11 @@ The transport remains DSV3. Retained commands are:
 - enter/query/advance/exit the lockstep clock
 - query evaluation-only visibility from a virtual camera center
 - resolve a loaded, collision-clear task-start altitude
+- batch-probe 2-metre-clear camera points and segments
+- batch-query selected response targets from virtual camera centres
 - ping
 
 Capture V3 is unchanged. Visibility and start probing use message IDs 31 and
-32. Removed message IDs remain unsupported, with no compatibility fallback for
-the old scene, recording, or discrete-action interfaces.
+32. Stage 2D evaluation-only geometry and selected-target batches use message
+IDs 33 and 34. Removed message IDs remain unsupported, with no compatibility
+fallback for the old scene, recording, or discrete-action interfaces.

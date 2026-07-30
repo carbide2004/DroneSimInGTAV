@@ -1,6 +1,7 @@
 #include "visibility.h"
 
 #include "camera.h"
+#include "keyboard.h"
 #include "main.h"
 #include "natives.h"
 #include "scenario_manager.h"
@@ -25,6 +26,9 @@ constexpr float kDuplicatePointToleranceSquared = 1.0e-4f;
 constexpr float kFireEnvelopeRadiusMeters = 8.0f;
 constexpr float kFireEnvelopeHeightMeters = 25.0f;
 constexpr float kCameraClearanceRadiusMeters = 1.0f;
+constexpr float kProfileClearanceRadiusMeters = 2.0f;
+constexpr std::size_t kMaximumGeometryBatchItems = 256;
+constexpr std::size_t kMaximumTargetVisibilityCases = 64;
 constexpr float kPi = 3.14159265358979323846f;
 
 constexpr std::array<int, 8> kPedestrianBones = {
@@ -42,6 +46,18 @@ bool finite_vector(const ScenarioVector3& value) {
     return std::isfinite(value.x) &&
         std::isfinite(value.y) &&
         std::isfinite(value.z);
+}
+
+bool evaluation_interrupted(
+    const std::atomic<bool>& cancelled) {
+    if (cancelled.load(std::memory_order_acquire)) {
+        return true;
+    }
+    if (F11.consume_press()) {
+        SimulationClock::instance().request_emergency_recovery();
+        return true;
+    }
+    return false;
 }
 
 ScenarioVector3 to_scenario_vector(const Vector3& value) {
@@ -235,8 +251,8 @@ bool evaluate_raycasts(
     for (std::size_t offset = 0;
          offset < work_items.size();
          offset += kMaximumOutstandingRaycasts) {
-        if (cancelled.load(std::memory_order_acquire)) {
-            error = "Visibility query was cancelled";
+        if (evaluation_interrupted(cancelled)) {
+            error = "Visibility query was interrupted";
             return false;
         }
         const std::size_t count = (std::min)(
@@ -318,8 +334,8 @@ bool evaluate_raycasts(
                 work.completed = true;
             }
             if (!complete) {
-                if (cancelled.load(std::memory_order_acquire)) {
-                    error = "Visibility query was cancelled";
+                if (evaluation_interrupted(cancelled)) {
+                    error = "Visibility query was interrupted";
                     return false;
                 }
                 CameraController::instance()
@@ -334,8 +350,176 @@ bool evaluate_raycasts(
             return false;
         }
         if (offset + count < work_items.size()) {
-            if (cancelled.load(std::memory_order_acquire)) {
-                error = "Visibility query was cancelled";
+            if (evaluation_interrupted(cancelled)) {
+                error = "Visibility query was interrupted";
+                return false;
+            }
+            CameraController::instance()
+                .suppress_player_controls_for_frame();
+            WAIT(0);
+        }
+    }
+    return true;
+}
+
+bool build_entity_target(
+    const ScenarioEntitySnapshot& entity,
+    VisibilityTargetSnapshot& target,
+    std::string& error) {
+    switch (entity.role) {
+        case ScenarioEntityRole::FireSourceVehicle:
+            return build_vehicle_samples(
+                entity,
+                VisibilityTargetRole::FireSourceVehicle,
+                target,
+                error);
+        case ScenarioEntityRole::FireTruck:
+            return build_vehicle_samples(
+                entity,
+                VisibilityTargetRole::FireTruck,
+                target,
+                error);
+        case ScenarioEntityRole::FleeingPedestrian:
+            return build_pedestrian_samples(
+                entity,
+                target,
+                error);
+        case ScenarioEntityRole::FirefighterDriver:
+            error =
+                "Firefighter drivers are not visibility targets";
+            return false;
+        default:
+            error = "Scenario contains an unknown visibility role";
+            return false;
+    }
+}
+
+struct GeometryRaycastWork {
+    bool point = false;
+    std::size_t index = 0;
+    int handle = 0;
+    bool completed = false;
+};
+
+bool evaluate_geometry_batch(
+    const std::vector<ScenarioVector3>& points,
+    const std::vector<GeometrySegment>& segments,
+    const std::atomic<bool>& cancelled,
+    std::vector<bool>& point_clear,
+    std::vector<bool>& segment_clear,
+    std::string& error) {
+    point_clear.assign(points.size(), false);
+    segment_clear.assign(segments.size(), false);
+    const Ped player = PLAYER::PLAYER_PED_ID();
+    const std::size_t total = points.size() + segments.size();
+    for (std::size_t offset = 0;
+         offset < total;
+         offset += kMaximumOutstandingRaycasts) {
+        if (evaluation_interrupted(cancelled)) {
+            error = "Camera-geometry batch was interrupted";
+            return false;
+        }
+        const std::size_t count = (std::min)(
+            kMaximumOutstandingRaycasts,
+            total - offset);
+        std::vector<GeometryRaycastWork> batch;
+        batch.reserve(count);
+        for (std::size_t batch_index = 0;
+             batch_index < count;
+             ++batch_index) {
+            const std::size_t flat_index = offset + batch_index;
+            GeometryRaycastWork work;
+            ScenarioVector3 start;
+            ScenarioVector3 end;
+            if (flat_index < points.size()) {
+                work.point = true;
+                work.index = flat_index;
+                start = points[flat_index];
+                end = points[flat_index];
+                start.z -= 0.01f;
+                end.z += 0.01f;
+            } else {
+                work.index = flat_index - points.size();
+                start = segments[work.index].start;
+                end = segments[work.index].end;
+            }
+            work.handle = static_cast<int>(
+                WORLDPROBE::_CAST_3D_RAY_POINT_TO_POINT(
+                    start.x,
+                    start.y,
+                    start.z,
+                    end.x,
+                    end.y,
+                    end.z,
+                    kProfileClearanceRadiusMeters,
+                    1,
+                    player,
+                    kRaycastOption));
+            if (work.handle == 0) {
+                error =
+                    "GTA did not create camera-geometry shape test " +
+                    std::to_string(flat_index) + " of " +
+                    std::to_string(total);
+                return false;
+            }
+            batch.push_back(work);
+        }
+
+        bool complete = false;
+        for (int frame = 0;
+             frame < kMaximumRaycastFrames && !complete;
+             ++frame) {
+            complete = true;
+            for (GeometryRaycastWork& work : batch) {
+                if (work.completed) {
+                    continue;
+                }
+                BOOL hit = FALSE;
+                Vector3 hit_position{};
+                Vector3 hit_normal{};
+                Entity hit_entity = 0;
+                const int state = WORLDPROBE::_GET_RAYCAST_RESULT(
+                    work.handle,
+                    &hit,
+                    &hit_position,
+                    &hit_normal,
+                    &hit_entity);
+                if (state == 1) {
+                    complete = false;
+                    continue;
+                }
+                if (state != 2) {
+                    error =
+                        "GTA returned an invalid camera-geometry "
+                        "shape-test state";
+                    return false;
+                }
+                if (work.point) {
+                    point_clear[work.index] = hit != TRUE;
+                } else {
+                    segment_clear[work.index] = hit != TRUE;
+                }
+                work.completed = true;
+            }
+            if (!complete) {
+                if (evaluation_interrupted(cancelled)) {
+                    error = "Camera-geometry batch was interrupted";
+                    return false;
+                }
+                CameraController::instance()
+                    .suppress_player_controls_for_frame();
+                WAIT(0);
+            }
+        }
+        if (!complete) {
+            error =
+                "Camera-geometry shape tests did not complete within "
+                "eight render frames";
+            return false;
+        }
+        if (offset + count < total) {
+            if (evaluation_interrupted(cancelled)) {
+                error = "Camera-geometry batch was interrupted";
                 return false;
             }
             CameraController::instance()
@@ -472,10 +656,245 @@ VisibilityOperationStatus VisibilityEvaluator::query(
             cancelled,
             output.targets,
             error)) {
-        return cancelled.load(std::memory_order_acquire)
+        return cancelled.load(std::memory_order_acquire) ||
+                SimulationClock::instance()
+                    .emergency_recovery_requested()
             ? VisibilityOperationStatus::Interrupted
             : VisibilityOperationStatus::RaycastFailed;
     }
+    return VisibilityOperationStatus::Ok;
+}
+
+VisibilityOperationStatus
+VisibilityEvaluator::probe_camera_geometry_batch(
+    std::uint64_t lockstep_session_id,
+    const std::vector<ScenarioVector3>& points,
+    const std::vector<GeometrySegment>& segments,
+    const std::atomic<bool>& cancelled,
+    GeometryBatchSnapshot& output,
+    std::string& error) const {
+    const std::size_t total = points.size() + segments.size();
+    if (total == 0 || total > kMaximumGeometryBatchItems) {
+        error =
+            "Camera-geometry batch must contain 1..256 total items";
+        return VisibilityOperationStatus::InvalidRequest;
+    }
+    if (!CameraController::instance().is_active()) {
+        error =
+            "Camera-geometry batch requires an active scripted camera";
+        return VisibilityOperationStatus::InvalidRequest;
+    }
+    for (const ScenarioVector3& point : points) {
+        if (!finite_vector(point)) {
+            error =
+                "Camera-geometry batch contains a non-finite point";
+            return VisibilityOperationStatus::InvalidRequest;
+        }
+    }
+    for (const GeometrySegment& segment : segments) {
+        if (!finite_vector(segment.start) ||
+            !finite_vector(segment.end)) {
+            error =
+                "Camera-geometry batch contains a non-finite segment";
+            return VisibilityOperationStatus::InvalidRequest;
+        }
+    }
+
+    LockstepSnapshot before;
+    const LockstepOperationStatus before_status =
+        SimulationClock::instance().snapshot(
+            lockstep_session_id,
+            before,
+            error);
+    if (before_status != LockstepOperationStatus::Ok) {
+        return before_status ==
+                LockstepOperationStatus::SessionMismatch
+            ? VisibilityOperationStatus::LockstepSessionMismatch
+            : VisibilityOperationStatus::LockstepNotActive;
+    }
+
+    output = {};
+    output.lockstep_session_id = lockstep_session_id;
+    output.step_index = before.step_index;
+    output.game_timer_ms = before.game_timer_ms;
+    if (!evaluate_geometry_batch(
+            points,
+            segments,
+            cancelled,
+            output.point_clear,
+            output.segment_clear,
+            error)) {
+        return cancelled.load(std::memory_order_acquire) ||
+                SimulationClock::instance()
+                    .emergency_recovery_requested()
+            ? VisibilityOperationStatus::Interrupted
+            : VisibilityOperationStatus::RaycastFailed;
+    }
+
+    LockstepSnapshot after;
+    const LockstepOperationStatus after_status =
+        SimulationClock::instance().snapshot(
+            lockstep_session_id,
+            after,
+            error);
+    if (after_status != LockstepOperationStatus::Ok ||
+        after.step_index != before.step_index ||
+        after.game_timer_ms != before.game_timer_ms) {
+        if (after_status == LockstepOperationStatus::Ok) {
+            error =
+                "Lockstep instant changed during camera-geometry batch";
+        }
+        return VisibilityOperationStatus::GeometryInvalid;
+    }
+    output.frame_count = after.frame_count;
+    return VisibilityOperationStatus::Ok;
+}
+
+VisibilityOperationStatus
+VisibilityEvaluator::query_target_batch(
+    std::uint64_t scenario_id,
+    std::uint64_t lockstep_session_id,
+    const std::vector<TargetVisibilityCase>& cases,
+    const std::atomic<bool>& cancelled,
+    TargetVisibilityBatchSnapshot& output,
+    std::string& error) const {
+    if (cases.empty() ||
+        cases.size() > kMaximumTargetVisibilityCases) {
+        error =
+            "Target-visibility batch must contain 1..64 cases";
+        return VisibilityOperationStatus::InvalidRequest;
+    }
+    if (!CameraController::instance().is_active()) {
+        error =
+            "Target-visibility batch requires an active scripted camera";
+        return VisibilityOperationStatus::InvalidRequest;
+    }
+    for (const TargetVisibilityCase& item : cases) {
+        if (item.stable_id == 0 ||
+            !finite_vector(item.camera_center)) {
+            error =
+                "Target-visibility batch contains an invalid case";
+            return VisibilityOperationStatus::InvalidRequest;
+        }
+    }
+
+    LockstepSnapshot before;
+    const LockstepOperationStatus clock_status =
+        SimulationClock::instance().snapshot(
+            lockstep_session_id,
+            before,
+            error);
+    if (clock_status != LockstepOperationStatus::Ok) {
+        return clock_status ==
+                LockstepOperationStatus::SessionMismatch
+            ? VisibilityOperationStatus::LockstepSessionMismatch
+            : VisibilityOperationStatus::LockstepNotActive;
+    }
+
+    ScenarioSnapshot scenario;
+    const ScenarioOperationStatus scenario_status =
+        ScenarioManager::instance().snapshot(
+            scenario_id,
+            scenario,
+            error);
+    if (scenario_status != ScenarioOperationStatus::Ok) {
+        return VisibilityOperationStatus::ScenarioNotFound;
+    }
+    if (scenario.lifecycle != ScenarioLifecycle::Ready &&
+        scenario.lifecycle != ScenarioLifecycle::Running) {
+        error =
+            "Target-visibility batch requires a READY or RUNNING scenario";
+        return VisibilityOperationStatus::ScenarioNotReady;
+    }
+
+    Entity source_vehicle = 0;
+    for (const ScenarioEntitySnapshot& entity : scenario.entities) {
+        if (entity.role == ScenarioEntityRole::FireSourceVehicle &&
+            entity.exists &&
+            entity.gta_handle != 0 &&
+            ENTITY::DOES_ENTITY_EXIST(entity.gta_handle)) {
+            source_vehicle = entity.gta_handle;
+            break;
+        }
+    }
+    if (source_vehicle == 0) {
+        error = "Scenario has no live fire-source vehicle";
+        return VisibilityOperationStatus::GeometryInvalid;
+    }
+
+    output = {};
+    output.scenario_id = scenario_id;
+    output.lockstep_session_id = lockstep_session_id;
+    output.step_index = before.step_index;
+    output.game_timer_ms = before.game_timer_ms;
+    output.cases.reserve(cases.size());
+    for (const TargetVisibilityCase& item : cases) {
+        if (evaluation_interrupted(cancelled)) {
+            error = "Target-visibility batch was interrupted";
+            return VisibilityOperationStatus::Interrupted;
+        }
+        const auto found = std::find_if(
+            scenario.entities.begin(),
+            scenario.entities.end(),
+            [&](const ScenarioEntitySnapshot& entity) {
+                return entity.stable_id == item.stable_id;
+            });
+        if (found == scenario.entities.end()) {
+            error =
+                "Target-visibility stable ID was not found: " +
+                std::to_string(item.stable_id);
+            return VisibilityOperationStatus::GeometryInvalid;
+        }
+        if (!found->exists ||
+            found->gta_handle == 0 ||
+            !ENTITY::DOES_ENTITY_EXIST(found->gta_handle)) {
+            error =
+                "Target-visibility entity is not live: " +
+                std::to_string(item.stable_id);
+            return VisibilityOperationStatus::GeometryInvalid;
+        }
+
+        TargetVisibilityCaseSnapshot result;
+        result.stable_id = item.stable_id;
+        result.camera_center = item.camera_center;
+        if (!build_entity_target(*found, result.target, error)) {
+            return VisibilityOperationStatus::GeometryInvalid;
+        }
+        std::vector<VisibilityTargetSnapshot> targets;
+        targets.push_back(result.target);
+        if (!evaluate_raycasts(
+                item.camera_center,
+                PLAYER::PLAYER_PED_ID(),
+                source_vehicle,
+                cancelled,
+                targets,
+                error)) {
+            return cancelled.load(std::memory_order_acquire) ||
+                    SimulationClock::instance()
+                        .emergency_recovery_requested()
+                ? VisibilityOperationStatus::Interrupted
+                : VisibilityOperationStatus::RaycastFailed;
+        }
+        result.target = std::move(targets.front());
+        output.cases.push_back(std::move(result));
+    }
+
+    LockstepSnapshot after;
+    const LockstepOperationStatus after_status =
+        SimulationClock::instance().snapshot(
+            lockstep_session_id,
+            after,
+            error);
+    if (after_status != LockstepOperationStatus::Ok ||
+        after.step_index != before.step_index ||
+        after.game_timer_ms != before.game_timer_ms) {
+        if (after_status == LockstepOperationStatus::Ok) {
+            error =
+                "Lockstep instant changed during target-visibility batch";
+        }
+        return VisibilityOperationStatus::GeometryInvalid;
+    }
+    output.frame_count = after.frame_count;
     return VisibilityOperationStatus::Ok;
 }
 

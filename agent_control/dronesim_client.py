@@ -34,6 +34,8 @@ TYPE_ADVANCE_LOCKSTEP = 29
 TYPE_EXIT_LOCKSTEP = 30
 TYPE_QUERY_VISIBILITY = 31
 TYPE_PROBE_CAMERA_START = 32
+TYPE_PROBE_CAMERA_GEOMETRY_BATCH = 33
+TYPE_QUERY_TARGET_VISIBILITY_BATCH = 34
 
 COMMAND_STATUS = {
     0: "OK",
@@ -251,6 +253,39 @@ class VisibilitySnapshot:
     frame_count: int
     camera_center: tuple
     targets: tuple
+
+
+@dataclass(frozen=True)
+class GeometryBatchSnapshot:
+    lockstep_session_id: int
+    step_index: int
+    game_timer_ms: int
+    frame_count: int
+    point_clear: tuple
+    segment_clear: tuple
+
+
+@dataclass(frozen=True)
+class TargetVisibilityCase:
+    stable_id: int
+    camera_center: tuple
+
+
+@dataclass(frozen=True)
+class TargetVisibilityCaseSnapshot:
+    stable_id: int
+    camera_center: tuple
+    target: VisibilityTarget
+
+
+@dataclass(frozen=True)
+class TargetVisibilityBatchSnapshot:
+    scenario_id: int
+    lockstep_session_id: int
+    step_index: int
+    game_timer_ms: int
+    frame_count: int
+    cases: tuple
 
 
 @dataclass(frozen=True)
@@ -745,6 +780,118 @@ def _decode_visibility_snapshot(payload):
         frame_count=frame_count,
         camera_center=camera_center,
         targets=tuple(targets),
+    )
+
+
+def _decode_geometry_batch_snapshot(payload):
+    reader = _PayloadReader(payload)
+    lockstep_session_id, step_index = reader.unpack("<QQ")
+    game_timer_ms, frame_count, point_count, segment_count = (
+        reader.unpack("<4I")
+    )
+    if (
+        lockstep_session_id == 0
+        or point_count + segment_count == 0
+        or point_count + segment_count > 256
+    ):
+        raise DroneSimProtocolError(
+            "Camera-geometry batch declares invalid identity or counts"
+        )
+    point_values = reader.unpack(f"<{point_count}B") if point_count else ()
+    segment_values = (
+        reader.unpack(f"<{segment_count}B") if segment_count else ()
+    )
+    if any(value not in (0, 1) for value in point_values + segment_values):
+        raise DroneSimProtocolError(
+            "Camera-geometry batch contains a non-boolean result"
+        )
+    reader.finish()
+    return GeometryBatchSnapshot(
+        lockstep_session_id=lockstep_session_id,
+        step_index=step_index,
+        game_timer_ms=game_timer_ms,
+        frame_count=frame_count,
+        point_clear=tuple(bool(value) for value in point_values),
+        segment_clear=tuple(bool(value) for value in segment_values),
+    )
+
+
+def _decode_target_visibility_batch_snapshot(payload):
+    reader = _PayloadReader(payload)
+    scenario_id, lockstep_session_id, step_index = reader.unpack("<QQQ")
+    game_timer_ms, frame_count, case_count = reader.unpack("<3I")
+    if (
+        scenario_id == 0
+        or lockstep_session_id == 0
+        or case_count == 0
+        or case_count > 64
+    ):
+        raise DroneSimProtocolError(
+            "Target-visibility batch declares invalid identity or count"
+        )
+    cases = []
+    for _ in range(case_count):
+        stable_id = reader.unpack("<Q")[0]
+        camera_center = _finite_tuple(
+            "target-visibility camera center",
+            reader.unpack("<3f"),
+        )
+        gta_handle, role_value, sample_count = reader.unpack("<iII")
+        if stable_id == 0 or gta_handle == 0:
+            raise DroneSimProtocolError(
+                "Target-visibility case contains a zero entity identity"
+            )
+        try:
+            role = VisibilityTargetRole(role_value)
+        except ValueError as error:
+            raise DroneSimProtocolError(
+                f"Unknown target-visibility role {role_value}"
+            ) from error
+        if role == VisibilityTargetRole.FIRE_ENVELOPE:
+            raise DroneSimProtocolError(
+                "Target-visibility batch cannot contain the fire envelope"
+            )
+        if sample_count == 0 or sample_count > 64:
+            raise DroneSimProtocolError(
+                "Target-visibility case declares an invalid sample count"
+            )
+        samples = []
+        for _ in range(sample_count):
+            x, y, z, clear_value, hit_entity = reader.unpack("<3fBi")
+            if clear_value not in (0, 1):
+                raise DroneSimProtocolError(
+                    "Target-visibility line-of-sight is not boolean"
+                )
+            samples.append(
+                VisibilitySample(
+                    position=_finite_tuple(
+                        "target-visibility sample position",
+                        (x, y, z),
+                    ),
+                    clear_line_of_sight=bool(clear_value),
+                    hit_entity=hit_entity,
+                )
+            )
+        cases.append(
+            TargetVisibilityCaseSnapshot(
+                stable_id=stable_id,
+                camera_center=camera_center,
+                target=VisibilityTarget(
+                    stable_id=stable_id,
+                    gta_handle=gta_handle,
+                    role=role,
+                    samples=tuple(samples),
+                ),
+            )
+        )
+    reader.finish()
+    return TargetVisibilityBatchSnapshot(
+        scenario_id=scenario_id,
+        lockstep_session_id=lockstep_session_id,
+        step_index=step_index,
+        game_timer_ms=game_timer_ms,
+        frame_count=frame_count,
+        cases=tuple(cases),
     )
 
 
@@ -1398,6 +1545,193 @@ class DroneSimClient:
             ),
             float(ground_z),
         )
+
+    def probe_camera_geometry_batch(
+        self,
+        lockstep_session_id,
+        points=(),
+        segments=(),
+        timeout=None,
+    ):
+        lockstep_session_id = int(lockstep_session_id)
+        if not 0 < lockstep_session_id <= 0xFFFFFFFFFFFFFFFF:
+            raise ValueError(
+                "lockstep_session_id must be a non-zero uint64"
+            )
+        normalized_points = []
+        for point in points:
+            try:
+                x, y, z = point
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "Each geometry point must contain exactly three values"
+                ) from error
+            _require_finite(x, y, z)
+            normalized_points.append((float(x), float(y), float(z)))
+        normalized_segments = []
+        for segment in segments:
+            try:
+                start, end = segment
+                x0, y0, z0 = start
+                x1, y1, z1 = end
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "Each geometry segment must contain two 3D endpoints"
+                ) from error
+            _require_finite(x0, y0, z0, x1, y1, z1)
+            normalized_segments.append(
+                (
+                    float(x0),
+                    float(y0),
+                    float(z0),
+                    float(x1),
+                    float(y1),
+                    float(z1),
+                )
+            )
+        total = len(normalized_points) + len(normalized_segments)
+        if not 1 <= total <= 256:
+            raise ValueError(
+                "Geometry batch must contain 1..256 total items"
+            )
+        payload = bytearray(
+            struct.pack(
+                "<QII",
+                lockstep_session_id,
+                len(normalized_points),
+                len(normalized_segments),
+            )
+        )
+        for point in normalized_points:
+            payload.extend(struct.pack("<3f", *point))
+        for segment in normalized_segments:
+            payload.extend(struct.pack("<6f", *segment))
+        snapshot = _decode_geometry_batch_snapshot(
+            self._command(
+                TYPE_PROBE_CAMERA_GEOMETRY_BATCH,
+                bytes(payload),
+                timeout=timeout,
+            )
+        )
+        if snapshot.lockstep_session_id != lockstep_session_id:
+            raise DroneSimProtocolError(
+                "Camera-geometry response session does not match request"
+            )
+        if (
+            len(snapshot.point_clear) != len(normalized_points)
+            or len(snapshot.segment_clear) != len(normalized_segments)
+        ):
+            raise DroneSimProtocolError(
+                "Camera-geometry response counts do not match request"
+            )
+        return snapshot
+
+    def query_target_visibility_batch(
+        self,
+        scenario_id,
+        lockstep_session_id,
+        cases,
+        timeout=None,
+    ):
+        scenario_id = int(scenario_id)
+        lockstep_session_id = int(lockstep_session_id)
+        if (
+            not 0 < scenario_id <= 0xFFFFFFFFFFFFFFFF
+            or not 0 < lockstep_session_id <= 0xFFFFFFFFFFFFFFFF
+        ):
+            raise ValueError(
+                "scenario_id and lockstep_session_id must be "
+                "non-zero uint64 values"
+            )
+        normalized_cases = []
+        for item in cases:
+            if isinstance(item, TargetVisibilityCase):
+                stable_id = int(item.stable_id)
+                camera_center = item.camera_center
+            else:
+                try:
+                    stable_id, camera_center = item
+                except (TypeError, ValueError) as error:
+                    raise ValueError(
+                        "Each target-visibility case must contain "
+                        "stable_id and camera_center"
+                    ) from error
+                stable_id = int(stable_id)
+            if not 0 < stable_id <= 0xFFFFFFFFFFFFFFFF:
+                raise ValueError(
+                    "Target stable_id must be a non-zero uint64"
+                )
+            try:
+                x, y, z = camera_center
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "Target camera_center must contain three values"
+                ) from error
+            _require_finite(x, y, z)
+            normalized_cases.append(
+                TargetVisibilityCase(
+                    stable_id=stable_id,
+                    camera_center=(
+                        float(x),
+                        float(y),
+                        float(z),
+                    ),
+                )
+            )
+        if not 1 <= len(normalized_cases) <= 64:
+            raise ValueError(
+                "Target-visibility batch must contain 1..64 cases"
+            )
+        payload = bytearray(
+            struct.pack(
+                "<QQI",
+                scenario_id,
+                lockstep_session_id,
+                len(normalized_cases),
+            )
+        )
+        for item in normalized_cases:
+            payload.extend(
+                struct.pack(
+                    "<Q3f",
+                    item.stable_id,
+                    *item.camera_center,
+                )
+            )
+        snapshot = _decode_target_visibility_batch_snapshot(
+            self._command(
+                TYPE_QUERY_TARGET_VISIBILITY_BATCH,
+                bytes(payload),
+                timeout=timeout,
+            )
+        )
+        if (
+            snapshot.scenario_id != scenario_id
+            or snapshot.lockstep_session_id != lockstep_session_id
+            or len(snapshot.cases) != len(normalized_cases)
+        ):
+            raise DroneSimProtocolError(
+                "Target-visibility response identity/count does not "
+                "match request"
+            )
+        for requested, returned in zip(
+            normalized_cases,
+            snapshot.cases,
+        ):
+            if (
+                requested.stable_id != returned.stable_id
+                or any(
+                    abs(left - right) > 1.0e-3
+                    for left, right in zip(
+                        requested.camera_center,
+                        returned.camera_center,
+                    )
+                )
+            ):
+                raise DroneSimProtocolError(
+                    "Target-visibility response order does not match request"
+                )
+        return snapshot
 
     def capture(self, timeout_ms=5000):
         timeout_ms = int(timeout_ms)

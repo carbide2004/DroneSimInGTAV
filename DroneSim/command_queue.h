@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 enum class RuntimeCommandType {
     CreateCamera,
@@ -36,6 +37,8 @@ enum class RuntimeCommandType {
     ExitLockstep,
     QueryVisibility,
     ProbeCameraStart,
+    ProbeCameraGeometryBatch,
+    QueryTargetVisibilityBatch,
 };
 
 enum class RuntimeCommandStatus : std::uint32_t {
@@ -86,6 +89,8 @@ struct RuntimeCommandResult {
     ScenarioStartInfo scenario_start;
     LockstepSnapshot lockstep_snapshot;
     VisibilitySnapshot visibility_snapshot;
+    GeometryBatchSnapshot geometry_batch_snapshot;
+    TargetVisibilityBatchSnapshot target_visibility_batch_snapshot;
     CameraStartProbe camera_start_probe;
     std::uint64_t value = 0;
     bool bool_value = false;
@@ -105,6 +110,9 @@ struct RuntimeCommand {
     std::uint64_t scenario_id = 0;
     std::uint64_t lockstep_session_id = 0;
     ScenarioVector3 visibility_camera_center;
+    std::vector<ScenarioVector3> geometry_points;
+    std::vector<GeometrySegment> geometry_segments;
+    std::vector<TargetVisibilityCase> target_visibility_cases;
 
     std::atomic<bool> cancelled{false};
     std::mutex completion_mutex;

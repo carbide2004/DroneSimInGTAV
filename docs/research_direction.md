@@ -72,3 +72,19 @@ occlusion and visibility truth, followed by spatiotemporal cue accessibility
 and goal-view reachability before response-ecology measurement. Neither
 diagnostic is called full task solvability. The old static anomaly generators
 and oracle collection code must not be restored.
+
+The research action budget uses four mutually exclusive actions. Translation
+changes only position, yaw rotation changes only yaw, HOLD changes neither
+while advancing one 250 ms simulation step, and STOP terminates from the
+current observation. A policy cannot translate and rotate in one action. The
+canonical horizon is 65 actions including STOP.
+A valid consecutive response cue requires the same ACTIVE actor to remain
+task-observable across two adjacent observations, move at least 0.4 metres
+horizontally, and agree with its expected event-relative direction by a
+horizontal cosine of at least 0.5.
+Stage 2D establishes that cue inside the search rollout. Independent replay
+keeps camera, action, clock, direct-goal, STOP, and localization checks strict,
+while reporting same-step cue reproduction as a diagnostic because GTA AI
+trajectories are not specified to be frame-identical across reconstructed
+rollouts. Cross-rollout cue reliability belongs to response-ecology
+measurement.

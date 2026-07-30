@@ -54,6 +54,8 @@ public:
         std::string& error);
 
     bool is_active() const;
+    void request_emergency_recovery();
+    bool emergency_recovery_requested() const;
     bool take_emergency_recovery_request();
     void force_exit();
 

@@ -497,6 +497,36 @@ RuntimeCommandResult execute_command(const RuntimeCommand& command) {
             result.message = error;
             return result;
         }
+        case RuntimeCommandType::ProbeCameraGeometryBatch: {
+            RuntimeCommandResult result = ok_result();
+            const VisibilityOperationStatus status =
+                VisibilityEvaluator::instance()
+                    .probe_camera_geometry_batch(
+                        command.lockstep_session_id,
+                        command.geometry_points,
+                        command.geometry_segments,
+                        command.cancelled,
+                        result.geometry_batch_snapshot,
+                        error);
+            result.status = map_visibility_status(status);
+            result.message = error;
+            return result;
+        }
+        case RuntimeCommandType::QueryTargetVisibilityBatch: {
+            RuntimeCommandResult result = ok_result();
+            const VisibilityOperationStatus status =
+                VisibilityEvaluator::instance()
+                    .query_target_batch(
+                        command.scenario_id,
+                        command.lockstep_session_id,
+                        command.target_visibility_cases,
+                        command.cancelled,
+                        result.target_visibility_batch_snapshot,
+                        error);
+            result.status = map_visibility_status(status);
+            result.message = error;
+            return result;
+        }
         default:
             return error_result(
                 RuntimeCommandStatus::InvalidRequest,

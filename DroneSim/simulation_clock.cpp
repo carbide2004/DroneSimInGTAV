@@ -334,6 +334,14 @@ bool SimulationClock::is_active() const {
     return phase_ != LockstepPhase::Inactive;
 }
 
+void SimulationClock::request_emergency_recovery() {
+    emergency_recovery_requested_ = true;
+}
+
+bool SimulationClock::emergency_recovery_requested() const {
+    return emergency_recovery_requested_;
+}
+
 bool SimulationClock::take_emergency_recovery_request() {
     const bool requested = emergency_recovery_requested_;
     emergency_recovery_requested_ = false;

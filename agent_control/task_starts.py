@@ -27,7 +27,7 @@ from .dronesim_client import (
 TASK_MAX_TRANSLATION_METERS = 2.0
 TASK_MAX_YAW_DEGREES = 15.0
 TASK_STEP_MILLISECONDS = 250
-TASK_HORIZON_STEPS = 40
+TASK_HORIZON_STEPS = 65
 TASK_ACTIVITY_RADIUS_METERS = 120.0
 TASK_ACTIVITY_VERTICAL_METERS = 40.0
 TASK_MIN_EVENT_DISTANCE_METERS = 60.0
@@ -38,6 +38,7 @@ TASK_MIN_PROJECTED_SPAN_PIXELS = 24.0
 TASK_MIN_CLEAR_SAMPLES = 4
 TASK_IMAGE_BORDER_MARGIN_PIXELS = 12.0
 TASK_LOCALIZATION_TOLERANCE_METERS = 5.0
+TASK_MIN_CUE_HORIZONTAL_DISPLACEMENT_METERS = 0.4
 TASK_MAX_START_CANDIDATES = 256
 
 
@@ -130,6 +131,9 @@ class TaskActionSpec:
     max_yaw_degrees: float = TASK_MAX_YAW_DEGREES
     simulation_step_ms: int = TASK_STEP_MILLISECONDS
     horizon_steps: int = TASK_HORIZON_STEPS
+    translation_and_yaw_are_mutually_exclusive: bool = True
+    hold_advances_simulation: bool = True
+    stop_consumes_action: bool = True
 
 
 @dataclass(frozen=True)
@@ -305,6 +309,15 @@ class TaskRelativePoseController:
         self._client.set_camera_pitch(OBLIQUE_PITCH_DEGREES)
         return self.odometry
 
+    def synchronize(self):
+        pose = self._client.get_pose()
+        if not self._blueprint.contains_world_position(pose[:3]):
+            raise RuntimeError(
+                "Current camera pose lies outside the task activity bounds"
+            )
+        self._absolute_pose = pose
+        return self.odometry
+
     @property
     def odometry(self):
         if self._absolute_pose is None:
@@ -358,6 +371,13 @@ class TaskRelativePoseController:
             )
         if abs(values[3]) > action_spec.max_yaw_degrees + 1.0e-9:
             raise ValueError("Task action exceeds the yaw limit")
+        if translation > 1.0e-9 and abs(values[3]) > 1.0e-9:
+            raise ValueError(
+                "INVALID_TASK_ACTION: translation and yaw rotation "
+                "cannot share one research action"
+            )
+        if translation <= 1.0e-9 and abs(values[3]) <= 1.0e-9:
+            return self.odometry
 
         x, y, z, _pitch, _roll, yaw = self._absolute_pose
         yaw_radians = math.radians(yaw)
@@ -752,6 +772,7 @@ def generate_task_start(
         "source_vehicle_visible": 0,
         "fire_envelope_observable": 0,
         "stratum_mismatch": 0,
+        "real_camera_mismatch": 0,
     }
     selected = None
     event = np.asarray(
@@ -815,12 +836,49 @@ def generate_task_start(
         ):
             rejection_counts["stratum_mismatch"] += 1
             continue
+        with client._operation_lock:
+            client.set_camera_pose(
+                position[0],
+                position[1],
+                position[2],
+                yaw,
+                collision_check=False,
+            )
+            client.set_camera_pitch(OBLIQUE_PITCH_DEGREES)
+            pair = session.capture_rgbd_pair()
+            _require_observation_spec(pair, observation_spec)
+            actual_pose = client.get_pose()
+            actual_visibility = client.query_visibility(
+                scenario.scenario_id,
+                session.session_id,
+                actual_pose[:3],
+                timeout=30.0,
+            )
+        _require_visibility_instant(
+            actual_visibility,
+            pair.clock,
+        )
+        actual_assessment = assess_visibility(
+            actual_visibility,
+            pair_view_matrices(pair),
+            observation_spec,
+        )
+        if not _stratum_matches(
+            visibility_stratum,
+            actual_assessment,
+        ):
+            rejection_counts["real_camera_mismatch"] += 1
+            continue
         selected = (
             candidate_index,
             position,
             ground_z,
             altitude_agl,
             yaw,
+            pair,
+            actual_pose,
+            actual_visibility,
+            actual_assessment,
         )
         break
 
@@ -840,42 +898,11 @@ def generate_task_start(
         ground_z,
         altitude_agl,
         yaw,
-    ) = selected
-    with client._operation_lock:
-        client.set_camera_pose(
-            position[0],
-            position[1],
-            position[2],
-            yaw,
-            collision_check=False,
-        )
-        client.set_camera_pitch(OBLIQUE_PITCH_DEGREES)
-        pair = session.capture_rgbd_pair()
-        _require_observation_spec(pair, observation_spec)
-        actual_pose = client.get_pose()
-        actual_visibility = client.query_visibility(
-            scenario.scenario_id,
-            session.session_id,
-            actual_pose[:3],
-            timeout=30.0,
-        )
-    _require_visibility_instant(
+        pair,
+        actual_pose,
         actual_visibility,
-        pair.clock,
-    )
-    actual_assessment = assess_visibility(
-        actual_visibility,
-        pair_view_matrices(pair),
-        observation_spec,
-    )
-    if not _stratum_matches(
-        visibility_stratum,
         actual_assessment,
-    ):
-        raise TaskStartGenerationError(
-            "Selected virtual task start failed the real-camera "
-            "visibility verification"
-        )
+    ) = selected
 
     horizontal_distance = math.hypot(
         float(position[0] - event[0]),

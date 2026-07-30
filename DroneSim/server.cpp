@@ -312,6 +312,73 @@ std::vector<unsigned char> visibility_snapshot_bytes(
     return data;
 }
 
+std::vector<unsigned char> geometry_batch_snapshot_bytes(
+    const GeometryBatchSnapshot& snapshot) {
+    std::vector<unsigned char> data;
+    data.reserve(
+        36 +
+        snapshot.point_clear.size() +
+        snapshot.segment_clear.size());
+    append_scalar(data, snapshot.lockstep_session_id);
+    append_scalar(data, snapshot.step_index);
+    append_scalar(data, snapshot.game_timer_ms);
+    append_scalar(data, snapshot.frame_count);
+    append_scalar(
+        data,
+        static_cast<std::uint32_t>(snapshot.point_clear.size()));
+    append_scalar(
+        data,
+        static_cast<std::uint32_t>(snapshot.segment_clear.size()));
+    for (bool clear : snapshot.point_clear) {
+        data.push_back(clear ? 1 : 0);
+    }
+    for (bool clear : snapshot.segment_clear) {
+        data.push_back(clear ? 1 : 0);
+    }
+    return data;
+}
+
+std::vector<unsigned char> target_visibility_batch_snapshot_bytes(
+    const TargetVisibilityBatchSnapshot& snapshot) {
+    std::vector<unsigned char> data;
+    std::size_t sample_count = 0;
+    for (const TargetVisibilityCaseSnapshot& item : snapshot.cases) {
+        sample_count += item.target.samples.size();
+    }
+    data.reserve(
+        36 +
+        snapshot.cases.size() * 36 +
+        sample_count * 17);
+    append_scalar(data, snapshot.scenario_id);
+    append_scalar(data, snapshot.lockstep_session_id);
+    append_scalar(data, snapshot.step_index);
+    append_scalar(data, snapshot.game_timer_ms);
+    append_scalar(data, snapshot.frame_count);
+    append_scalar(
+        data,
+        static_cast<std::uint32_t>(snapshot.cases.size()));
+    for (const TargetVisibilityCaseSnapshot& item : snapshot.cases) {
+        append_scalar(data, item.stable_id);
+        append_vector3(data, item.camera_center);
+        append_scalar(data, item.target.gta_handle);
+        append_scalar(
+            data,
+            static_cast<std::uint32_t>(item.target.role));
+        append_scalar(
+            data,
+            static_cast<std::uint32_t>(
+                item.target.samples.size()));
+        for (const VisibilitySampleSnapshot& sample :
+             item.target.samples) {
+            append_vector3(data, sample.position);
+            data.push_back(
+                sample.clear_line_of_sight ? 1 : 0);
+            append_scalar(data, sample.hit_entity);
+        }
+    }
+    return data;
+}
+
 bool empty_payload(
     const std::vector<unsigned char>& payload,
     RuntimeCommandResult& error) {
@@ -800,6 +867,181 @@ void Server::handle_client() {
                     append_scalar(
                         data,
                         result.camera_start_probe.ground_z);
+                }
+                break;
+            }
+            case MSG_PROBE_CAMERA_GEOMETRY_BATCH: {
+                constexpr std::size_t fixed_size =
+                    sizeof(std::uint64_t) +
+                    sizeof(std::uint32_t) * 2;
+                if (payload.size() < fixed_size) {
+                    result = invalid_request(
+                        "PROBE_CAMERA_GEOMETRY_BATCH payload is "
+                        "shorter than its header");
+                    break;
+                }
+                std::uint64_t session_id = 0;
+                std::uint32_t point_count = 0;
+                std::uint32_t segment_count = 0;
+                read_scalar(payload, 0, session_id);
+                read_scalar(
+                    payload,
+                    sizeof(std::uint64_t),
+                    point_count);
+                read_scalar(
+                    payload,
+                    sizeof(std::uint64_t) +
+                        sizeof(std::uint32_t),
+                    segment_count);
+                const std::uint64_t total =
+                    static_cast<std::uint64_t>(point_count) +
+                    static_cast<std::uint64_t>(segment_count);
+                const std::uint64_t expected_size =
+                    fixed_size +
+                    static_cast<std::uint64_t>(point_count) *
+                        sizeof(float) * 3 +
+                    static_cast<std::uint64_t>(segment_count) *
+                        sizeof(float) * 6;
+                if (total == 0 ||
+                    total > 256 ||
+                    expected_size != payload.size()) {
+                    result = invalid_request(
+                        "PROBE_CAMERA_GEOMETRY_BATCH expects 1..256 "
+                        "declared points and segments");
+                    break;
+                }
+                auto command = make_runtime_command(
+                    RuntimeCommandType::ProbeCameraGeometryBatch,
+                    header.request_id);
+                command->lockstep_session_id = session_id;
+                command->geometry_points.reserve(point_count);
+                command->geometry_segments.reserve(segment_count);
+                std::size_t offset = fixed_size;
+                for (std::uint32_t index = 0;
+                     index < point_count;
+                     ++index) {
+                    ScenarioVector3 point;
+                    read_scalar(payload, offset, point.x);
+                    read_scalar(
+                        payload,
+                        offset + sizeof(float),
+                        point.y);
+                    read_scalar(
+                        payload,
+                        offset + sizeof(float) * 2,
+                        point.z);
+                    offset += sizeof(float) * 3;
+                    command->geometry_points.push_back(point);
+                }
+                for (std::uint32_t index = 0;
+                     index < segment_count;
+                     ++index) {
+                    GeometrySegment segment;
+                    read_scalar(payload, offset, segment.start.x);
+                    read_scalar(
+                        payload,
+                        offset + sizeof(float),
+                        segment.start.y);
+                    read_scalar(
+                        payload,
+                        offset + sizeof(float) * 2,
+                        segment.start.z);
+                    read_scalar(
+                        payload,
+                        offset + sizeof(float) * 3,
+                        segment.end.x);
+                    read_scalar(
+                        payload,
+                        offset + sizeof(float) * 4,
+                        segment.end.y);
+                    read_scalar(
+                        payload,
+                        offset + sizeof(float) * 5,
+                        segment.end.z);
+                    offset += sizeof(float) * 6;
+                    command->geometry_segments.push_back(segment);
+                }
+                result = run_command(
+                    command,
+                    std::chrono::milliseconds(30000));
+                if (result.status == RuntimeCommandStatus::Ok) {
+                    data = geometry_batch_snapshot_bytes(
+                        result.geometry_batch_snapshot);
+                }
+                break;
+            }
+            case MSG_QUERY_TARGET_VISIBILITY_BATCH: {
+                constexpr std::size_t fixed_size =
+                    sizeof(std::uint64_t) * 2 +
+                    sizeof(std::uint32_t);
+                constexpr std::size_t case_size =
+                    sizeof(std::uint64_t) +
+                    sizeof(float) * 3;
+                if (payload.size() < fixed_size) {
+                    result = invalid_request(
+                        "QUERY_TARGET_VISIBILITY_BATCH payload is "
+                        "shorter than its header");
+                    break;
+                }
+                std::uint64_t scenario_id = 0;
+                std::uint64_t session_id = 0;
+                std::uint32_t case_count = 0;
+                read_scalar(payload, 0, scenario_id);
+                read_scalar(
+                    payload,
+                    sizeof(std::uint64_t),
+                    session_id);
+                read_scalar(
+                    payload,
+                    sizeof(std::uint64_t) * 2,
+                    case_count);
+                const std::uint64_t expected_size =
+                    fixed_size +
+                    static_cast<std::uint64_t>(case_count) *
+                        case_size;
+                if (case_count == 0 ||
+                    case_count > 64 ||
+                    expected_size != payload.size()) {
+                    result = invalid_request(
+                        "QUERY_TARGET_VISIBILITY_BATCH expects 1..64 "
+                        "declared target-pose cases");
+                    break;
+                }
+                auto command = make_runtime_command(
+                    RuntimeCommandType::QueryTargetVisibilityBatch,
+                    header.request_id);
+                command->scenario_id = scenario_id;
+                command->lockstep_session_id = session_id;
+                command->target_visibility_cases.reserve(case_count);
+                std::size_t offset = fixed_size;
+                for (std::uint32_t index = 0;
+                     index < case_count;
+                     ++index) {
+                    TargetVisibilityCase item;
+                    read_scalar(payload, offset, item.stable_id);
+                    read_scalar(
+                        payload,
+                        offset + sizeof(std::uint64_t),
+                        item.camera_center.x);
+                    read_scalar(
+                        payload,
+                        offset + sizeof(std::uint64_t) +
+                            sizeof(float),
+                        item.camera_center.y);
+                    read_scalar(
+                        payload,
+                        offset + sizeof(std::uint64_t) +
+                            sizeof(float) * 2,
+                        item.camera_center.z);
+                    offset += case_size;
+                    command->target_visibility_cases.push_back(item);
+                }
+                result = run_command(
+                    command,
+                    std::chrono::milliseconds(30000));
+                if (result.status == RuntimeCommandStatus::Ok) {
+                    data = target_visibility_batch_snapshot_bytes(
+                        result.target_visibility_batch_snapshot);
                 }
                 break;
             }

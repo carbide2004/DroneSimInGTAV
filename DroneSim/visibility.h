@@ -64,6 +64,40 @@ struct VisibilitySnapshot {
     std::vector<VisibilityTargetSnapshot> targets;
 };
 
+struct GeometrySegment {
+    ScenarioVector3 start;
+    ScenarioVector3 end;
+};
+
+struct GeometryBatchSnapshot {
+    std::uint64_t lockstep_session_id = 0;
+    std::uint64_t step_index = 0;
+    std::uint32_t game_timer_ms = 0;
+    std::uint32_t frame_count = 0;
+    std::vector<bool> point_clear;
+    std::vector<bool> segment_clear;
+};
+
+struct TargetVisibilityCase {
+    std::uint64_t stable_id = 0;
+    ScenarioVector3 camera_center;
+};
+
+struct TargetVisibilityCaseSnapshot {
+    std::uint64_t stable_id = 0;
+    ScenarioVector3 camera_center;
+    VisibilityTargetSnapshot target;
+};
+
+struct TargetVisibilityBatchSnapshot {
+    std::uint64_t scenario_id = 0;
+    std::uint64_t lockstep_session_id = 0;
+    std::uint64_t step_index = 0;
+    std::uint32_t game_timer_ms = 0;
+    std::uint32_t frame_count = 0;
+    std::vector<TargetVisibilityCaseSnapshot> cases;
+};
+
 class VisibilityEvaluator {
 public:
     static VisibilityEvaluator& instance();
@@ -74,6 +108,20 @@ public:
         const ScenarioVector3& camera_center,
         const std::atomic<bool>& cancelled,
         VisibilitySnapshot& output,
+        std::string& error) const;
+    VisibilityOperationStatus probe_camera_geometry_batch(
+        std::uint64_t lockstep_session_id,
+        const std::vector<ScenarioVector3>& points,
+        const std::vector<GeometrySegment>& segments,
+        const std::atomic<bool>& cancelled,
+        GeometryBatchSnapshot& output,
+        std::string& error) const;
+    VisibilityOperationStatus query_target_batch(
+        std::uint64_t scenario_id,
+        std::uint64_t lockstep_session_id,
+        const std::vector<TargetVisibilityCase>& cases,
+        const std::atomic<bool>& cancelled,
+        TargetVisibilityBatchSnapshot& output,
         std::string& error) const;
     CameraStartProbeStatus probe_camera_start(
         float x,
