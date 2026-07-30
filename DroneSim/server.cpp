@@ -274,6 +274,44 @@ std::vector<unsigned char> scenario_snapshot_bytes(
     return data;
 }
 
+std::vector<unsigned char> visibility_snapshot_bytes(
+    const VisibilitySnapshot& snapshot) {
+    std::vector<unsigned char> data;
+    std::size_t sample_count = 0;
+    for (const VisibilityTargetSnapshot& target : snapshot.targets) {
+        sample_count += target.samples.size();
+    }
+    data.reserve(
+        48 +
+        snapshot.targets.size() * 24 +
+        sample_count * 17);
+    append_scalar(data, snapshot.scenario_id);
+    append_scalar(data, snapshot.lockstep_session_id);
+    append_scalar(data, snapshot.step_index);
+    append_scalar(data, snapshot.game_timer_ms);
+    append_scalar(data, snapshot.frame_count);
+    append_vector3(data, snapshot.camera_center);
+    append_scalar(
+        data,
+        static_cast<std::uint32_t>(snapshot.targets.size()));
+    for (const VisibilityTargetSnapshot& target : snapshot.targets) {
+        append_scalar(data, target.stable_id);
+        append_scalar(data, target.gta_handle);
+        append_scalar(
+            data,
+            static_cast<std::uint32_t>(target.role));
+        append_scalar(
+            data,
+            static_cast<std::uint32_t>(target.samples.size()));
+        for (const VisibilitySampleSnapshot& sample : target.samples) {
+            append_vector3(data, sample.position);
+            data.push_back(sample.clear_line_of_sight ? 1 : 0);
+            append_scalar(data, sample.hit_entity);
+        }
+    }
+    return data;
+}
+
 bool empty_payload(
     const std::vector<unsigned char>& payload,
     RuntimeCommandResult& error) {
@@ -693,6 +731,75 @@ void Server::handle_client() {
                     header.type != MSG_EXIT_LOCKSTEP) {
                     data = lockstep_snapshot_bytes(
                         result.lockstep_snapshot);
+                }
+                break;
+            }
+            case MSG_QUERY_VISIBILITY: {
+                constexpr std::size_t expected_size =
+                    sizeof(std::uint64_t) * 2 +
+                    sizeof(float) * 3;
+                if (payload.size() != expected_size) {
+                    result = invalid_request(
+                        "QUERY_VISIBILITY expects scenario_id uint64, "
+                        "session_id uint64, and camera_center float32[3]");
+                    break;
+                }
+                auto command = make_runtime_command(
+                    RuntimeCommandType::QueryVisibility,
+                    header.request_id);
+                read_scalar(payload, 0, command->scenario_id);
+                read_scalar(
+                    payload,
+                    sizeof(std::uint64_t),
+                    command->lockstep_session_id);
+                read_scalar(
+                    payload,
+                    sizeof(std::uint64_t) * 2,
+                    command->visibility_camera_center.x);
+                read_scalar(
+                    payload,
+                    sizeof(std::uint64_t) * 2 + sizeof(float),
+                    command->visibility_camera_center.y);
+                read_scalar(
+                    payload,
+                    sizeof(std::uint64_t) * 2 + sizeof(float) * 2,
+                    command->visibility_camera_center.z);
+                result = run_command(
+                    command,
+                    std::chrono::milliseconds(30000));
+                if (result.status == RuntimeCommandStatus::Ok) {
+                    data = visibility_snapshot_bytes(
+                        result.visibility_snapshot);
+                }
+                break;
+            }
+            case MSG_PROBE_CAMERA_START: {
+                if (payload.size() != sizeof(float) * 3) {
+                    result = invalid_request(
+                        "PROBE_CAMERA_START expects X, Y, and altitude "
+                        "AGL as float32");
+                    break;
+                }
+                auto command = make_runtime_command(
+                    RuntimeCommandType::ProbeCameraStart,
+                    header.request_id);
+                read_scalar(payload, 0, command->floats[0]);
+                read_scalar(
+                    payload,
+                    sizeof(float),
+                    command->floats[1]);
+                read_scalar(
+                    payload,
+                    sizeof(float) * 2,
+                    command->floats[2]);
+                result = run_command(command);
+                if (result.status == RuntimeCommandStatus::Ok) {
+                    append_vector3(
+                        data,
+                        result.camera_start_probe.position);
+                    append_scalar(
+                        data,
+                        result.camera_start_probe.ground_z);
                 }
                 break;
             }

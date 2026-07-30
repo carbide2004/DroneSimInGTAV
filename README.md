@@ -10,6 +10,94 @@ simulation instant.
 The research direction is hidden-event localization from event-induced dynamic
 responses. See [docs/research_direction.md](docs/research_direction.md).
 
+## Strict research task definition
+
+This project studies hidden-event localization from event-induced dynamic
+responses. It is not oracle ObjectNav: the agent is never given the event
+coordinate, a goal bearing, GTA entity handles, scenario truth, visibility
+truth, or a world-coordinate camera matrix.
+
+An episode starts from a scripted-camera pose whose local coordinate frame is:
+
+- origin at the initial camera center;
+- positive X along the initial body-forward direction;
+- positive Y along the initial body-right direction;
+- positive Z along GTA world up.
+
+The first observation is acquired at `t = 250 ms` after the controlled
+responses start. At the start, every geometry sample on the fire-source
+vehicle must be physically occluded from the camera center. The fixed
+`8 m` radius, `25 m` high fire/smoke envelope may have partial line of sight,
+but it must not be task-observable in either named view. Its clear-sample
+fraction is retained as diagnostic truth. Initial conditions are reported
+separately:
+
+- `CUE_VISIBLE`: the source vehicle is physically occluded, the fire/smoke
+  envelope is not task-observable, and at least one affiliated response actor
+  is task-observable;
+- `CUE_HIDDEN`: the source vehicle is physically occluded, the fire/smoke
+  envelope is not task-observable, and all affiliated response actors are
+  initially not task-observable.
+
+Each observation contains synchronized metric RGB-D from one frozen simulation
+instant:
+
+- `oblique`: pitch `-45 degrees`;
+- `nadir`: pitch `-90 degrees`.
+
+The canonical research action is a continuous relative-pose increment with a
+three-dimensional translation norm no greater than `2 m` and an absolute yaw
+increment no greater than `15 degrees`. One action advances exactly `250 ms`
+of GTA simulation time. The canonical horizon is 40 actions, or 10 seconds of
+simulation time. These research limits are separate from the `1 m / 15 degree`
+manual keyboard controls.
+
+The agent must express its event estimate in the start-local coordinate frame.
+An episode succeeds only when all of the following hold at the same terminal
+step:
+
+```text
+the agent issues STOP
+AND the fire-source vehicle is task-observable in the final RGB-D observation
+AND the agent provides a finite start-local 3D event coordinate
+AND its world-space 3D Euclidean error is at most 5 m
+```
+
+The fire must be active at the terminal step. Seeing only a distant smoke
+column is not sufficient terminal confirmation. `task-observable` means that
+the target has at least two unoccluded in-frustum geometry samples and a
+projected bounding span of at least 12 pixels in either named view.
+
+The following terms are deliberately distinct:
+
+- `InitialVisibility`: what is observable at the first frozen observation;
+- `CueAccessible`: whether response evidence can be reached while it remains
+  useful;
+- `GoalViewReachable`: whether the action budget permits a viewpoint that
+  directly observes the fire-source vehicle;
+- `TaskSuccess`: the strict terminal condition above.
+
+Initial visibility, cue accessibility, and goal-view reachability are necessary
+diagnostics, not proofs that the task is solvable. Stage 2C implements
+visibility truth and task-start generation only. Stage 2D evaluates
+spatiotemporal cue accessibility and goal-view reachability. Full task
+solvability is tested later with an observation-only belief policy and the
+strict terminal condition; it is never inferred merely from two observations
+of a moving actor.
+
+The research sequence is:
+
+```text
+lockstep and synchronized RGB-D
+  -> dual-view observation
+  -> visibility truth and task starts
+  -> spatiotemporal cue accessibility and goal-view reachability
+  -> response-ecology statistics
+  -> paired counterfactual interventions
+  -> explicit belief baseline
+  -> learned temporal models and structured Awareness
+```
+
 ## Architecture
 
 ```mermaid
@@ -18,11 +106,13 @@ flowchart LR
         Agent["Agent environment"]
         Validation["Online validation"]
         Pair["LockstepRgbdPair<br/>oblique + nadir"]
+        Starts["TaskStartGenerator<br/>virtual viewpoints and local frame"]
         Relative["RelativePoseController<br/>body-frame delta to world pose"]
         Client["DroneSimClient<br/>strict DSV3 codec"]
 
         Agent --> Relative --> Client
         Agent --> Pair --> Client
+        Starts --> Client
         Validation --> Client
     end
 
@@ -35,11 +125,14 @@ flowchart LR
         Manager["ScenarioManager"]
         Fire["FireScenario"]
         Truth["EntityRegistry<br/>structured response truth"]
+        Visibility["VisibilityEvaluator<br/>virtual LOS geometry"]
 
         Server --> Queue --> Script
         Script --> Camera
         Script --> Clock
         Script --> Manager --> Fire --> Truth
+        Script --> Visibility
+        Manager --> Visibility
     end
 
     subgraph Capture["Synchronized RGB-D pipeline"]
@@ -61,6 +154,7 @@ flowchart LR
     Script -->|"same-frame camera metadata"| Present
     Worker -->|"frame ID, RGB, depth, matrices"| Server
     Truth -.->|"evaluation only"| Validation
+    Visibility -.->|"evaluation only"| Starts
 ```
 
 The network thread never calls GTA natives directly. It validates each request,
@@ -84,10 +178,12 @@ DroneSim/                  GTA V ASI plugin
   simulation_clock.*       lockstep session and fixed 250 ms advances
   fire_scenario.*          asynchronous controlled fire experiment
   entity_registry.*        stable entity IDs and response truth
+  visibility.*             virtual-viewpoint occlusion geometry
   script.*                 minimal GTA script runtime
   server.*                 DSV3 TCP protocol server
 agent_control/
   dronesim_client.py       strict Python client and relative-pose wrapper
+  task_starts.py           evaluation-only starts and local task boundary
   requirements.txt         online validation dependencies
 validation/
   rgbd_geometry.py
@@ -98,6 +194,7 @@ validation/
   validate_rgbd_stability.py
   validate_rgbd_yaw_sync.py
   validate_fire_scenario.py
+  validate_visibility_starts.py
 ```
 
 ## Build and install
@@ -322,6 +419,8 @@ python validation\validate_fire_scenario.py --anchor X Y Z --rgbd-captures 1000
 python validation\validate_fire_scenario.py --anchor X Y Z --require-clean-area
 python validation\validate_fire_scenario.py --anchor X Y Z --verify-seed-isolation
 python validation\validate_lockstep_clock.py --anchor X Y Z
+python validation\validate_visibility_starts.py --anchor X Y Z
+python validation\validate_visibility_starts.py --anchor X Y Z --queries 1000
 ```
 
 The lockstep validator also reuses one immutable scenario blueprint for a
@@ -375,8 +474,11 @@ The transport remains DSV3. Retained commands are:
 - teleport/protect and restore the player
 - synchronized RGB-D capture
 - prepare/query/start/reset a controlled fire scenario
+- enter/query/advance/exit the lockstep clock
+- query evaluation-only visibility from a virtual camera center
+- resolve a loaded, collision-clear task-start altitude
 - ping
 
-Capture V3 is unchanged. The fire lifecycle uses new message IDs 22 through
-25. Removed message IDs remain unsupported, with no compatibility fallback
-for the old scene, recording, or discrete-action interfaces.
+Capture V3 is unchanged. Visibility and start probing use message IDs 31 and
+32. Removed message IDs remain unsupported, with no compatibility fallback for
+the old scene, recording, or discrete-action interfaces.

@@ -2,6 +2,7 @@
 
 #include "scenario_types.h"
 #include "simulation_clock.h"
+#include "visibility.h"
 
 #include <array>
 #include <atomic>
@@ -33,6 +34,8 @@ enum class RuntimeCommandType {
     GetLockstepState,
     AdvanceLockstep,
     ExitLockstep,
+    QueryVisibility,
+    ProbeCameraStart,
 };
 
 enum class RuntimeCommandStatus : std::uint32_t {
@@ -58,6 +61,12 @@ enum class RuntimeCommandStatus : std::uint32_t {
     LockstepAdvanceTimeout = 19,
     LockstepInterrupted = 20,
     LockstepClockInvariantFailed = 21,
+    VisibilityGeometryInvalid = 22,
+    VisibilityRaycastFailed = 23,
+    VisibilityInterrupted = 24,
+    StartGroundNotFound = 25,
+    StartSpaceBlocked = 26,
+    StartProbeFailed = 27,
 };
 
 struct RuntimePose {
@@ -76,6 +85,8 @@ struct RuntimeCommandResult {
     ScenarioSnapshot scenario_snapshot;
     ScenarioStartInfo scenario_start;
     LockstepSnapshot lockstep_snapshot;
+    VisibilitySnapshot visibility_snapshot;
+    CameraStartProbe camera_start_probe;
     std::uint64_t value = 0;
     bool bool_value = false;
 };
@@ -93,6 +104,7 @@ struct RuntimeCommand {
     FireScenarioConfig fire_scenario_config;
     std::uint64_t scenario_id = 0;
     std::uint64_t lockstep_session_id = 0;
+    ScenarioVector3 visibility_camera_center;
 
     std::atomic<bool> cancelled{false};
     std::mutex completion_mutex;

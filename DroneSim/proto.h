@@ -24,6 +24,8 @@ enum MsgType : std::uint8_t {
     MSG_GET_LOCKSTEP_STATE = 28,
     MSG_ADVANCE_LOCKSTEP = 29,
     MSG_EXIT_LOCKSTEP = 30,
+    MSG_QUERY_VISIBILITY = 31,
+    MSG_PROBE_CAMERA_START = 32,
 };
 
 struct MsgHeader {

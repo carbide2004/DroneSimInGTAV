@@ -10,6 +10,7 @@
 #include "scenario_manager.h"
 #include "server.h"
 #include "simulation_clock.h"
+#include "visibility.h"
 
 #include <chrono>
 #include <cmath>
@@ -107,6 +108,52 @@ RuntimeCommandStatus map_lockstep_status(
     }
 }
 
+RuntimeCommandStatus map_visibility_status(
+    VisibilityOperationStatus status) {
+    switch (status) {
+        case VisibilityOperationStatus::Ok:
+            return RuntimeCommandStatus::Ok;
+        case VisibilityOperationStatus::InvalidRequest:
+            return RuntimeCommandStatus::InvalidRequest;
+        case VisibilityOperationStatus::ScenarioNotFound:
+            return RuntimeCommandStatus::ScenarioNotFound;
+        case VisibilityOperationStatus::ScenarioNotReady:
+            return RuntimeCommandStatus::ScenarioNotReady;
+        case VisibilityOperationStatus::LockstepNotActive:
+            return RuntimeCommandStatus::LockstepNotActive;
+        case VisibilityOperationStatus::LockstepSessionMismatch:
+            return RuntimeCommandStatus::LockstepSessionMismatch;
+        case VisibilityOperationStatus::GeometryInvalid:
+            return RuntimeCommandStatus::VisibilityGeometryInvalid;
+        case VisibilityOperationStatus::RaycastFailed:
+            return RuntimeCommandStatus::VisibilityRaycastFailed;
+        case VisibilityOperationStatus::Interrupted:
+            return RuntimeCommandStatus::VisibilityInterrupted;
+        default:
+            return RuntimeCommandStatus::InternalError;
+    }
+}
+
+RuntimeCommandStatus map_camera_start_probe_status(
+    CameraStartProbeStatus status) {
+    switch (status) {
+        case CameraStartProbeStatus::Ok:
+            return RuntimeCommandStatus::Ok;
+        case CameraStartProbeStatus::InvalidRequest:
+            return RuntimeCommandStatus::InvalidRequest;
+        case CameraStartProbeStatus::GroundNotFound:
+            return RuntimeCommandStatus::StartGroundNotFound;
+        case CameraStartProbeStatus::SpaceBlocked:
+            return RuntimeCommandStatus::StartSpaceBlocked;
+        case CameraStartProbeStatus::RaycastFailed:
+            return RuntimeCommandStatus::StartProbeFailed;
+        case CameraStartProbeStatus::Interrupted:
+            return RuntimeCommandStatus::VisibilityInterrupted;
+        default:
+            return RuntimeCommandStatus::InternalError;
+    }
+}
+
 RuntimeCommandResult submit_capture_camera(std::uint64_t request_id) {
     if (!CameraController::instance().is_active()) {
         return error_result(
@@ -174,6 +221,7 @@ RuntimeCommandResult teleport_player(const RuntimeCommand& command) {
     PLAYER::SET_PLAYER_INVINCIBLE(PLAYER::PLAYER_ID(), TRUE);
     ENTITY::SET_ENTITY_VISIBLE(player, FALSE, FALSE);
     ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, FALSE);
+    ENTITY::SET_ENTITY_COLLISION(player, FALSE, FALSE);
     ENTITY::SET_ENTITY_PROOFS(
         player,
         TRUE,
@@ -187,6 +235,7 @@ RuntimeCommandResult teleport_player(const RuntimeCommand& command) {
     PLAYER::SET_MAX_WANTED_LEVEL(0);
     PLAYER::SET_POLICE_IGNORE_PLAYER(PLAYER::PLAYER_ID(), TRUE);
     ENTITY::SET_ENTITY_COORDS(player, x, y, z, TRUE, FALSE, FALSE, TRUE);
+    ENTITY::FREEZE_ENTITY_POSITION(player, TRUE);
 
     const auto deadline =
         std::chrono::steady_clock::now() +
@@ -220,6 +269,8 @@ RuntimeCommandResult restore_player() {
     PLAYER::SET_PLAYER_INVINCIBLE(PLAYER::PLAYER_ID(), FALSE);
     ENTITY::SET_ENTITY_VISIBLE(player, TRUE, FALSE);
     ENTITY::SET_ENTITY_CAN_BE_DAMAGED(player, TRUE);
+    ENTITY::FREEZE_ENTITY_POSITION(player, FALSE);
+    ENTITY::SET_ENTITY_COLLISION(player, TRUE, TRUE);
     ENTITY::SET_ENTITY_PROOFS(
         player,
         FALSE,
@@ -415,6 +466,34 @@ RuntimeCommandResult execute_command(const RuntimeCommand& command) {
                     command.lockstep_session_id,
                     error);
             result.status = map_lockstep_status(status);
+            result.message = error;
+            return result;
+        }
+        case RuntimeCommandType::QueryVisibility: {
+            RuntimeCommandResult result = ok_result();
+            const VisibilityOperationStatus status =
+                VisibilityEvaluator::instance().query(
+                    command.scenario_id,
+                    command.lockstep_session_id,
+                    command.visibility_camera_center,
+                    command.cancelled,
+                    result.visibility_snapshot,
+                    error);
+            result.status = map_visibility_status(status);
+            result.message = error;
+            return result;
+        }
+        case RuntimeCommandType::ProbeCameraStart: {
+            RuntimeCommandResult result = ok_result();
+            const CameraStartProbeStatus status =
+                VisibilityEvaluator::instance().probe_camera_start(
+                    command.floats[0],
+                    command.floats[1],
+                    command.floats[2],
+                    command.cancelled,
+                    result.camera_start_probe,
+                    error);
+            result.status = map_camera_start_probe_status(status);
             result.message = error;
             return result;
         }

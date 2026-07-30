@@ -32,6 +32,8 @@ TYPE_ENTER_LOCKSTEP = 27
 TYPE_GET_LOCKSTEP_STATE = 28
 TYPE_ADVANCE_LOCKSTEP = 29
 TYPE_EXIT_LOCKSTEP = 30
+TYPE_QUERY_VISIBILITY = 31
+TYPE_PROBE_CAMERA_START = 32
 
 COMMAND_STATUS = {
     0: "OK",
@@ -56,6 +58,12 @@ COMMAND_STATUS = {
     19: "LOCKSTEP_ADVANCE_TIMEOUT",
     20: "LOCKSTEP_INTERRUPTED",
     21: "LOCKSTEP_CLOCK_INVARIANT_FAILED",
+    22: "VISIBILITY_GEOMETRY_INVALID",
+    23: "VISIBILITY_RAYCAST_FAILED",
+    24: "VISIBILITY_INTERRUPTED",
+    25: "START_GROUND_NOT_FOUND",
+    26: "START_SPACE_BLOCKED",
+    27: "START_PROBE_FAILED",
 }
 
 CAPTURE_STATUS = {
@@ -140,6 +148,13 @@ class ScenarioTaskState(IntEnum):
     LOST = 5
 
 
+class VisibilityTargetRole(IntEnum):
+    FIRE_SOURCE_VEHICLE = 1
+    FIRE_ENVELOPE = 2
+    FIRE_TRUCK = 3
+    FLEEING_PEDESTRIAN = 4
+
+
 @dataclass(frozen=True)
 class ScenarioEntitySnapshot:
     stable_id: int
@@ -210,6 +225,32 @@ class LockstepSnapshot:
     last_advance_ms: int
     render_frames: int
     max_frame_time_ms: float
+
+
+@dataclass(frozen=True)
+class VisibilitySample:
+    position: tuple
+    clear_line_of_sight: bool
+    hit_entity: int
+
+
+@dataclass(frozen=True)
+class VisibilityTarget:
+    stable_id: int
+    gta_handle: int
+    role: VisibilityTargetRole
+    samples: tuple
+
+
+@dataclass(frozen=True)
+class VisibilitySnapshot:
+    scenario_id: int
+    lockstep_session_id: int
+    step_index: int
+    game_timer_ms: int
+    frame_count: int
+    camera_center: tuple
+    targets: tuple
 
 
 @dataclass(frozen=True)
@@ -601,6 +642,109 @@ def _decode_lockstep_snapshot(payload):
         last_advance_ms=last_advance_ms,
         render_frames=render_frames,
         max_frame_time_ms=float(max_frame_time_ms),
+    )
+
+
+def _decode_visibility_snapshot(payload):
+    reader = _PayloadReader(payload)
+    (
+        scenario_id,
+        lockstep_session_id,
+        step_index,
+    ) = reader.unpack("<QQQ")
+    game_timer_ms, frame_count = reader.unpack("<II")
+    camera_center = _finite_tuple(
+        "visibility camera center",
+        reader.unpack("<3f"),
+    )
+    (target_count,) = reader.unpack("<I")
+    if target_count == 0 or target_count > (
+        2 + MAX_FIRETRUCK_COUNT + MAX_PEDESTRIAN_COUNT
+    ):
+        raise DroneSimProtocolError(
+            f"Visibility declares invalid target count {target_count}"
+        )
+
+    targets = []
+    stable_ids = set()
+    envelope_count = 0
+    for _ in range(target_count):
+        (
+            stable_id,
+            gta_handle,
+            role_value,
+            sample_count,
+        ) = reader.unpack("<QiII")
+        try:
+            role = VisibilityTargetRole(role_value)
+        except ValueError as error:
+            raise DroneSimProtocolError(
+                f"Unknown visibility target role {role_value}"
+            ) from error
+        if role == VisibilityTargetRole.FIRE_ENVELOPE:
+            envelope_count += 1
+            if stable_id != 0 or gta_handle != 0:
+                raise DroneSimProtocolError(
+                    "Fire envelope must not declare an entity identity"
+                )
+        else:
+            if stable_id == 0 or stable_id in stable_ids:
+                raise DroneSimProtocolError(
+                    f"Invalid visibility stable ID {stable_id}"
+                )
+            if gta_handle == 0:
+                raise DroneSimProtocolError(
+                    "Entity visibility target has a zero GTA handle"
+                )
+            stable_ids.add(stable_id)
+        if sample_count == 0 or sample_count > 64:
+            raise DroneSimProtocolError(
+                f"Visibility target declares {sample_count} samples"
+            )
+        samples = []
+        for _ in range(sample_count):
+            x, y, z, clear_value, hit_entity = reader.unpack(
+                "<3fBi"
+            )
+            if clear_value not in (0, 1):
+                raise DroneSimProtocolError(
+                    "Visibility clear_line_of_sight is not boolean"
+                )
+            samples.append(
+                VisibilitySample(
+                    position=_finite_tuple(
+                        "visibility sample position",
+                        (x, y, z),
+                    ),
+                    clear_line_of_sight=bool(clear_value),
+                    hit_entity=hit_entity,
+                )
+            )
+        targets.append(
+            VisibilityTarget(
+                stable_id=stable_id,
+                gta_handle=gta_handle,
+                role=role,
+                samples=tuple(samples),
+            )
+        )
+    reader.finish()
+    if envelope_count != 1:
+        raise DroneSimProtocolError(
+            f"Visibility declares {envelope_count} fire envelopes"
+        )
+    if scenario_id == 0 or lockstep_session_id == 0:
+        raise DroneSimProtocolError(
+            "Visibility snapshot has a zero scenario/session ID"
+        )
+    return VisibilitySnapshot(
+        scenario_id=scenario_id,
+        lockstep_session_id=lockstep_session_id,
+        step_index=step_index,
+        game_timer_ms=game_timer_ms,
+        frame_count=frame_count,
+        camera_center=camera_center,
+        targets=tuple(targets),
     )
 
 
@@ -1183,6 +1327,77 @@ class DroneSimClient:
             raise DroneSimProtocolError(
                 "EXIT_LOCKSTEP returned unexpected data"
             )
+
+    def query_visibility(
+        self,
+        scenario_id,
+        lockstep_session_id,
+        camera_center,
+        timeout=None,
+    ):
+        scenario_id = int(scenario_id)
+        lockstep_session_id = int(lockstep_session_id)
+        if scenario_id <= 0 or lockstep_session_id <= 0:
+            raise ValueError(
+                "scenario_id and lockstep_session_id must be positive"
+            )
+        try:
+            x, y, z = camera_center
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "camera_center must contain exactly three values"
+            ) from error
+        _require_finite(x, y, z)
+        payload = struct.pack(
+            "<QQ3f",
+            scenario_id,
+            lockstep_session_id,
+            float(x),
+            float(y),
+            float(z),
+        )
+        data = self._command(
+            TYPE_QUERY_VISIBILITY,
+            payload,
+            timeout=timeout,
+        )
+        snapshot = _decode_visibility_snapshot(data)
+        if (
+            snapshot.scenario_id != scenario_id
+            or snapshot.lockstep_session_id
+            != lockstep_session_id
+        ):
+            raise DroneSimProtocolError(
+                "Visibility response identity does not match request"
+            )
+        return snapshot
+
+    def probe_camera_start(self, x, y, altitude_agl):
+        _require_finite(x, y, altitude_agl)
+        altitude_agl = float(altitude_agl)
+        if altitude_agl <= 0:
+            raise ValueError("altitude_agl must be positive")
+        data = self._command(
+            TYPE_PROBE_CAMERA_START,
+            struct.pack(
+                "<3f",
+                float(x),
+                float(y),
+                altitude_agl,
+            ),
+        )
+        if len(data) != struct.calcsize("<4f"):
+            raise DroneSimProtocolError(
+                "PROBE_CAMERA_START returned an invalid payload size"
+            )
+        px, py, pz, ground_z = struct.unpack("<4f", data)
+        return (
+            _finite_tuple(
+                "camera-start position",
+                (px, py, pz),
+            ),
+            float(ground_z),
+        )
 
     def capture(self, timeout_ms=5000):
         timeout_ms = int(timeout_ms)
