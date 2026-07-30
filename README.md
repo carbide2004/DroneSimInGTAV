@@ -221,6 +221,8 @@ validation/
   validate_fire_scenario.py
   validate_visibility_starts.py
   validate_spatiotemporal_feasibility.py
+  trajectory_recording.py
+  visualize_spatiotemporal_trajectory.py
 ```
 
 ## Build and install
@@ -442,8 +444,10 @@ response trajectories.
 
 ## Online validation
 
-Every validation consumes RGB-D in memory. No image, depth map, video, PLY,
-PCD, or point cloud is written to disk.
+Every validation consumes RGB-D in memory. By default no image, depth map,
+video, PLY, PCD, point cloud, or trajectory is written to disk. Stage 2D has
+an explicit optional recording mode for visual inspection; it stores
+compressed RGB JPEGs and compact JSON metadata, never raw Depth or RGB-D.
 
 ```powershell
 python validation\validate_camera_lifecycle.py
@@ -464,7 +468,18 @@ python validation\validate_visibility_starts.py --anchor X Y Z
 python validation\validate_visibility_starts.py --anchor X Y Z --show-starts
 python validation\validate_visibility_starts.py --anchor X Y Z --queries 1000
 python validation\validate_spatiotemporal_feasibility.py --anchor X Y Z
+python validation\validate_spatiotemporal_feasibility.py --anchor X Y Z --record-dir recordings\stage2d_run
+python validation\visualize_spatiotemporal_trajectory.py recordings\stage2d_run
 ```
+
+`--record-dir` must name a path that does not already exist. A successful run
+creates `CUE_VISIBLE` and `CUE_HIDDEN` subdirectories. Each contains the
+actual replay's oblique/nadir JPEG sequence and `trajectory.json` with the
+current action, world/start-local camera pose, lockstep time, entity truth,
+and projected target boxes. The offline player connects to no GTA process.
+It plays both strata in sequence by default; use
+`--stratum CUE_VISIBLE` or `--stratum CUE_HIDDEN` to select one. Space
+pauses, Left/Right steps, Home/End jumps, and Q closes the window.
 
 The lockstep validator also reuses one immutable scenario blueprint for a
 continuous realtime run and a matched `250 ms` lockstep run. It compares

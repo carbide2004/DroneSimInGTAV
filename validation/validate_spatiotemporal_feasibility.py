@@ -42,13 +42,17 @@ from agent_control.task_starts import (  # noqa: E402
     generate_task_start,
     pair_view_matrices,
 )
+from validation.trajectory_recording import (  # noqa: E402
+    TrajectoryRecorder,
+    write_json,
+)
 
 
 def _parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Find and replay a bounded Stage 2D cue-to-goal witness. "
-            "No RGB-D or trajectory payload is written to disk."
+            "No payload is written unless --record-dir is provided."
         )
     )
     parser.add_argument(
@@ -68,6 +72,19 @@ def _parse_args():
     parser.add_argument("--port", type=int, default=23456)
     parser.add_argument("--show-witness", action="store_true")
     parser.add_argument("--verify-determinism", action="store_true")
+    parser.add_argument(
+        "--record-dir",
+        type=Path,
+        help=(
+            "Write compressed replay RGB and visualization metadata "
+            "for both visibility strata to a new directory"
+        ),
+    )
+    parser.add_argument(
+        "--record-jpeg-quality",
+        type=int,
+        default=85,
+    )
     args = parser.parse_args()
     if not all(math.isfinite(value) for value in args.anchor):
         parser.error("--anchor values must be finite")
@@ -81,6 +98,8 @@ def _parse_args():
         parser.error("--pedestrians must be in [0, 32]")
     if args.firetrucks + args.pedestrians == 0:
         parser.error("At least one response actor is required")
+    if not 1 <= args.record_jpeg_quality <= 95:
+        parser.error("--record-jpeg-quality must be in [1, 95]")
     return args
 
 
@@ -311,6 +330,47 @@ def _observable_roles(client, session, scenario_id, pair):
     return roles
 
 
+def _record_current_observation(
+    recorder,
+    client,
+    session,
+    scenario_id,
+    executor,
+    action,
+):
+    pair = executor.current_pair
+    pose = client.get_pose()
+    scenario = client.get_scenario_state(scenario_id)
+    visibility = client.query_visibility(
+        scenario_id,
+        session.session_id,
+        pose[:3],
+        timeout=30.0,
+    )
+    if (
+        visibility.lockstep_session_id != pair.clock.session_id
+        or visibility.step_index != pair.clock.step_index
+        or visibility.game_timer_ms != pair.clock.game_timer_ms
+    ):
+        raise RuntimeError(
+            "Trajectory annotation does not belong to the RGB instant"
+        )
+    assessment = assess_visibility(
+        visibility,
+        pair_view_matrices(pair),
+        ObservationSpec.from_pair(pair),
+    )
+    recorder.record(
+        executor.action_count,
+        action,
+        pair,
+        pose,
+        executor.odometry,
+        scenario,
+        assessment,
+    )
+
+
 def _direction_cosine(previous, current, role, event_position):
     displacement = (
         np.asarray(current.position[:2], dtype=np.float64)
@@ -430,11 +490,21 @@ def _validate_replay_cue_pose(actual_pose, expected_pose, label):
         )
 
 
-def _replay(client, args, blueprint_id, generated, report):
+def _replay(
+    client,
+    args,
+    blueprint_id,
+    generated,
+    report,
+    recording_root=None,
+):
     replay_started = time.perf_counter()
     witness = report.witness
     scenario_id = None
     session = None
+    recorder = None
+    replay_error = None
+    cue_reproduced = None
     try:
         scenario_id = client.prepare_fire_scenario(
             args.anchor,
@@ -465,6 +535,14 @@ def _replay(client, args, blueprint_id, generated, report):
             generated.blueprint,
             collision_check=True,
         )
+        if recording_root is not None:
+            recorder = TrajectoryRecorder(
+                Path(recording_root)
+                / report.visibility_stratum.name,
+                report,
+                generated,
+                jpeg_quality=args.record_jpeg_quality,
+            )
         invalid_pose = client.get_pose()
         invalid_clock = session.refresh()
         try:
@@ -503,6 +581,15 @@ def _replay(client, args, blueprint_id, generated, report):
             )
 
         for action in witness.actions:
+            if recorder is not None:
+                _record_current_observation(
+                    recorder,
+                    client,
+                    session,
+                    scenario_id,
+                    executor,
+                    action,
+                )
             if isinstance(action, StopAction):
                 pair = executor.current_pair
                 state = client.get_scenario_state(scenario_id)
@@ -609,11 +696,31 @@ def _replay(client, args, blueprint_id, generated, report):
             f"time={time.perf_counter() - replay_started:.1f}s "
             f"cue_diagnostic={cue_diagnostic}"
         )
+        if recorder is not None:
+            recorder.finish(
+                "PASS",
+                cue_reproduced=cue_reproduced,
+            )
+            print(
+                f"{report.visibility_stratum.name} recording "
+                f"path={recorder.root} "
+                f"frames={len(recorder.frames)} "
+                f"size={recorder.size_bytes() / (1024 * 1024):.1f}MiB"
+            )
         client.reset_scenario(scenario_id)
         scenario_id = None
         session.close()
         session = None
+    except Exception as error:
+        replay_error = error
+        raise
     finally:
+        if recorder is not None and replay_error is not None:
+            recorder.finish(
+                "FAILED",
+                cue_reproduced=cue_reproduced,
+                error=replay_error,
+            )
         if scenario_id is not None:
             client.reset_scenario(scenario_id)
         if session is not None:
@@ -735,9 +842,64 @@ def _search_once(
             session.close()
 
 
+def _register_recorded_stratum(
+    recording_manifest,
+    recording_root,
+    stratum,
+):
+    if recording_manifest is None:
+        return
+    relative = Path(stratum.name) / "trajectory.json"
+    if not (recording_root / relative).is_file():
+        return
+    if not any(
+        item["name"] == stratum.name
+        for item in recording_manifest["strata"]
+    ):
+        recording_manifest["strata"].append(
+            {
+                "name": stratum.name,
+                "path": relative.as_posix(),
+            }
+        )
+    write_json(
+        recording_root / "run.json",
+        recording_manifest,
+    )
+
+
 def main():
     validation_started = time.perf_counter()
     args = _parse_args()
+    recording_root = None
+    recording_manifest = None
+    validation_error = None
+    if args.record_dir is not None:
+        TrajectoryRecorder.require_dependencies()
+        recording_root = args.record_dir.resolve()
+        if recording_root.exists():
+            raise FileExistsError(
+                f"--record-dir already exists: {recording_root}"
+            )
+        recording_root.mkdir(parents=True)
+        recording_manifest = {
+            "schema_version": 1,
+            "status": "RUNNING",
+            "error": None,
+            "config": {
+                "anchor": list(args.anchor),
+                "seed": args.seed,
+                "start_seed": args.start_seed,
+                "firetrucks": args.firetrucks,
+                "pedestrians": args.pedestrians,
+                "jpeg_quality": args.record_jpeg_quality,
+            },
+            "strata": [],
+        }
+        write_json(
+            recording_root / "run.json",
+            recording_manifest,
+        )
     client = DroneSimClient(args.host, args.port)
     client.require_camera_active()
     original_pose = client.get_pose()
@@ -811,14 +973,25 @@ def main():
                     blueprint_id,
                     generated,
                     report,
+                    recording_root=recording_root,
                 )
             except Exception as error:
+                _register_recorded_stratum(
+                    recording_manifest,
+                    recording_root,
+                    stratum,
+                )
                 print(f"{stratum.name} replay FAIL {error}")
                 failures.append(
                     f"{stratum.name} replay: {error}"
                 )
                 continue
             reports.append(report)
+            _register_recorded_stratum(
+                recording_manifest,
+                recording_root,
+                stratum,
+            )
         if failures:
             raise RuntimeError(
                 "Stage 2D validation failed:\n- "
@@ -832,7 +1005,16 @@ def main():
         print(
             "No RGB-D, image, point-cloud, or trajectory payload "
             "was written to disk."
+            if recording_root is None
+            else (
+                "Optional compressed trajectory recording was "
+                f"written to {recording_root}; no Depth payload "
+                "was written."
+            )
         )
+    except Exception as error:
+        validation_error = error
+        raise
     finally:
         try:
             client.set_camera_pose(
@@ -843,6 +1025,21 @@ def main():
             client.set_camera_pitch(original_pose[3])
         finally:
             client.restore_player()
+            if recording_manifest is not None:
+                recording_manifest["status"] = (
+                    "PASS"
+                    if validation_error is None
+                    else "FAILED"
+                )
+                recording_manifest["error"] = (
+                    None
+                    if validation_error is None
+                    else str(validation_error)
+                )
+                write_json(
+                    recording_root / "run.json",
+                    recording_manifest,
+                )
             print(
                 f"validation wall time="
                 f"{time.perf_counter() - validation_started:.1f}s"

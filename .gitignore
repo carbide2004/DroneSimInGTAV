@@ -18,6 +18,7 @@ data/
 reference/
 imgs/
 dataset/
+recordings/
 agent_control/models/
 .env
 **/models/
