@@ -28,7 +28,6 @@ from validation.rgbd_sync_metrics import (  # noqa: E402
     aggregate_reference,
     classify,
     cosine_similarity,
-    edge_alignment,
     frame_summary,
 )
 
@@ -250,7 +249,6 @@ def _capture_reference(
         frame_summary(
             client.capture(args.capture_timeout_ms),
             args.max_view_depth,
-            args.edge_stride,
         )
         for _ in range(args.reference_captures)
     ]
@@ -307,12 +305,9 @@ def _validate_pitch_sync(client, session, args):
                 f"{depth_separation:.3f}"
             )
 
-        previous = reference_nadir
         previous_frame_id = reference_nadir["frame_id"]
         minimum_rgb_margin = float("inf")
         minimum_depth_margin = float("inf")
-        minimum_edge_margin = float("inf")
-        edge_margins = []
         total = args.sync_cycles * 2
         for index in range(total):
             expected = (
@@ -333,7 +328,6 @@ def _validate_pitch_sync(client, session, args):
             current = frame_summary(
                 frame,
                 args.max_view_depth,
-                args.edge_stride,
             )
             rgb_label, rgb_margin, rgb_scores = classify(
                 current["rgb_descriptor"],
@@ -363,22 +357,6 @@ def _validate_pitch_sync(client, session, args):
                     f"margin={depth_margin:.3f}, "
                     f"scores={depth_scores}"
                 )
-            same_alignment = edge_alignment(
-                current["rgb_edges"],
-                current["depth_edges"],
-            )
-            rgb_lag_alignment = edge_alignment(
-                previous["rgb_edges"],
-                current["depth_edges"],
-            )
-            depth_lag_alignment = edge_alignment(
-                current["rgb_edges"],
-                previous["depth_edges"],
-            )
-            edge_margin = same_alignment - max(
-                rgb_lag_alignment,
-                depth_lag_alignment,
-            )
             minimum_rgb_margin = min(
                 minimum_rgb_margin,
                 rgb_margin,
@@ -387,16 +365,7 @@ def _validate_pitch_sync(client, session, args):
                 minimum_depth_margin,
                 depth_margin,
             )
-            minimum_edge_margin = min(
-                minimum_edge_margin,
-                edge_margin,
-            )
-            edge_margins.append(edge_margin)
-            previous = current
             previous_frame_id = frame.frame_id
-        median_edge_margin = float(
-            np.median(edge_margins)
-        )
     finally:
         client.set_camera_pitch(OBLIQUE_PITCH_DEGREES)
 
@@ -409,9 +378,7 @@ def _validate_pitch_sync(client, session, args):
         "pitch sync PASS "
         f"captures={args.sync_cycles * 2} "
         f"rgb_margin_min={minimum_rgb_margin:.3f} "
-        f"depth_margin_min={minimum_depth_margin:.3f} "
-        f"edge_diagnostic_min={minimum_edge_margin:.3f} "
-        f"edge_diagnostic_median={median_edge_margin:.3f}"
+        f"depth_margin_min={minimum_depth_margin:.3f}"
     )
 
 
@@ -571,7 +538,6 @@ def main():
     parser.add_argument("--reference-captures", type=int, default=3)
     parser.add_argument("--capture-timeout-ms", type=int, default=5000)
     parser.add_argument("--max-view-depth", type=float, default=200.0)
-    parser.add_argument("--edge-stride", type=int, default=4)
     parser.add_argument(
         "--min-classification-margin",
         type=float,
@@ -597,7 +563,6 @@ def main():
         "--pairs": args.pairs,
         "--sync-cycles": args.sync_cycles,
         "--reference-captures": args.reference_captures,
-        "--edge-stride": args.edge_stride,
         "--progress-interval": args.progress_interval,
         "--pixel-stride": args.pixel_stride,
     }

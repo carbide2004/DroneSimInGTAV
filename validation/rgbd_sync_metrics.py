@@ -70,76 +70,7 @@ def classify(descriptor, references):
     return ordered[0][0], margin, similarities
 
 
-def _gradient_magnitude(values):
-    values = np.asarray(values, dtype=np.float64)
-    gradient_y, gradient_x = np.gradient(values)
-    return np.hypot(gradient_x, gradient_y)
-
-
-def _top_edge_mask(magnitude, percentile):
-    finite = magnitude[np.isfinite(magnitude)]
-    if finite.size == 0:
-        raise RuntimeError("Edge map contains no finite values")
-    threshold = float(np.percentile(finite, percentile))
-    if not math.isfinite(threshold) or threshold <= 0.0:
-        raise RuntimeError("Edge map has no usable gradients")
-    return magnitude >= threshold
-
-
-def _dilate(mask, radius=1):
-    padded = np.pad(
-        mask,
-        radius,
-        mode="constant",
-        constant_values=False,
-    )
-    output = np.zeros_like(mask, dtype=bool)
-    height, width = mask.shape
-    for offset_y in range(2 * radius + 1):
-        for offset_x in range(2 * radius + 1):
-            output |= padded[
-                offset_y : offset_y + height,
-                offset_x : offset_x + width,
-            ]
-    return output
-
-
-def _edge_masks(rgb, depth, max_view_depth, stride):
-    rgb_sample = rgb[::stride, ::stride]
-    depth_sample = depth[::stride, ::stride].astype(
-        np.float64
-    )
-    luminance = (
-        0.2126 * rgb_sample[:, :, 0].astype(np.float64)
-        + 0.7152 * rgb_sample[:, :, 1].astype(np.float64)
-        + 0.0722 * rgb_sample[:, :, 2].astype(np.float64)
-    )
-    clipped_depth = np.minimum(
-        depth_sample,
-        max_view_depth,
-    )
-    rgb_edges = _top_edge_mask(
-        _gradient_magnitude(luminance),
-        85.0,
-    )
-    depth_edges = _top_edge_mask(
-        _gradient_magnitude(np.log1p(clipped_depth)),
-        90.0,
-    )
-    return _dilate(rgb_edges), depth_edges
-
-
-def edge_alignment(rgb_edges, depth_edges):
-    count = int(np.count_nonzero(depth_edges))
-    if count == 0:
-        raise RuntimeError("Depth edge map is empty")
-    return (
-        float(np.count_nonzero(rgb_edges & depth_edges))
-        / count
-    )
-
-
-def frame_summary(frame, max_view_depth, edge_stride):
+def frame_summary(frame, max_view_depth):
     rgb = frame.rgb_array()
     depth = frame.depth_array()
     if rgb.shape[:2] != depth.shape:
@@ -147,12 +78,6 @@ def frame_summary(frame, max_view_depth, edge_stride):
             f"RGB shape {rgb.shape} and depth shape "
             f"{depth.shape} differ"
         )
-    rgb_edges, depth_edges = _edge_masks(
-        rgb,
-        depth,
-        max_view_depth,
-        edge_stride,
-    )
     return {
         "frame_id": frame.frame_id,
         "rgb_descriptor": _rgb_descriptor(rgb),
@@ -160,8 +85,6 @@ def frame_summary(frame, max_view_depth, edge_stride):
             depth,
             max_view_depth,
         ),
-        "rgb_edges": rgb_edges,
-        "depth_edges": depth_edges,
     }
 
 
@@ -190,6 +113,4 @@ def aggregate_reference(summaries):
                 axis=0,
             )
         ),
-        "rgb_edges": summaries[-1]["rgb_edges"],
-        "depth_edges": summaries[-1]["depth_edges"],
     }
