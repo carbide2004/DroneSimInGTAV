@@ -1,6 +1,7 @@
 import math
 import socket
 import struct
+import threading
 import time
 from dataclasses import dataclass
 from enum import IntEnum
@@ -80,6 +81,8 @@ MAX_SCENARIO_OWNED_ENTITY_COUNT = (
     1 + 2 * MAX_FIRETRUCK_COUNT + MAX_PEDESTRIAN_COUNT
 )
 LOCKSTEP_STEP_MS = 250
+OBLIQUE_PITCH_DEGREES = -45.0
+NADIR_PITCH_DEGREES = -90.0
 LOCKSTEP_SNAPSHOT_FORMAT = "<QQIIIQQIIf"
 LOCKSTEP_SNAPSHOT_SIZE = struct.calcsize(
     LOCKSTEP_SNAPSHOT_FORMAT
@@ -257,6 +260,13 @@ class RgbdFrame:
                 "Depth payload contains a non-finite or negative metric value"
             )
         return depth
+
+
+@dataclass(frozen=True)
+class LockstepRgbdPair:
+    clock: LockstepSnapshot
+    oblique: RgbdFrame
+    nadir: RgbdFrame
 
 
 def _pack_header(message_type, request_id, length):
@@ -594,6 +604,128 @@ def _decode_lockstep_snapshot(payload):
     )
 
 
+def _angle_error_degrees(actual, expected):
+    return abs(
+        (float(actual) - float(expected) + 180.0)
+        % 360.0
+        - 180.0
+    )
+
+
+def _require_dual_view_pose(
+    reference,
+    actual,
+    expected_pitch,
+):
+    position_error = math.sqrt(
+        sum(
+            (float(left) - float(right)) ** 2
+            for left, right in zip(reference[:3], actual[:3])
+        )
+    )
+    pitch_error = abs(float(actual[3]) - expected_pitch)
+    raw_roll_error = _angle_error_degrees(actual[4], 0.0)
+    raw_yaw_error = _angle_error_degrees(actual[5], reference[5])
+    if expected_pitch <= -90.0 + 1.0e-2:
+        orientation_error = _angle_error_degrees(
+            float(actual[5]) - float(actual[4]),
+            reference[5],
+        )
+    elif expected_pitch >= 90.0 - 1.0e-2:
+        orientation_error = _angle_error_degrees(
+            float(actual[5]) + float(actual[4]),
+            reference[5],
+        )
+    else:
+        orientation_error = max(
+            raw_roll_error,
+            raw_yaw_error,
+        )
+    if (
+        position_error > 1.0e-3
+        or pitch_error > 1.0e-2
+        or orientation_error > 1.0e-2
+    ):
+        raise DroneSimProtocolError(
+            "Dual-view camera pose invariant failed: "
+            f"position={position_error:.6f}m "
+            f"pitch={pitch_error:.6f}deg "
+            f"raw_roll={raw_roll_error:.6f}deg "
+            f"raw_yaw={raw_yaw_error:.6f}deg "
+            f"physical_orientation={orientation_error:.6f}deg"
+        )
+
+
+def _require_same_lockstep_instant(before, after):
+    fields = (
+        "session_id",
+        "step_index",
+        "epoch_game_timer_ms",
+        "game_timer_ms",
+        "target_elapsed_ms",
+        "actual_elapsed_ms",
+        "last_advance_ms",
+        "render_frames",
+        "max_frame_time_ms",
+    )
+    changed = [
+        name
+        for name in fields
+        if getattr(before, name) != getattr(after, name)
+    ]
+    if changed:
+        raise DroneSimProtocolError(
+            "Simulation advanced during dual-view capture: "
+            + ", ".join(changed)
+        )
+
+
+def _require_matching_capture_calibration(oblique, nadir):
+    if oblique.frame_id >= nadir.frame_id:
+        raise DroneSimProtocolError(
+            "Dual-view frame IDs are not strictly increasing: "
+            f"{oblique.frame_id}/{nadir.frame_id}"
+        )
+    scalar_fields = (
+        "width",
+        "height",
+        "fov_degrees",
+        "near_clip",
+        "far_clip",
+    )
+    changed = [
+        name
+        for name in scalar_fields
+        if getattr(oblique, name) != getattr(nadir, name)
+    ]
+    if changed:
+        raise DroneSimProtocolError(
+            "Dual-view capture calibration changed: "
+            + ", ".join(changed)
+        )
+    if len(oblique.projection_matrix) != 16 or len(
+        nadir.projection_matrix
+    ) != 16:
+        raise DroneSimProtocolError(
+            "Dual-view projection matrix does not contain 16 values"
+        )
+    if any(
+        not math.isclose(
+            float(left),
+            float(right),
+            rel_tol=1.0e-6,
+            abs_tol=1.0e-6,
+        )
+        for left, right in zip(
+            oblique.projection_matrix,
+            nadir.projection_matrix,
+        )
+    ):
+        raise DroneSimProtocolError(
+            "Dual-view projection matrices do not match"
+        )
+
+
 class DroneSimClient:
     def __init__(
         self,
@@ -610,8 +742,22 @@ class DroneSimClient:
         ):
             raise ValueError("command_timeout must be a positive finite value")
         self._request_ids = count(1000)
+        self._operation_lock = threading.RLock()
 
     def _exchange(
+        self,
+        message_type,
+        payload=b"",
+        timeout=None,
+    ):
+        with self._operation_lock:
+            return self._exchange_unlocked(
+                message_type,
+                payload,
+                timeout,
+            )
+
+    def _exchange_unlocked(
         self,
         message_type,
         payload=b"",
@@ -1123,6 +1269,89 @@ class DroneSimClient:
             view_matrix=tuple(matrices[16:]),
         )
 
+    def _capture_lockstep_rgbd_pair(
+        self,
+        session_id,
+        timeout_ms,
+    ):
+        with self._operation_lock:
+            before_clock = self.get_lockstep_state(session_id)
+            reference_pose = self.get_pose()
+            if _angle_error_degrees(reference_pose[4], 0.0) > 1.0e-2:
+                raise DroneSimProtocolError(
+                    "Dual-view capture requires camera roll to be zero; "
+                    f"actual roll={reference_pose[4]:.6f}deg"
+                )
+
+            operation_error = None
+            oblique = None
+            nadir = None
+            try:
+                oblique_pose = self.set_camera_pitch(
+                    OBLIQUE_PITCH_DEGREES
+                )
+                _require_dual_view_pose(
+                    reference_pose,
+                    oblique_pose,
+                    OBLIQUE_PITCH_DEGREES,
+                )
+                oblique = self.capture(timeout_ms)
+
+                nadir_pose = self.set_camera_pitch(
+                    NADIR_PITCH_DEGREES
+                )
+                _require_dual_view_pose(
+                    reference_pose,
+                    nadir_pose,
+                    NADIR_PITCH_DEGREES,
+                )
+                nadir = self.capture(timeout_ms)
+            except BaseException as error:
+                operation_error = error
+
+            restore_error = None
+            restored_pose = None
+            try:
+                restored_pose = self.set_camera_pitch(
+                    OBLIQUE_PITCH_DEGREES
+                )
+            except BaseException as error:
+                restore_error = error
+
+            if operation_error is not None:
+                if restore_error is not None:
+                    message = (
+                        "Restoring the canonical -45 degree pitch also "
+                        f"failed: {restore_error}"
+                    )
+                    if hasattr(operation_error, "add_note"):
+                        operation_error.add_note(message)
+                    else:
+                        raise restore_error from operation_error
+                raise operation_error
+            if restore_error is not None:
+                raise restore_error
+
+            _require_dual_view_pose(
+                reference_pose,
+                restored_pose,
+                OBLIQUE_PITCH_DEGREES,
+            )
+            after_clock = self.get_lockstep_state(session_id)
+            _require_same_lockstep_instant(
+                before_clock,
+                after_clock,
+            )
+            _require_matching_capture_calibration(
+                oblique,
+                nadir,
+            )
+            return LockstepRgbdPair(
+                clock=after_clock,
+                oblique=oblique,
+                nadir=nadir,
+            )
+
 
 class LockstepSession:
     """Strict context manager for a single plugin lockstep session.
@@ -1164,6 +1393,14 @@ class LockstepSession:
             self.session_id
         )
         return self._snapshot
+
+    def capture_rgbd_pair(self, timeout_ms=5000):
+        pair = self.client._capture_lockstep_rgbd_pair(
+            self.session_id,
+            timeout_ms,
+        )
+        self._snapshot = pair.clock
+        return pair
 
     def close(self):
         session_id = self.session_id

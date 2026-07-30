@@ -120,20 +120,24 @@ RuntimeCommandResult submit_capture_camera(std::uint64_t request_id) {
             "GTA has no active rendering camera");
     }
 
-    const Vector3 position = CAM::GET_CAM_COORD(camera);
-    const Vector3 rotation = CAM::GET_CAM_ROT(camera, 2);
-    CaptureCamera capture_camera;
+    RuntimePose pose;
     std::string error;
+    if (!CameraController::instance().get_capture_pose(pose, error)) {
+        return error_result(
+            RuntimeCommandStatus::InvalidPose,
+            "Invalid capture camera pose: " + error);
+    }
+    CaptureCamera capture_camera;
     const CaptureStatus status = build_capture_camera(
         CAM::GET_CAM_FOV(camera),
         CAM::GET_CAM_NEAR_CLIP(camera),
         CAM::GET_CAM_FAR_CLIP(camera),
-        position.x,
-        position.y,
-        position.z,
-        rotation.x,
-        rotation.y,
-        rotation.z,
+        pose.x,
+        pose.y,
+        pose.z,
+        pose.pitch,
+        pose.roll,
+        pose.yaw,
         capture_camera,
         error);
     if (status != CaptureStatus::Ok) {

@@ -24,6 +24,7 @@ public:
     bool is_active() const;
     void suppress_player_controls_for_frame() const;
     bool get_pose(RuntimePose& pose, std::string& error) const;
+    bool get_capture_pose(RuntimePose& pose, std::string& error) const;
     CameraPoseStatus set_pose(
         float x,
         float y,
@@ -44,4 +45,6 @@ private:
     CameraController() = default;
 
     Any camera_handle_ = 0;
+    float canonical_pitch_degrees_ = 0.0f;
+    float canonical_yaw_degrees_ = 0.0f;
 };

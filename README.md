@@ -4,6 +4,8 @@ DroneSimInGTAV is a small GTA V research runtime for controlling a scripted
 camera, acquiring synchronized RGB-D observations, and running a minimal
 controlled fire-response experiment. Stage 2A adds an explicit lockstep
 simulation clock so model inference time does not consume GTA simulation time.
+Stage 2B adds named oblique and nadir RGB-D captures from one frozen
+simulation instant.
 
 The research direction is hidden-event localization from event-induced dynamic
 responses. See [docs/research_direction.md](docs/research_direction.md).
@@ -15,10 +17,12 @@ flowchart LR
     subgraph Python["Python control and evaluation"]
         Agent["Agent environment"]
         Validation["Online validation"]
+        Pair["LockstepRgbdPair<br/>oblique + nadir"]
         Relative["RelativePoseController<br/>body-frame delta to world pose"]
         Client["DroneSimClient<br/>strict DSV3 codec"]
 
         Agent --> Relative --> Client
+        Agent --> Pair --> Client
         Validation --> Client
     end
 
@@ -86,6 +90,9 @@ agent_control/
   dronesim_client.py       strict Python client and relative-pose wrapper
   requirements.txt         online validation dependencies
 validation/
+  rgbd_geometry.py
+  rgbd_sync_metrics.py
+  validate_dual_view_rgbd.py
   validate_pose_control.py
   validate_rgbd_pointcloud.py
   validate_rgbd_stability.py
@@ -166,6 +173,9 @@ controller.step_relative(0.5, 0.0, 0.0, 10.0)
 # A scene must be Reset while frozen before this context can exit.
 with LockstepSession(client) as lockstep:
     lockstep.advance()  # exactly one 250 ms GTA simulation step
+    views = lockstep.capture_rgbd_pair()
+    oblique = views.oblique
+    nadir = views.nadir
 ```
 
 All non-capture commands acknowledge only after the GTA script thread has
@@ -190,6 +200,17 @@ raises `DroneSimCommandError` with one of:
 Capture keeps the existing V3 response: request/frame IDs, RGB, metric depth,
 FOV, clip planes, projection matrix, and world-to-view matrix.
 
+`capture_rgbd_pair()` is a Python-side composition over unchanged Capture V3.
+It requires the lockstep session to be frozen, captures named `oblique`
+(`-45` degree pitch) and `nadir` (`-90` degree pitch) frames, then restores the
+canonical `-45` degree pitch. Both frames have the same simulation step and
+camera center but different render frame IDs. With zero camera roll, the top
+of the nadir image is body-forward and its right edge is body-right.
+
+One GTA instance must be controlled by one `DroneSimClient`. The client
+serializes the complete paired operation against other threads using the same
+client object; separate client processes are not supported concurrently.
+
 ## Lockstep simulation time
 
 Lockstep is a separate research mode. Enter sets GTA gameplay time scale to
@@ -209,14 +230,13 @@ The intended scenario order is:
 ```python
 scenario_id = client.prepare_fire_scenario((x, y, z), seed=1)
 client.wait_scenario_ready(scenario_id)
-clock = client.enter_lockstep()
-client.start_scenario(scenario_id)
-initial_time = client.advance_lockstep(clock.session_id)  # t = 250 ms
-frame = client.capture()  # world remains frozen
+with LockstepSession(client) as lockstep:
+    client.start_scenario(scenario_id)
+    initial_time = lockstep.advance()  # t = 250 ms
+    views = lockstep.capture_rgbd_pair()  # simulation remains frozen
 
-# Reset must happen before Exit so no scene resumes during network cleanup.
-client.reset_scenario(scenario_id)
-client.exit_lockstep(clock.session_id)
+    # Reset must happen before Exit so no scene resumes during cleanup.
+    client.reset_scenario(scenario_id)
 ```
 
 Only one lockstep session can exist. Session IDs are checked on every clock
@@ -291,6 +311,9 @@ PCD, or point cloud is written to disk.
 python validation\validate_camera_lifecycle.py
 python validation\validate_pose_control.py
 python validation\validate_rgbd_yaw_sync.py
+python validation\validate_dual_view_rgbd.py --anchor X Y Z
+python validation\validate_dual_view_rgbd.py --anchor X Y Z --pairs 1000
+python validation\validate_dual_view_rgbd.py --anchor X Y Z --show-pointcloud
 python validation\validate_rgbd_pointcloud.py --pixel-stride 4 --max-view-depth 200
 python validation\validate_rgbd_stability.py --count 1000
 python validation\validate_fire_scenario.py --anchor X Y Z

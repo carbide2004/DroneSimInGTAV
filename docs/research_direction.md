@@ -38,20 +38,25 @@ are also insufficient evidence of causal use.
 
 1. Maintain the minimal camera, control, and synchronized RGB-D runtime.
 2. Add a fire-only scenario lifecycle and a structured event/entity registry.
-3. Collect state-only telemetry and statistically validate native and
+3. Freeze inference time with a fixed-step lockstep simulation clock.
+4. Acquire named oblique and nadir RGB-D views from one simulation instant.
+5. Add building occlusion and response-entity visibility truth.
+6. Validate that useful cues persist long enough to be observed from reachable
+   viewpoints.
+7. Collect state-only telemetry and statistically validate native and
    explicitly controlled response modes.
-4. Add paired semantic interventions: cue removal, distractors, conflicting
+8. Add paired semantic interventions: cue removal, distractors, conflicting
    cues, and changed event affiliation.
-5. Establish oracle-entity and explicit Bayesian belief baselines.
-6. Add visual perception and tracking noise.
-7. Compare learned temporal models only after the task and signals are shown to
+9. Establish oracle-entity and explicit Bayesian belief baselines.
+10. Add visual perception and tracking noise.
+11. Compare learned temporal models only after the task and signals are shown to
    be valid.
-8. Add structured Awareness as a decision bottleneck and test it through direct
+12. Add structured Awareness as a decision bottleneck and test it through direct
    intervention.
 
-Stage 1 implements item 2 with an explicitly orchestrated firetruck and
-pedestrian response. It deliberately does not claim that GTA's native response
-ecology is reliable. The next milestone is state-only response-ecology
-measurement, including a native-observe control using the same truth schema.
-The old static anomaly generators and oracle collection code must not be
-restored.
+Stages 1, 2A, and 2B implement the controlled response kernel, lockstep clock,
+and dual-view observation foundation. They deliberately do not claim that
+GTA's native response ecology is reliable. The next milestone is explicit
+occlusion and visibility truth, followed by reachable-viewpoint solvability
+before response-ecology measurement. The old static anomaly generators and
+oracle collection code must not be restored.

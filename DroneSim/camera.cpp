@@ -44,6 +44,25 @@ float angle_error(float actual, float expected) {
     return std::fabs(wrap_degrees(actual - expected));
 }
 
+float camera_orientation_error(
+    const RuntimePose& actual,
+    float expected_pitch,
+    float expected_yaw) {
+    if (expected_pitch <= -90.0f + kAngleToleranceDegrees) {
+        return angle_error(
+            actual.yaw - actual.roll,
+            expected_yaw);
+    }
+    if (expected_pitch >= 90.0f - kAngleToleranceDegrees) {
+        return angle_error(
+            actual.yaw + actual.roll,
+            expected_yaw);
+    }
+    const float roll_error = angle_error(actual.roll, 0.0f);
+    const float yaw_error = angle_error(actual.yaw, expected_yaw);
+    return roll_error > yaw_error ? roll_error : yaw_error;
+}
+
 enum class RaycastStatus {
     Clear,
     Hit,
@@ -136,6 +155,9 @@ bool CameraController::create(
     }
     const Vector3 location =
         ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(player, 0.0f, 0.0f, 10.0f);
+    canonical_pitch_degrees_ = 0.0f;
+    canonical_yaw_degrees_ = wrap_degrees(
+        ENTITY::GET_ENTITY_HEADING(player));
     camera_handle_ = CAM::CREATE_CAM_WITH_PARAMS(
         "DEFAULT_SCRIPTED_CAMERA",
         location.x,
@@ -143,7 +165,7 @@ bool CameraController::create(
         location.z,
         0.0f,
         0.0f,
-        ENTITY::GET_ENTITY_HEADING(player),
+        canonical_yaw_degrees_,
         40.0f,
         TRUE,
         2);
@@ -184,6 +206,8 @@ bool CameraController::stop(std::string& error) {
         CAM::DESTROY_CAM(camera_handle_, FALSE);
     }
     camera_handle_ = 0;
+    canonical_pitch_degrees_ = 0.0f;
+    canonical_yaw_degrees_ = 0.0f;
     LOGI("camera", "Scripted camera stopped");
     return true;
 }
@@ -220,6 +244,37 @@ bool CameraController::get_pose(
         error = "GTA returned a non-finite camera pose";
         return false;
     }
+    return true;
+}
+
+bool CameraController::get_capture_pose(
+    RuntimePose& pose,
+    std::string& error) const {
+    RuntimePose actual;
+    if (!get_pose(actual, error)) {
+        return false;
+    }
+    const float pitch_error =
+        std::fabs(actual.pitch - canonical_pitch_degrees_);
+    const float orientation_error = camera_orientation_error(
+        actual,
+        canonical_pitch_degrees_,
+        canonical_yaw_degrees_);
+    if (pitch_error > kAngleToleranceDegrees ||
+        orientation_error > kAngleToleranceDegrees) {
+        error =
+            "Camera is not at its canonical capture orientation; "
+            "pitch error=" +
+            std::to_string(pitch_error) +
+            " deg, physical orientation error=" +
+            std::to_string(orientation_error) +
+            " deg";
+        return false;
+    }
+    pose = actual;
+    pose.pitch = canonical_pitch_degrees_;
+    pose.roll = 0.0f;
+    pose.yaw = canonical_yaw_degrees_;
     return true;
 }
 
@@ -265,16 +320,20 @@ CameraPoseStatus CameraController::set_pose(
         return CameraPoseStatus::ApplyFailed;
     }
     const float target_yaw = wrap_degrees(yaw_degrees);
+    const float previous_yaw = canonical_yaw_degrees_;
+    canonical_yaw_degrees_ = target_yaw;
     CAM::SET_CAM_COORD(camera_handle_, x, y, z);
     CAM::SET_CAM_ROT(
         camera_handle_,
-        current.pitch,
-        current.roll,
+        canonical_pitch_degrees_,
+        0.0f,
         target_yaw,
         2);
 
     float position_error = 0.0f;
+    float roll_error = 0.0f;
     float yaw_error = 0.0f;
+    float orientation_error = 0.0f;
     for (int frame = 0; frame < kMaximumPoseApplyFrames; ++frame) {
         // GTA camera writes become observable on a later game tick. Yield to
         // the engine and poll the actual pose instead of sleeping for a fixed
@@ -289,10 +348,11 @@ CameraPoseStatus CameraController::set_pose(
                 current.z);
             CAM::SET_CAM_ROT(
                 camera_handle_,
-                current.pitch,
-                current.roll,
-                current.yaw,
+                canonical_pitch_degrees_,
+                0.0f,
+                previous_yaw,
                 2);
+            canonical_yaw_degrees_ = previous_yaw;
             error = "Camera pose request was cancelled while awaiting GTA";
             return CameraPoseStatus::ApplyFailed;
         }
@@ -306,9 +366,14 @@ CameraPoseStatus CameraController::set_pose(
         const float dy = actual_pose.y - y;
         const float dz = actual_pose.z - z;
         position_error = std::sqrt(dx * dx + dy * dy + dz * dz);
+        roll_error = angle_error(actual_pose.roll, 0.0f);
         yaw_error = angle_error(actual_pose.yaw, target_yaw);
+        orientation_error = camera_orientation_error(
+            actual_pose,
+            canonical_pitch_degrees_,
+            target_yaw);
         if (position_error <= kPositionToleranceMeters &&
-            yaw_error <= kAngleToleranceDegrees) {
+            orientation_error <= kAngleToleranceDegrees) {
             return CameraPoseStatus::Ok;
         }
     }
@@ -318,8 +383,12 @@ CameraPoseStatus CameraController::set_pose(
         std::to_string(kMaximumPoseApplyFrames) +
         " game frames; position error=" +
         std::to_string(position_error) +
-        " m, yaw error=" +
+        " m, roll error=" +
+        std::to_string(roll_error) +
+        " deg, yaw error=" +
         std::to_string(yaw_error) +
+        " deg, physical orientation error=" +
+        std::to_string(orientation_error) +
         " deg";
     return CameraPoseStatus::PoseMismatch;
 }
@@ -345,24 +414,30 @@ CameraPoseStatus CameraController::set_pitch(
         return CameraPoseStatus::ApplyFailed;
     }
 
+    const float previous_pitch = canonical_pitch_degrees_;
+    canonical_pitch_degrees_ = pitch_degrees;
     CAM::SET_CAM_ROT(
         camera_handle_,
         pitch_degrees,
-        current.roll,
-        current.yaw,
+        0.0f,
+        canonical_yaw_degrees_,
         2);
 
     float pitch_error = 0.0f;
+    float roll_error = 0.0f;
+    float yaw_error = 0.0f;
+    float orientation_error = 0.0f;
     for (int frame = 0; frame < kMaximumPoseApplyFrames; ++frame) {
         WAIT(0);
         suppress_gameplay_controls_for_frame();
         if (cancelled.load(std::memory_order_acquire)) {
             CAM::SET_CAM_ROT(
                 camera_handle_,
-                current.pitch,
-                current.roll,
-                current.yaw,
+                previous_pitch,
+                0.0f,
+                canonical_yaw_degrees_,
                 2);
+            canonical_pitch_degrees_ = previous_pitch;
             error =
                 "Camera pitch request was cancelled while awaiting GTA";
             return CameraPoseStatus::ApplyFailed;
@@ -373,7 +448,16 @@ CameraPoseStatus CameraController::set_pitch(
             return CameraPoseStatus::ApplyFailed;
         }
         pitch_error = std::fabs(actual_pose.pitch - pitch_degrees);
-        if (pitch_error <= kAngleToleranceDegrees) {
+        roll_error = angle_error(actual_pose.roll, 0.0f);
+        yaw_error = angle_error(
+            actual_pose.yaw,
+            canonical_yaw_degrees_);
+        orientation_error = camera_orientation_error(
+            actual_pose,
+            pitch_degrees,
+            canonical_yaw_degrees_);
+        if (pitch_error <= kAngleToleranceDegrees &&
+            orientation_error <= kAngleToleranceDegrees) {
             return CameraPoseStatus::Ok;
         }
     }
@@ -383,6 +467,12 @@ CameraPoseStatus CameraController::set_pitch(
         std::to_string(kMaximumPoseApplyFrames) +
         " game frames; pitch error=" +
         std::to_string(pitch_error) +
+        " deg, roll error=" +
+        std::to_string(roll_error) +
+        " deg, yaw error=" +
+        std::to_string(yaw_error) +
+        " deg, physical orientation error=" +
+        std::to_string(orientation_error) +
         " deg";
     return CameraPoseStatus::PoseMismatch;
 }
