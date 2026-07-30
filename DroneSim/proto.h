@@ -20,6 +20,10 @@ enum MsgType : std::uint8_t {
     MSG_START_SCENARIO = 24,
     MSG_RESET_SCENARIO = 25,
     MSG_SET_CAMERA_PITCH = 26,
+    MSG_ENTER_LOCKSTEP = 27,
+    MSG_GET_LOCKSTEP_STATE = 28,
+    MSG_ADVANCE_LOCKSTEP = 29,
+    MSG_EXIT_LOCKSTEP = 30,
 };
 
 struct MsgHeader {

@@ -2,8 +2,8 @@
 
 DroneSimInGTAV is a small GTA V research runtime for controlling a scripted
 camera, acquiring synchronized RGB-D observations, and running a minimal
-controlled fire-response experiment. Stage 1 adds structured event/entity
-truth without restoring the old oracle recorder or training pipeline.
+controlled fire-response experiment. Stage 2A adds an explicit lockstep
+simulation clock so model inference time does not consume GTA simulation time.
 
 The research direction is hidden-event localization from event-induced dynamic
 responses. See [docs/research_direction.md](docs/research_direction.md).
@@ -27,12 +27,14 @@ flowchart LR
         Queue["Typed command queue<br/>request ID and completion result"]
         Script["ScriptRuntime<br/>GTA script thread and per-frame tick"]
         Camera["CameraController"]
+        Clock["SimulationClock<br/>frozen inference and 250ms steps"]
         Manager["ScenarioManager"]
         Fire["FireScenario"]
         Truth["EntityRegistry<br/>structured response truth"]
 
         Server --> Queue --> Script
         Script --> Camera
+        Script --> Clock
         Script --> Manager --> Fire --> Truth
     end
 
@@ -49,6 +51,7 @@ flowchart LR
 
     Client <-->|"DSV3 TCP"| Server
     Camera --> World
+    Clock --> World
     Fire --> World
     World --> Hook
     Script -->|"same-frame camera metadata"| Present
@@ -74,6 +77,7 @@ DroneSim/                  GTA V ASI plugin
   command_queue.*          request-correlated GTA-thread commands
   rgbd_capture.*           synchronized Capture V3 implementation
   scenario_manager.*       single-scenario lifecycle coordinator
+  simulation_clock.*       lockstep session and fixed 250 ms advances
   fire_scenario.*          asynchronous controlled fire experiment
   entity_registry.*        stable entity IDs and response truth
   script.*                 minimal GTA script runtime
@@ -134,6 +138,7 @@ Basic use:
 ```python
 from agent_control.dronesim_client import (
     DroneSimClient,
+    LockstepSession,
     RelativePoseController,
 )
 
@@ -157,6 +162,10 @@ actual = client.set_camera_pose(
 controller = RelativePoseController(client, collision_check=True)
 controller.synchronize()
 controller.step_relative(0.5, 0.0, 0.0, 10.0)
+
+# A scene must be Reset while frozen before this context can exit.
+with LockstepSession(client) as lockstep:
+    lockstep.advance()  # exactly one 250 ms GTA simulation step
 ```
 
 All non-capture commands acknowledge only after the GTA script thread has
@@ -171,9 +180,50 @@ raises `DroneSimCommandError` with one of:
 - `POSE_MISMATCH`
 - `INVALID_REQUEST`
 - `INTERNAL_ERROR`
+- `LOCKSTEP_ALREADY_ACTIVE`
+- `LOCKSTEP_NOT_ACTIVE`
+- `LOCKSTEP_SESSION_MISMATCH`
+- `LOCKSTEP_ADVANCE_TIMEOUT`
+- `LOCKSTEP_INTERRUPTED`
+- `LOCKSTEP_CLOCK_INVARIANT_FAILED`
 
 Capture keeps the existing V3 response: request/frame IDs, RGB, metric depth,
 FOV, clip planes, projection matrix, and world-to-view matrix.
+
+## Lockstep simulation time
+
+Lockstep is a separate research mode. Enter sets GTA gameplay time scale to
+zero and explicitly freezes the controlled response actors, while leaving the
+script thread, camera commands, rendering, network protocol, and Capture V3
+operational. `advance_lockstep()` releases those actors, temporarily runs the
+world until the next cumulative 250 ms target, then freezes both the clock and
+actors again before replying. The boundary records each response actor's
+kinematics before freezing and restores its linear velocity on release; the
+matched realtime/lockstep validation below checks whether this is sufficient
+to avoid artificial repeated starts.
+Inference wall time and RGB-D transfer time therefore do not age response
+actors.
+
+The intended scenario order is:
+
+```python
+scenario_id = client.prepare_fire_scenario((x, y, z), seed=1)
+client.wait_scenario_ready(scenario_id)
+clock = client.enter_lockstep()
+client.start_scenario(scenario_id)
+initial_time = client.advance_lockstep(clock.session_id)  # t = 250 ms
+frame = client.capture()  # world remains frozen
+
+# Reset must happen before Exit so no scene resumes during network cleanup.
+client.reset_scenario(scenario_id)
+client.exit_lockstep(clock.session_id)
+```
+
+Only one lockstep session can exist. Session IDs are checked on every clock
+operation. There is no heartbeat, automatic real-time fallback, or variable
+step duration. During lockstep, manual camera movement is disabled. F11 is the
+emergency recovery path: it resets the scenario, restores normal time, stops
+the scripted camera, and restores the player.
 
 ## Controlled fire scenario
 
@@ -248,7 +298,14 @@ python validation\validate_fire_scenario.py --anchor X Y Z --cycles 50
 python validation\validate_fire_scenario.py --anchor X Y Z --rgbd-captures 1000
 python validation\validate_fire_scenario.py --anchor X Y Z --require-clean-area
 python validation\validate_fire_scenario.py --anchor X Y Z --verify-seed-isolation
+python validation\validate_lockstep_clock.py --anchor X Y Z
 ```
+
+The lockstep validator also reuses one immutable scenario blueprint for a
+continuous realtime run and a matched `250 ms` lockstep run. It compares
+response-actor path length, directional progress, and median speed so that
+repeated freezing cannot silently turn vehicle motion into a sequence of
+artificial restarts.
 
 Mission entities inside the controlled radius are never deleted. They are
 preserved and reported separately in `snapshot.protected_entities`; the normal

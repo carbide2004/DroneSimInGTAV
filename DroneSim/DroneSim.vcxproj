@@ -156,6 +156,7 @@
     <ClCompile Include="scenario_manager.cpp" />
     <ClCompile Include="script.cpp" />
     <ClCompile Include="server.cpp" />
+    <ClCompile Include="simulation_clock.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -172,6 +173,7 @@
     <ClInclude Include="scenario_types.h" />
     <ClInclude Include="script.h" />
     <ClInclude Include="server.h" />
+    <ClInclude Include="simulation_clock.h" />
     <ClInclude Include="proto.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

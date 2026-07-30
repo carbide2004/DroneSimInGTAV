@@ -180,6 +180,23 @@ std::vector<unsigned char> scenario_start_bytes(
     return data;
 }
 
+std::vector<unsigned char> lockstep_snapshot_bytes(
+    const LockstepSnapshot& snapshot) {
+    std::vector<unsigned char> data;
+    data.reserve(56);
+    append_scalar(data, snapshot.session_id);
+    append_scalar(data, snapshot.step_index);
+    append_scalar(data, snapshot.epoch_game_timer_ms);
+    append_scalar(data, snapshot.game_timer_ms);
+    append_scalar(data, snapshot.frame_count);
+    append_scalar(data, snapshot.target_elapsed_ms);
+    append_scalar(data, snapshot.actual_elapsed_ms);
+    append_scalar(data, snapshot.last_advance_ms);
+    append_scalar(data, snapshot.render_frames);
+    append_scalar(data, snapshot.max_frame_time_ms);
+    return data;
+}
+
 std::vector<unsigned char> scenario_snapshot_bytes(
     const ScenarioSnapshot& snapshot) {
     std::vector<unsigned char> data;
@@ -633,6 +650,49 @@ void Server::handle_client() {
                         data = scenario_start_bytes(
                             result.scenario_start);
                     }
+                }
+                break;
+            }
+            case MSG_ENTER_LOCKSTEP: {
+                if (empty_payload(payload, result)) {
+                    result = run_command(make_runtime_command(
+                        RuntimeCommandType::EnterLockstep,
+                        header.request_id));
+                    if (result.status == RuntimeCommandStatus::Ok) {
+                        data = lockstep_snapshot_bytes(
+                            result.lockstep_snapshot);
+                    }
+                }
+                break;
+            }
+            case MSG_GET_LOCKSTEP_STATE:
+            case MSG_ADVANCE_LOCKSTEP:
+            case MSG_EXIT_LOCKSTEP: {
+                if (payload.size() != sizeof(std::uint64_t)) {
+                    result = invalid_request(
+                        "Lockstep command expects one uint64 session_id");
+                    break;
+                }
+                std::uint64_t session_id = 0;
+                read_scalar(payload, 0, session_id);
+                RuntimeCommandType command_type =
+                    RuntimeCommandType::GetLockstepState;
+                if (header.type == MSG_ADVANCE_LOCKSTEP) {
+                    command_type =
+                        RuntimeCommandType::AdvanceLockstep;
+                } else if (header.type == MSG_EXIT_LOCKSTEP) {
+                    command_type =
+                        RuntimeCommandType::ExitLockstep;
+                }
+                auto command = make_runtime_command(
+                    command_type,
+                    header.request_id);
+                command->lockstep_session_id = session_id;
+                result = run_command(command);
+                if (result.status == RuntimeCommandStatus::Ok &&
+                    header.type != MSG_EXIT_LOCKSTEP) {
+                    data = lockstep_snapshot_bytes(
+                        result.lockstep_snapshot);
                 }
                 break;
             }

@@ -27,6 +27,10 @@ TYPE_GET_SCENARIO_STATE = 23
 TYPE_START_SCENARIO = 24
 TYPE_RESET_SCENARIO = 25
 TYPE_SET_CAMERA_PITCH = 26
+TYPE_ENTER_LOCKSTEP = 27
+TYPE_GET_LOCKSTEP_STATE = 28
+TYPE_ADVANCE_LOCKSTEP = 29
+TYPE_EXIT_LOCKSTEP = 30
 
 COMMAND_STATUS = {
     0: "OK",
@@ -45,6 +49,12 @@ COMMAND_STATUS = {
     13: "SCENARIO_PREPARE_FAILED",
     14: "SCENARIO_START_FAILED",
     15: "WORLD_AREA_NOT_READY",
+    16: "LOCKSTEP_ALREADY_ACTIVE",
+    17: "LOCKSTEP_NOT_ACTIVE",
+    18: "LOCKSTEP_SESSION_MISMATCH",
+    19: "LOCKSTEP_ADVANCE_TIMEOUT",
+    20: "LOCKSTEP_INTERRUPTED",
+    21: "LOCKSTEP_CLOCK_INVARIANT_FAILED",
 }
 
 CAPTURE_STATUS = {
@@ -68,6 +78,11 @@ MAX_FIRETRUCK_COUNT = 4
 MAX_PEDESTRIAN_COUNT = 32
 MAX_SCENARIO_OWNED_ENTITY_COUNT = (
     1 + 2 * MAX_FIRETRUCK_COUNT + MAX_PEDESTRIAN_COUNT
+)
+LOCKSTEP_STEP_MS = 250
+LOCKSTEP_SNAPSHOT_FORMAT = "<QQIIIQQIIf"
+LOCKSTEP_SNAPSHOT_SIZE = struct.calcsize(
+    LOCKSTEP_SNAPSHOT_FORMAT
 )
 
 
@@ -178,6 +193,20 @@ class ScenarioStartInfo:
     scenario_id: int
     game_timer_ms: int
     frame_count: int
+
+
+@dataclass(frozen=True)
+class LockstepSnapshot:
+    session_id: int
+    step_index: int
+    epoch_game_timer_ms: int
+    game_timer_ms: int
+    frame_count: int
+    target_elapsed_ms: int
+    actual_elapsed_ms: int
+    last_advance_ms: int
+    render_frames: int
+    max_frame_time_ms: float
 
 
 @dataclass(frozen=True)
@@ -488,6 +517,80 @@ def _decode_scenario_snapshot(payload):
         failure_message=failure_message,
         protected_entities=tuple(protected_entities),
         entities=tuple(entities),
+    )
+
+
+def _decode_lockstep_snapshot(payload):
+    if len(payload) != LOCKSTEP_SNAPSHOT_SIZE:
+        raise DroneSimProtocolError(
+            f"Lockstep snapshot has {len(payload)} bytes; "
+            f"expected {LOCKSTEP_SNAPSHOT_SIZE}"
+        )
+    (
+        session_id,
+        step_index,
+        epoch_game_timer_ms,
+        game_timer_ms,
+        frame_count,
+        target_elapsed_ms,
+        actual_elapsed_ms,
+        last_advance_ms,
+        render_frames,
+        max_frame_time_ms,
+    ) = struct.unpack(LOCKSTEP_SNAPSHOT_FORMAT, payload)
+    if session_id == 0:
+        raise DroneSimProtocolError(
+            "Lockstep snapshot contains a zero session_id"
+        )
+    expected_target = step_index * LOCKSTEP_STEP_MS
+    if target_elapsed_ms != expected_target:
+        raise DroneSimProtocolError(
+            "Lockstep target does not match step_index: "
+            f"{target_elapsed_ms}/{expected_target}"
+        )
+    if actual_elapsed_ms < target_elapsed_ms:
+        raise DroneSimProtocolError(
+            "Lockstep actual elapsed time is earlier than its target"
+        )
+    timer_elapsed = (
+        game_timer_ms - epoch_game_timer_ms
+    ) & 0xFFFFFFFF
+    if timer_elapsed != actual_elapsed_ms:
+        raise DroneSimProtocolError(
+            "Lockstep GTA timer does not match actual_elapsed_ms: "
+            f"{timer_elapsed}/{actual_elapsed_ms}"
+        )
+    if (
+        not math.isfinite(max_frame_time_ms)
+        or max_frame_time_ms < 0
+    ):
+        raise DroneSimProtocolError(
+            "Lockstep max_frame_time_ms is invalid"
+        )
+    if step_index == 0:
+        if (
+            last_advance_ms != 0
+            or render_frames != 0
+            or max_frame_time_ms != 0
+        ):
+            raise DroneSimProtocolError(
+                "Initial lockstep snapshot contains step diagnostics"
+            )
+    elif last_advance_ms == 0 or render_frames == 0:
+        raise DroneSimProtocolError(
+            "Advanced lockstep snapshot contains zero step diagnostics"
+        )
+    return LockstepSnapshot(
+        session_id=session_id,
+        step_index=step_index,
+        epoch_game_timer_ms=epoch_game_timer_ms,
+        game_timer_ms=game_timer_ms,
+        frame_count=frame_count,
+        target_elapsed_ms=target_elapsed_ms,
+        actual_elapsed_ms=actual_elapsed_ms,
+        last_advance_ms=last_advance_ms,
+        render_frames=render_frames,
+        max_frame_time_ms=float(max_frame_time_ms),
     )
 
 
@@ -885,6 +988,56 @@ class DroneSimClient:
                 )
             time.sleep(min(poll_interval, remaining))
 
+    def enter_lockstep(self):
+        return _decode_lockstep_snapshot(
+            self._command(TYPE_ENTER_LOCKSTEP)
+        )
+
+    def get_lockstep_state(self, session_id):
+        session_id = int(session_id)
+        if not 0 < session_id <= 0xFFFFFFFFFFFFFFFF:
+            raise ValueError("session_id must be a non-zero uint64")
+        snapshot = _decode_lockstep_snapshot(
+            self._command(
+                TYPE_GET_LOCKSTEP_STATE,
+                struct.pack("<Q", session_id),
+            )
+        )
+        if snapshot.session_id != session_id:
+            raise DroneSimProtocolError(
+                "Lockstep snapshot session does not match the request"
+            )
+        return snapshot
+
+    def advance_lockstep(self, session_id):
+        session_id = int(session_id)
+        if not 0 < session_id <= 0xFFFFFFFFFFFFFFFF:
+            raise ValueError("session_id must be a non-zero uint64")
+        snapshot = _decode_lockstep_snapshot(
+            self._command(
+                TYPE_ADVANCE_LOCKSTEP,
+                struct.pack("<Q", session_id),
+            )
+        )
+        if snapshot.session_id != session_id:
+            raise DroneSimProtocolError(
+                "Lockstep snapshot session does not match the request"
+            )
+        return snapshot
+
+    def exit_lockstep(self, session_id):
+        session_id = int(session_id)
+        if not 0 < session_id <= 0xFFFFFFFFFFFFFFFF:
+            raise ValueError("session_id must be a non-zero uint64")
+        data = self._command(
+            TYPE_EXIT_LOCKSTEP,
+            struct.pack("<Q", session_id),
+        )
+        if data:
+            raise DroneSimProtocolError(
+                "EXIT_LOCKSTEP returned unexpected data"
+            )
+
     def capture(self, timeout_ms=5000):
         timeout_ms = int(timeout_ms)
         if timeout_ms <= 0 or timeout_ms > 60000:
@@ -969,6 +1122,64 @@ class DroneSimClient:
             projection_matrix=tuple(matrices[:16]),
             view_matrix=tuple(matrices[16:]),
         )
+
+
+class LockstepSession:
+    """Strict context manager for a single plugin lockstep session.
+
+    An active scenario must be Reset explicitly before leaving the context.
+    Cleanup errors remain visible; this class never resumes a running scene.
+    """
+
+    def __init__(self, client):
+        if not isinstance(client, DroneSimClient):
+            raise TypeError("client must be a DroneSimClient")
+        self.client = client
+        self._snapshot = None
+
+    @property
+    def snapshot(self):
+        if self._snapshot is None:
+            raise RuntimeError("LockstepSession is not active")
+        return self._snapshot
+
+    @property
+    def session_id(self):
+        return self.snapshot.session_id
+
+    def __enter__(self):
+        if self._snapshot is not None:
+            raise RuntimeError("LockstepSession is already active")
+        self._snapshot = self.client.enter_lockstep()
+        return self
+
+    def refresh(self):
+        self._snapshot = self.client.get_lockstep_state(
+            self.session_id
+        )
+        return self._snapshot
+
+    def advance(self):
+        self._snapshot = self.client.advance_lockstep(
+            self.session_id
+        )
+        return self._snapshot
+
+    def close(self):
+        session_id = self.session_id
+        self.client.exit_lockstep(session_id)
+        self._snapshot = None
+
+    def __exit__(self, exception_type, exception, traceback):
+        if self._snapshot is None:
+            return False
+        try:
+            self.close()
+        except Exception as cleanup_error:
+            if exception is None:
+                raise
+            raise cleanup_error from exception
+        return False
 
 
 class RelativePoseController:

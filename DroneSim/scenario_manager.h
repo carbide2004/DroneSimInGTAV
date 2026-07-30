@@ -25,7 +25,9 @@ public:
     ScenarioOperationStatus reset(
         std::uint64_t scenario_id,
         std::string& error);
+    void force_reset();
     void tick();
+    void set_lockstep_frozen(bool frozen);
 
     ScenarioLifecycle lifecycle() const;
 
@@ -34,4 +36,5 @@ private:
 
     FireScenario fire_;
     std::uint64_t next_scenario_id_ = 1;
+    bool lockstep_frozen_ = false;
 };

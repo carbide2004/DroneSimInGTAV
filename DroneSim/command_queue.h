@@ -1,6 +1,7 @@
 #pragma once
 
 #include "scenario_types.h"
+#include "simulation_clock.h"
 
 #include <array>
 #include <atomic>
@@ -28,6 +29,10 @@ enum class RuntimeCommandType {
     GetScenarioState,
     StartScenario,
     ResetScenario,
+    EnterLockstep,
+    GetLockstepState,
+    AdvanceLockstep,
+    ExitLockstep,
 };
 
 enum class RuntimeCommandStatus : std::uint32_t {
@@ -47,6 +52,12 @@ enum class RuntimeCommandStatus : std::uint32_t {
     ScenarioPrepareFailed = 13,
     ScenarioStartFailed = 14,
     WorldAreaNotReady = 15,
+    LockstepAlreadyActive = 16,
+    LockstepNotActive = 17,
+    LockstepSessionMismatch = 18,
+    LockstepAdvanceTimeout = 19,
+    LockstepInterrupted = 20,
+    LockstepClockInvariantFailed = 21,
 };
 
 struct RuntimePose {
@@ -64,6 +75,7 @@ struct RuntimeCommandResult {
     RuntimePose pose;
     ScenarioSnapshot scenario_snapshot;
     ScenarioStartInfo scenario_start;
+    LockstepSnapshot lockstep_snapshot;
     std::uint64_t value = 0;
     bool bool_value = false;
 };
@@ -80,6 +92,7 @@ struct RuntimeCommand {
     std::string text;
     FireScenarioConfig fire_scenario_config;
     std::uint64_t scenario_id = 0;
+    std::uint64_t lockstep_session_id = 0;
 
     std::atomic<bool> cancelled{false};
     std::mutex completion_mutex;

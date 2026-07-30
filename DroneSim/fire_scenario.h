@@ -24,6 +24,7 @@ public:
     ScenarioOperationStatus snapshot(
         ScenarioSnapshot& output,
         std::string& error) const;
+    void set_lockstep_frozen(bool frozen);
     void reset();
 
     ScenarioLifecycle lifecycle() const;
@@ -139,5 +140,6 @@ private:
     std::size_t pedestrian_duplicate_rejections_ = 0;
     std::uint32_t start_game_timer_ms_ = 0;
     std::uint32_t start_frame_count_ = 0;
+    bool lockstep_frozen_ = false;
     std::string failure_;
 };

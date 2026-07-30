@@ -1109,7 +1109,9 @@ ScenarioOperationStatus FireScenario::start(
     }
 
     for (FireTruckActor& actor : firetrucks_) {
-        ENTITY::FREEZE_ENTITY_POSITION(actor.vehicle, FALSE);
+        ENTITY::FREEZE_ENTITY_POSITION(
+            actor.vehicle,
+            lockstep_frozen_ ? TRUE : FALSE);
         VEHICLE::SET_VEHICLE_HANDBRAKE(actor.vehicle, FALSE);
         VEHICLE::SET_VEHICLE_UNDRIVEABLE(actor.vehicle, FALSE);
         VEHICLE::SET_VEHICLE_ENGINE_ON(
@@ -1154,7 +1156,9 @@ ScenarioOperationStatus FireScenario::start(
          index < pedestrians_.size();
          ++index) {
         const Ped pedestrian = pedestrians_[index];
-        ENTITY::FREEZE_ENTITY_POSITION(pedestrian, FALSE);
+        ENTITY::FREEZE_ENTITY_POSITION(
+            pedestrian,
+            lockstep_frozen_ ? TRUE : FALSE);
         AI::TASK_SMART_FLEE_COORD(
             pedestrian,
             event_position_.x,
@@ -1174,6 +1178,9 @@ ScenarioOperationStatus FireScenario::start(
     }
 
     lifecycle_ = ScenarioLifecycle::Running;
+    if (lockstep_frozen_) {
+        registry_.freeze_kinematics();
+    }
     info.scenario_id = scenario_id_;
     info.game_timer_ms = start_game_timer_ms_;
     info.frame_count = start_frame_count_;
@@ -1183,7 +1190,40 @@ ScenarioOperationStatus FireScenario::start(
     return ScenarioOperationStatus::Ok;
 }
 
+void FireScenario::set_lockstep_frozen(bool frozen) {
+    lockstep_frozen_ = frozen;
+    if (lifecycle_ != ScenarioLifecycle::Running) {
+        return;
+    }
+    if (frozen) {
+        registry_.freeze_kinematics();
+    }
+    for (const FireTruckActor& actor : firetrucks_) {
+        if (actor.vehicle != 0 &&
+            ENTITY::DOES_ENTITY_EXIST(actor.vehicle)) {
+            ENTITY::FREEZE_ENTITY_POSITION(
+                actor.vehicle,
+                frozen ? TRUE : FALSE);
+        }
+    }
+    for (const Ped pedestrian : pedestrians_) {
+        if (pedestrian != 0 &&
+            ENTITY::DOES_ENTITY_EXIST(pedestrian)) {
+            ENTITY::FREEZE_ENTITY_POSITION(
+                pedestrian,
+                frozen ? TRUE : FALSE);
+        }
+    }
+    if (!frozen) {
+        registry_.restore_frozen_velocities();
+        registry_.unfreeze_kinematics();
+    }
+}
+
 void FireScenario::update_running() {
+    if (lockstep_frozen_) {
+        return;
+    }
     if (source_vehicle_ == 0 ||
         !ENTITY::DOES_ENTITY_EXIST(source_vehicle_)) {
         fail("Fire-source vehicle was lost while the scenario was running");

@@ -23,6 +23,12 @@ public:
         ScenarioVector3 task_target;
         float last_progress_distance = 0.0f;
         std::uint32_t last_activity_game_timer_ms = 0;
+        bool kinematics_frozen = false;
+        bool frozen_exists = false;
+        ScenarioVector3 frozen_position;
+        ScenarioVector3 frozen_velocity;
+        float frozen_speed = 0.0f;
+        float frozen_heading = 0.0f;
     };
 
     std::uint64_t add(
@@ -46,6 +52,9 @@ public:
     void update_tasks(
         const ScenarioVector3& event_position,
         std::uint32_t game_timer_ms);
+    void freeze_kinematics();
+    void restore_frozen_velocities();
+    void unfreeze_kinematics();
     std::vector<ScenarioEntitySnapshot> snapshots() const;
     void delete_all();
     void clear();

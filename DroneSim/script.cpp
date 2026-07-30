@@ -9,6 +9,7 @@
 #include "rgbd_capture.h"
 #include "scenario_manager.h"
 #include "server.h"
+#include "simulation_clock.h"
 
 #include <chrono>
 #include <cmath>
@@ -22,6 +23,9 @@ namespace {
 constexpr float kManualTranslationStepMeters = 1.0f;
 constexpr float kManualYawStepDegrees = 15.0f;
 constexpr float kDegreesToRadians = 0.01745329251994329577f;
+
+void show_notification(const std::string& text);
+void perform_lockstep_emergency_recovery();
 
 RuntimeCommandResult ok_result() {
     RuntimeCommandResult result;
@@ -76,6 +80,28 @@ RuntimeCommandStatus map_scenario_status(
             return RuntimeCommandStatus::ScenarioPrepareFailed;
         case ScenarioOperationStatus::StartFailed:
             return RuntimeCommandStatus::ScenarioStartFailed;
+        default:
+            return RuntimeCommandStatus::InternalError;
+    }
+}
+
+RuntimeCommandStatus map_lockstep_status(
+    LockstepOperationStatus status) {
+    switch (status) {
+        case LockstepOperationStatus::Ok:
+            return RuntimeCommandStatus::Ok;
+        case LockstepOperationStatus::AlreadyActive:
+            return RuntimeCommandStatus::LockstepAlreadyActive;
+        case LockstepOperationStatus::NotActive:
+            return RuntimeCommandStatus::LockstepNotActive;
+        case LockstepOperationStatus::SessionMismatch:
+            return RuntimeCommandStatus::LockstepSessionMismatch;
+        case LockstepOperationStatus::AdvanceTimeout:
+            return RuntimeCommandStatus::LockstepAdvanceTimeout;
+        case LockstepOperationStatus::Interrupted:
+            return RuntimeCommandStatus::LockstepInterrupted;
+        case LockstepOperationStatus::InvariantFailed:
+            return RuntimeCommandStatus::LockstepClockInvariantFailed;
         default:
             return RuntimeCommandStatus::InternalError;
     }
@@ -345,6 +371,49 @@ RuntimeCommandResult execute_command(const RuntimeCommand& command) {
             result.message = error;
             return result;
         }
+        case RuntimeCommandType::EnterLockstep: {
+            RuntimeCommandResult result = ok_result();
+            const LockstepOperationStatus status =
+                SimulationClock::instance().enter(
+                    result.lockstep_snapshot,
+                    error);
+            result.status = map_lockstep_status(status);
+            result.message = error;
+            return result;
+        }
+        case RuntimeCommandType::GetLockstepState: {
+            RuntimeCommandResult result = ok_result();
+            const LockstepOperationStatus status =
+                SimulationClock::instance().snapshot(
+                    command.lockstep_session_id,
+                    result.lockstep_snapshot,
+                    error);
+            result.status = map_lockstep_status(status);
+            result.message = error;
+            return result;
+        }
+        case RuntimeCommandType::AdvanceLockstep: {
+            RuntimeCommandResult result = ok_result();
+            const LockstepOperationStatus status =
+                SimulationClock::instance().advance(
+                    command.lockstep_session_id,
+                    command.cancelled,
+                    result.lockstep_snapshot,
+                    error);
+            result.status = map_lockstep_status(status);
+            result.message = error;
+            return result;
+        }
+        case RuntimeCommandType::ExitLockstep: {
+            RuntimeCommandResult result = ok_result();
+            const LockstepOperationStatus status =
+                SimulationClock::instance().exit(
+                    command.lockstep_session_id,
+                    error);
+            result.status = map_lockstep_status(status);
+            result.message = error;
+            return result;
+        }
         default:
             return error_result(
                 RuntimeCommandStatus::InvalidRequest,
@@ -357,21 +426,23 @@ void process_command(const RuntimeCommandPtr& command) {
         command->cancelled.load(std::memory_order_acquire)) {
         return;
     }
+    RuntimeCommandResult result;
     try {
-        complete_command(command, execute_command(*command));
+        result = execute_command(*command);
     } catch (const std::exception& exception) {
-        complete_command(
-            command,
-            error_result(
-                RuntimeCommandStatus::InternalError,
-                exception.what()));
+        result = error_result(
+            RuntimeCommandStatus::InternalError,
+            exception.what());
     } catch (...) {
-        complete_command(
-            command,
-            error_result(
-                RuntimeCommandStatus::InternalError,
-                "Unknown GTA script-thread exception"));
+        result = error_result(
+            RuntimeCommandStatus::InternalError,
+            "Unknown GTA script-thread exception");
     }
+    if (SimulationClock::instance()
+            .take_emergency_recovery_request()) {
+        perform_lockstep_emergency_recovery();
+    }
+    complete_command(command, std::move(result));
 }
 
 void show_notification(const std::string& text) {
@@ -379,6 +450,48 @@ void show_notification(const std::string& text) {
     UI::_ADD_TEXT_COMPONENT_STRING(
         const_cast<char*>(text.c_str()));
     UI::_DRAW_NOTIFICATION(FALSE, TRUE);
+}
+
+void discard_manual_camera_presses() {
+    MoveForward.consume_press();
+    MoveBackward.consume_press();
+    StrafeRight.consume_press();
+    StrafeLeft.consume_press();
+    MoveUp.consume_press();
+    MoveDown.consume_press();
+    YawLeft.consume_press();
+    YawRight.consume_press();
+}
+
+void perform_lockstep_emergency_recovery() {
+    ScenarioManager::instance().force_reset();
+    SimulationClock::instance().force_exit();
+
+    std::string error;
+    bool succeeded = true;
+    if (!CameraController::instance().stop(error)) {
+        succeeded = false;
+        LOGE(
+            "script",
+            "Lockstep emergency camera stop failed: " + error);
+    }
+    const RuntimeCommandResult restore_result = restore_player();
+    if (restore_result.status != RuntimeCommandStatus::Ok) {
+        succeeded = false;
+        LOGE(
+            "script",
+            "Lockstep emergency player restore failed: " +
+                restore_result.message);
+    }
+    discard_manual_camera_presses();
+    if (succeeded) {
+        show_notification(
+            "Lockstep stopped; scenario, camera and player restored");
+        LOGI("script", "Completed F11 lockstep emergency recovery");
+    } else {
+        show_notification(
+            "Lockstep stopped with recovery errors; check DroneSim.log");
+    }
 }
 
 void process_manual_camera_controls() {
@@ -500,17 +613,11 @@ void process_keyboard() {
                 "DroneSim camera is inactive; press F10 first");
         }
     }
-    if (F10.consume_press()) {
-        std::uint64_t camera_id = 0;
-        if (!CameraController::instance().create(camera_id, error)) {
-            LOGE("script", "F10 camera creation failed: " + error);
-            show_notification(
-                "DroneSim camera creation failed: " + error);
-        } else {
-            show_notification("DroneSim camera mode active");
-        }
-    }
     if (F11.consume_press()) {
+        if (SimulationClock::instance().is_active()) {
+            perform_lockstep_emergency_recovery();
+            return;
+        }
         bool succeeded = true;
         if (!CameraController::instance().stop(error)) {
             succeeded = false;
@@ -528,11 +635,30 @@ void process_keyboard() {
                     restore_result.message);
             show_notification(
                 "DroneSim player restore failed: " +
-                restore_result.message);
+                    restore_result.message);
         }
         if (succeeded) {
             show_notification(
                 "DroneSim camera stopped; player restored");
+        }
+        return;
+    }
+    if (SimulationClock::instance().is_active()) {
+        if (F10.consume_press()) {
+            show_notification(
+                "F10 is disabled while lockstep is active; use F11");
+        }
+        discard_manual_camera_presses();
+        return;
+    }
+    if (F10.consume_press()) {
+        std::uint64_t camera_id = 0;
+        if (!CameraController::instance().create(camera_id, error)) {
+            LOGE("script", "F10 camera creation failed: " + error);
+            show_notification(
+                "DroneSim camera creation failed: " + error);
+        } else {
+            show_notification("DroneSim camera mode active");
         }
     }
     process_manual_camera_controls();

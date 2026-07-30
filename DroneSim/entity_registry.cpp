@@ -169,6 +169,56 @@ void EntityRegistry::update_tasks(
     }
 }
 
+void EntityRegistry::freeze_kinematics() {
+    for (Entry& entry : entries_) {
+        if (entry.kinematics_frozen) {
+            continue;
+        }
+        entry.frozen_exists =
+            entry.handle != 0 &&
+            ENTITY::DOES_ENTITY_EXIST(entry.handle);
+        if (entry.frozen_exists) {
+            entry.frozen_position =
+                entity_position(entry.handle);
+            entry.frozen_velocity =
+                entity_velocity(entry.handle);
+            entry.frozen_speed =
+                ENTITY::GET_ENTITY_SPEED(entry.handle);
+            entry.frozen_heading =
+                ENTITY::GET_ENTITY_HEADING(entry.handle);
+        }
+        entry.kinematics_frozen = true;
+    }
+}
+
+void EntityRegistry::restore_frozen_velocities() {
+    for (Entry& entry : entries_) {
+        if (!entry.kinematics_frozen ||
+            !entry.frozen_exists ||
+            entry.handle == 0 ||
+            !ENTITY::DOES_ENTITY_EXIST(entry.handle)) {
+            continue;
+        }
+        if (entry.role != ScenarioEntityRole::FireTruck &&
+            entry.role !=
+                ScenarioEntityRole::FleeingPedestrian) {
+            continue;
+        }
+        ENTITY::SET_ENTITY_VELOCITY(
+            entry.handle,
+            entry.frozen_velocity.x,
+            entry.frozen_velocity.y,
+            entry.frozen_velocity.z);
+    }
+}
+
+void EntityRegistry::unfreeze_kinematics() {
+    for (Entry& entry : entries_) {
+        entry.kinematics_frozen = false;
+        entry.frozen_exists = false;
+    }
+}
+
 std::vector<ScenarioEntitySnapshot>
 EntityRegistry::snapshots() const {
     std::vector<ScenarioEntitySnapshot> output;
@@ -195,11 +245,22 @@ EntityRegistry::snapshots() const {
             entry.handle != 0 &&
             ENTITY::DOES_ENTITY_EXIST(entry.handle);
         if (snapshot.exists) {
-            snapshot.position = entity_position(entry.handle);
-            snapshot.velocity = entity_velocity(entry.handle);
-            snapshot.speed = ENTITY::GET_ENTITY_SPEED(entry.handle);
-            snapshot.heading =
-                ENTITY::GET_ENTITY_HEADING(entry.handle);
+            if (entry.kinematics_frozen &&
+                entry.frozen_exists) {
+                snapshot.position = entry.frozen_position;
+                snapshot.velocity = entry.frozen_velocity;
+                snapshot.speed = entry.frozen_speed;
+                snapshot.heading = entry.frozen_heading;
+            } else {
+                snapshot.position =
+                    entity_position(entry.handle);
+                snapshot.velocity =
+                    entity_velocity(entry.handle);
+                snapshot.speed =
+                    ENTITY::GET_ENTITY_SPEED(entry.handle);
+                snapshot.heading =
+                    ENTITY::GET_ENTITY_HEADING(entry.handle);
+            }
         }
         output.push_back(snapshot);
     }

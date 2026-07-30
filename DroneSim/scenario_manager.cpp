@@ -19,6 +19,7 @@ ScenarioOperationStatus ScenarioManager::prepare_fire(
     }
     const ScenarioOperationStatus status =
         fire_.prepare(scenario_id, config, error);
+    fire_.set_lockstep_frozen(lockstep_frozen_);
     if (status != ScenarioOperationStatus::Ok) {
         scenario_id = 0;
         return status;
@@ -62,8 +63,19 @@ ScenarioOperationStatus ScenarioManager::reset(
     return ScenarioOperationStatus::Ok;
 }
 
+void ScenarioManager::force_reset() {
+    if (fire_.lifecycle() != ScenarioLifecycle::Empty) {
+        fire_.reset();
+    }
+}
+
 void ScenarioManager::tick() {
     fire_.tick();
+}
+
+void ScenarioManager::set_lockstep_frozen(bool frozen) {
+    lockstep_frozen_ = frozen;
+    fire_.set_lockstep_frozen(frozen);
 }
 
 ScenarioLifecycle ScenarioManager::lifecycle() const {
