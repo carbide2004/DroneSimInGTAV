@@ -73,11 +73,13 @@ and goal-view reachability before response-ecology measurement. Neither
 diagnostic is called full task solvability. The old static anomaly generators
 and oracle collection code must not be restored.
 
-The research action budget uses four mutually exclusive actions. Translation
-changes only position, yaw rotation changes only yaw, HOLD changes neither
-while advancing one 250 ms simulation step, and STOP terminates from the
-current observation. A policy cannot translate and rotate in one action. The
-canonical horizon is 65 actions including STOP.
+The research action budget uses seven mutually exclusive actions: fixed
+2-metre FORWARD, fixed 2-metre ASCEND and DESCEND, fixed 15-degree TURN_LEFT
+and TURN_RIGHT, HOLD, and STOP. A movement or turn advances one 250 ms
+simulation step, HOLD advances time without changing pose, and STOP terminates
+from the current observation. There is no backward, lateral, diagonal, or
+combined movement and rotation. The canonical horizon is 65 actions including
+STOP.
 A valid consecutive response cue requires the same ACTIVE actor to remain
 task-observable across two adjacent observations, move at least 0.4 metres
 horizontally, and agree with its expected event-relative direction by a
@@ -88,3 +90,17 @@ while reporting same-step cue reproduction as a diagnostic because GTA AI
 trajectories are not specified to be frame-identical across reconstructed
 rollouts. Cross-rollout cue reliability belongs to response-ecology
 measurement.
+
+## Current Stage 2D TODO
+
+The immediate engineering target is a stable strict witness for
+`CUE_VISIBLE`. Because that stratum guarantees at least one response actor is
+observable at the initial frozen observation, the audit must first support
+repeated HOLD observations at the start pose before invoking spatial search.
+
+`CUE_HIDDEN` joint-witness planning is deferred. In the current fixed-action
+search, ten exploratory episodes with an 80-action horizon produced no joint
+witness and almost never found even a first task-observable response view.
+This is recorded as a planner/search-coverage TODO, not evidence that the task
+or stratum is mathematically impossible. Its visibility thresholds and cue
+definition must not be silently weakened to manufacture a pass.

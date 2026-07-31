@@ -50,7 +50,7 @@ def _load_json(path):
 def _load_episode(path):
     path = Path(path).resolve()
     payload = _load_json(path)
-    if payload.get("schema_version") != 1:
+    if payload.get("schema_version") != 2:
         raise RuntimeError(
             f"Unsupported trajectory schema in {path}"
         )
@@ -77,6 +77,21 @@ def _resolve_episodes(path, stratum):
             f"No run.json or trajectory.json under {path}"
         )
     run = _load_json(run_path)
+    episodes = run.get("episodes")
+    if isinstance(episodes, list):
+        selected = [
+            item
+            for item in episodes
+            if stratum == "both" or item.get("stratum") == stratum
+        ]
+        if not selected:
+            raise RuntimeError(
+                f"Recording contains no episodes for {stratum}"
+            )
+        return [
+            _load_episode(path / item["path"])
+            for item in selected
+        ]
     available = {
         item["name"]: item["path"]
         for item in run.get("strata", [])
@@ -106,15 +121,14 @@ def _resolve_episodes(path, stratum):
 
 def _action_text(action):
     action_type = action["type"]
-    if action_type == "TRANSLATE":
-        return (
-            "TRANSLATE("
-            f"forward={action['dx_body']:+.2f}, "
-            f"right={action['dy_body']:+.2f}, "
-            f"up={action['dz_world']:+.2f}) m"
-        )
-    if action_type == "ROTATE":
-        return f"ROTATE(yaw={action['dyaw']:+.1f} deg)"
+    if action_type in {
+        "FORWARD",
+        "ASCEND",
+        "DESCEND",
+        "TURN_LEFT",
+        "TURN_RIGHT",
+    }:
+        return action_type
     if action_type == "HOLD":
         return "HOLD"
     estimate = action["event_estimate_local"]

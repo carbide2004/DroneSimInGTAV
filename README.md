@@ -45,20 +45,24 @@ instant:
 - `oblique`: pitch `-45 degrees`;
 - `nadir`: pitch `-90 degrees`.
 
-The canonical research actions are mutually exclusive:
+The canonical research action space is strictly discrete:
 
-- `TRANSLATE(dx_body, dy_body, dz_world)` changes position only, with a
-  three-dimensional translation norm no greater than `2 m`;
-- `ROTATE(dyaw)` changes yaw only, by no more than `15 degrees`;
+- `FORWARD` moves exactly `2 m` along the current body-forward direction;
+- `ASCEND` moves exactly `2 m` along GTA world up;
+- `DESCEND` moves exactly `2 m` along GTA world down;
+- `TURN_LEFT` increases GTA yaw by exactly `15 degrees`;
+- `TURN_RIGHT` decreases GTA yaw by exactly `15 degrees`;
 - `HOLD` keeps the pose fixed while acquiring the next observation;
 - `STOP(event_estimate_local)` terminates on the current frozen observation.
 
-`TRANSLATE`, `ROTATE`, and `HOLD` each advance exactly `250 ms` of GTA
-simulation time and produce a new dual-view observation. `STOP` consumes one
-action but does not advance simulation time. Translation and yaw rotation
-cannot occur in the same research action. The canonical horizon is 65 actions,
-including `STOP`. These limits are separate from the low-level absolute-pose
-API and the `1 m / 15 degree` manual keyboard controls.
+`FORWARD`, `ASCEND`, `DESCEND`, both turn actions, and `HOLD` each advance
+exactly `250 ms` of GTA simulation time and produce a new dual-view
+observation. `STOP` consumes one action but does not advance simulation time.
+There is no backward motion, lateral translation, diagonal translation,
+variable action magnitude, or combined translation and rotation. The
+canonical horizon is 65 actions, including `STOP`. These limits are separate
+from the low-level absolute-pose API and the `1 m / 15 degree` manual keyboard
+controls.
 
 A valid consecutive dynamic cue uses the same ACTIVE response actor in two
 adjacent frozen observations. The actor must be task-observable in both,
@@ -207,7 +211,7 @@ DroneSim/                  GTA V ASI plugin
 agent_control/
   dronesim_client.py       strict Python client and relative-pose wrapper
   task_starts.py           evaluation-only starts and local task boundary
-  research_actions.py      mutually exclusive research actions
+  research_actions.py      seven fixed research actions
   feasibility.py           Stage 2D bounded joint-witness search
   requirements.txt         online validation dependencies
 validation/
@@ -274,11 +278,14 @@ from agent_control.dronesim_client import (
     RelativePoseController,
 )
 from agent_control.research_actions import (
+    AscendAction,
+    DescendAction,
+    ForwardAction,
     HoldAction,
     ResearchActionExecutor,
-    RotateAction,
     StopAction,
-    TranslateAction,
+    TurnLeftAction,
+    TurnRightAction,
 )
 
 client = DroneSimClient()
@@ -312,11 +319,11 @@ with LockstepSession(client) as lockstep:
 
 `RelativePoseController` is a low-level utility and can still set translation
 and yaw together. Research agents must use `ResearchActionExecutor`, which
-rejects mixed translation/yaw actions, reserves one action for `STOP`, advances
-lockstep exactly once for every non-terminal action, and treats a zero-motion
-observation as an explicit `HoldAction`. Its agent result contains start-local
-odometry and RGB-D without the absolute world view matrices; raw pairs remain
-available only to evaluation code.
+accepts only the seven fixed actions above, reserves one action for `STOP`,
+advances lockstep exactly once for every non-terminal action, and represents a
+zero-motion observation explicitly as `HoldAction`. Its agent result contains
+start-local odometry and RGB-D without the absolute world view matrices; raw
+pairs remain available only to evaluation code.
 
 All non-capture commands acknowledge only after the GTA script thread has
 executed them. The Python client contains no settling sleeps. A failed command
@@ -468,7 +475,12 @@ python validation\validate_visibility_starts.py --anchor X Y Z
 python validation\validate_visibility_starts.py --anchor X Y Z --show-starts
 python validation\validate_visibility_starts.py --anchor X Y Z --queries 1000
 python validation\validate_spatiotemporal_feasibility.py --anchor X Y Z
+python validation\validate_spatiotemporal_feasibility.py --anchor X Y Z --search-timeout 120
 python validation\validate_spatiotemporal_feasibility.py --anchor X Y Z --record-dir recordings\stage2d_run
+python validation\find_stage2d_witness.py --anchor X Y Z --stratum CUE_VISIBLE --attempts 10 --all-attempts
+python validation\find_stage2d_witness.py --anchor X Y Z --stratum CUE_VISIBLE --attempts 10 --all-attempts --record-dir recordings\visible_witness
+python validation\find_stage2d_witness.py --anchor X Y Z --stratum CUE_VISIBLE --attempts 10 --all-attempts --record-dir recordings\visible_witness_all --record-all-successes
+python validation\find_stage2d_witness.py --anchor X Y Z --stratum CUE_HIDDEN --attempts 10 --horizon-steps 80 --search-timeout 300
 python validation\visualize_spatiotemporal_trajectory.py recordings\stage2d_run
 ```
 
@@ -480,6 +492,29 @@ and projected target boxes. The offline player connects to no GTA process.
 It plays both strata in sequence by default; use
 `--stratum CUE_VISIBLE` or `--stratum CUE_HIDDEN` to select one. Space
 pauses, Left/Right steps, Home/End jumps, and Q closes the window.
+
+Stage 2D prints setup and fixed-action search progress separately. Its
+`--search-timeout` is a wall-clock limit for each visibility stratum and
+defaults to 120 seconds. A timeout returns `UNKNOWN`; it does not silently
+switch planners or claim that the task is unreachable. `Ctrl+C` executes the
+normal scenario/lockstep/player cleanup path; F11 remains the in-game emergency
+recovery control.
+
+`find_stage2d_witness.py` is an exploratory probability audit, not the formal
+two-stratum Stage 2D acceptance test. It searches one requested stratum, reuses
+one fire-scene blueprint, advances `start_seed` by one per attempt, and stops
+after the first strict joint witness with the required action margin.
+`--all-attempts` instead runs every attempt, structurally replays each
+successful witness, and reports the witness rate; only the first successful
+replay is recorded by default. The explicit `--record-all-successes` flag
+stores every successful path in a separate attempt subdirectory and therefore
+can grow substantially; it requires both `--all-attempts` and `--record-dir`.
+Without `--record-dir`, the audit remains entirely in memory. Use
+`--start-seed-step 0` to retry the same task start while sampling only GTA AI
+trajectory variation. `--horizon-steps` and `--search-timeout` are explicit
+exploration controls; they do not change the canonical 65-action definition.
+A supplied `--record-dir` records only the successful replay and still writes
+no Depth payload.
 
 The lockstep validator also reuses one immutable scenario blueprint for a
 continuous realtime run and a matched `250 ms` lockstep run. It compares

@@ -24,8 +24,9 @@ from .dronesim_client import (
 )
 
 
-TASK_MAX_TRANSLATION_METERS = 2.0
-TASK_MAX_YAW_DEGREES = 15.0
+TASK_FORWARD_STEP_METERS = 2.0
+TASK_VERTICAL_STEP_METERS = 2.0
+TASK_YAW_STEP_DEGREES = 15.0
 TASK_STEP_MILLISECONDS = 250
 TASK_HORIZON_STEPS = 65
 TASK_ACTIVITY_RADIUS_METERS = 120.0
@@ -127,11 +128,12 @@ class ObservationSpec:
 
 @dataclass(frozen=True)
 class TaskActionSpec:
-    max_translation_m: float = TASK_MAX_TRANSLATION_METERS
-    max_yaw_degrees: float = TASK_MAX_YAW_DEGREES
+    forward_step_m: float = TASK_FORWARD_STEP_METERS
+    vertical_step_m: float = TASK_VERTICAL_STEP_METERS
+    yaw_step_degrees: float = TASK_YAW_STEP_DEGREES
     simulation_step_ms: int = TASK_STEP_MILLISECONDS
     horizon_steps: int = TASK_HORIZON_STEPS
-    translation_and_yaw_are_mutually_exclusive: bool = True
+    strictly_discrete: bool = True
     hold_advances_simulation: bool = True
     stop_consumes_action: bool = True
 
@@ -359,25 +361,36 @@ class TaskRelativePoseController:
         )
         if not all(math.isfinite(value) for value in values):
             raise ValueError("Task action contains a non-finite value")
-        translation = math.sqrt(
-            values[0] ** 2
-            + values[1] ** 2
-            + values[2] ** 2
-        )
         action_spec = self._blueprint.action_spec
-        if translation > action_spec.max_translation_m + 1.0e-9:
-            raise ValueError(
-                "Task action exceeds the 3D translation limit"
-            )
-        if abs(values[3]) > action_spec.max_yaw_degrees + 1.0e-9:
-            raise ValueError("Task action exceeds the yaw limit")
-        if translation > 1.0e-9 and abs(values[3]) > 1.0e-9:
-            raise ValueError(
-                "INVALID_TASK_ACTION: translation and yaw rotation "
-                "cannot share one research action"
-            )
-        if translation <= 1.0e-9 and abs(values[3]) <= 1.0e-9:
+        tolerance = 1.0e-9
+        is_hold = all(abs(value) <= tolerance for value in values)
+        is_forward = (
+            abs(values[0] - action_spec.forward_step_m) <= tolerance
+            and abs(values[1]) <= tolerance
+            and abs(values[2]) <= tolerance
+            and abs(values[3]) <= tolerance
+        )
+        is_vertical = (
+            abs(values[0]) <= tolerance
+            and abs(values[1]) <= tolerance
+            and abs(abs(values[2]) - action_spec.vertical_step_m)
+            <= tolerance
+            and abs(values[3]) <= tolerance
+        )
+        is_turn = (
+            abs(values[0]) <= tolerance
+            and abs(values[1]) <= tolerance
+            and abs(values[2]) <= tolerance
+            and abs(abs(values[3]) - action_spec.yaw_step_degrees)
+            <= tolerance
+        )
+        if is_hold:
             return self.odometry
+        if not (is_forward or is_vertical or is_turn):
+            raise ValueError(
+                "INVALID_TASK_ACTION: expected fixed FORWARD, "
+                "ASCEND, DESCEND, TURN_LEFT, TURN_RIGHT, or HOLD"
+            )
 
         x, y, z, _pitch, _roll, yaw = self._absolute_pose
         yaw_radians = math.radians(yaw)
@@ -738,6 +751,7 @@ def generate_task_start(
     visibility_stratum,
     start_seed,
     max_candidates=TASK_MAX_START_CANDIDATES,
+    horizon_steps=TASK_HORIZON_STEPS,
 ):
     if not isinstance(session, LockstepSession):
         raise TypeError("session must be a LockstepSession")
@@ -762,6 +776,9 @@ def generate_task_start(
     max_candidates = int(max_candidates)
     if max_candidates <= 0 or max_candidates > 4096:
         raise ValueError("max_candidates must be in [1, 4096]")
+    horizon_steps = int(horizon_steps)
+    if not 8 <= horizon_steps <= 256:
+        raise ValueError("horizon_steps must be in [8, 256]")
 
     rng = random.Random(
         start_seed ^ 0x53544152545F504F
@@ -930,7 +947,7 @@ def generate_task_start(
         visibility_stratum=visibility_stratum,
         observation_spec=observation_spec,
         activity_bounds=ActivityBounds(),
-        action_spec=TaskActionSpec(),
+        action_spec=TaskActionSpec(horizon_steps=horizon_steps),
     )
     if horizontal_distance > (
         blueprint.activity_bounds.horizontal_radius_m

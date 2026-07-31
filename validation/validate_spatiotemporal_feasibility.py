@@ -26,18 +26,24 @@ from agent_control.feasibility import (  # noqa: E402
     SpatiotemporalFeasibilityAuditor,
 )
 from agent_control.research_actions import (  # noqa: E402
+    AscendAction,
+    DescendAction,
+    ForwardAction,
     HoldAction,
     InvalidTaskAction,
     ResearchActionExecutor,
-    RotateAction,
     StopAction,
-    TranslateAction,
+    TurnLeftAction,
+    TurnRightAction,
 )
 from agent_control.task_starts import (  # noqa: E402
     ObservationSpec,
     StartVisibilityStratum,
+    TASK_FORWARD_STEP_METERS,
     TASK_HORIZON_STEPS,
     TASK_MIN_CUE_HORIZONTAL_DISPLACEMENT_METERS,
+    TASK_VERTICAL_STEP_METERS,
+    TASK_YAW_STEP_DEGREES,
     assess_visibility,
     generate_task_start,
     pair_view_matrices,
@@ -64,9 +70,27 @@ def _parse_args():
     )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--start-seed", type=int, default=1)
+    parser.add_argument(
+        "--horizon-steps",
+        type=int,
+        default=TASK_HORIZON_STEPS,
+        help=(
+            "Agent action horizon; the formal Stage 2D default is "
+            f"{TASK_HORIZON_STEPS}"
+        ),
+    )
     parser.add_argument("--firetrucks", type=int, default=1)
     parser.add_argument("--pedestrians", type=int, default=32)
     parser.add_argument("--prepare-timeout", type=float, default=20.0)
+    parser.add_argument(
+        "--search-timeout",
+        type=float,
+        default=120.0,
+        help=(
+            "Maximum fixed-action search wall time per visibility "
+            "stratum in seconds"
+        ),
+    )
     parser.add_argument("--max-start-candidates", type=int, default=256)
     parser.add_argument("--host", default="127.0.0.5")
     parser.add_argument("--port", type=int, default=23456)
@@ -92,6 +116,8 @@ def _parse_args():
         parser.error("--seed must fit uint64")
     if not 0 <= args.start_seed <= 0xFFFFFFFFFFFFFFFF:
         parser.error("--start-seed must fit uint64")
+    if not 8 <= args.horizon_steps <= 256:
+        parser.error("--horizon-steps must be in [8, 256]")
     if not 0 <= args.firetrucks <= 4:
         parser.error("--firetrucks must be in [0, 4]")
     if not 0 <= args.pedestrians <= 32:
@@ -100,6 +126,11 @@ def _parse_args():
         parser.error("At least one response actor is required")
     if not 1 <= args.record_jpeg_quality <= 95:
         parser.error("--record-jpeg-quality must be in [1, 95]")
+    if (
+        not math.isfinite(args.search_timeout)
+        or args.search_timeout <= 0.0
+    ):
+        parser.error("--search-timeout must be finite and positive")
     return args
 
 
@@ -139,6 +170,7 @@ def _prepare_running(
             stratum,
             start_seed,
             max_candidates=args.max_start_candidates,
+            horizon_steps=args.horizon_steps,
         )
         return scenario_id, ready.blueprint_id, session, generated
     except Exception:
@@ -151,7 +183,7 @@ def _prepare_running(
 
 def _witness_digest(report):
     digest = hashlib.blake2b(digest_size=16)
-    digest.update(report.roadmap_digest.encode("ascii"))
+    digest.update(report.search_digest.encode("ascii"))
     digest.update(int(report.status).to_bytes(4, "little"))
     if report.witness is not None:
         for action in report.witness.actions:
@@ -159,7 +191,7 @@ def _witness_digest(report):
     return digest.hexdigest()
 
 
-def _validate_witness_structure(report):
+def _validate_witness_structure(report, horizon_steps):
     witness = report.witness
     if witness is None:
         raise RuntimeError(
@@ -179,8 +211,11 @@ def _validate_witness_structure(report):
     if not isinstance(witness.actions[-1], StopAction):
         raise RuntimeError("Witness does not terminate with STOP")
     if (
-        witness.translate_actions
-        + witness.rotate_actions
+        witness.forward_actions
+        + witness.ascend_actions
+        + witness.descend_actions
+        + witness.turn_left_actions
+        + witness.turn_right_actions
         + witness.hold_actions
         + witness.stop_actions
         != witness.total_actions
@@ -189,27 +224,21 @@ def _validate_witness_structure(report):
             "Witness action-class counts do not sum to total_actions"
         )
     if (
-        witness.total_actions > TASK_HORIZON_STEPS
+        witness.total_actions > horizon_steps
         or witness.remaining_actions < REQUIRED_ACTION_MARGIN
     ):
         raise RuntimeError("Witness violates horizon or margin")
+    allowed = (
+        ForwardAction,
+        AscendAction,
+        DescendAction,
+        TurnLeftAction,
+        TurnRightAction,
+        HoldAction,
+        StopAction,
+    )
     for action in witness.actions:
-        if isinstance(action, TranslateAction):
-            norm = math.sqrt(
-                action.dx_body**2
-                + action.dy_body**2
-                + action.dz_world**2
-            )
-            if norm > 2.0 + 1.0e-6:
-                raise RuntimeError(
-                    f"Witness translation is {norm:.6f} m"
-                )
-        elif isinstance(action, RotateAction):
-            if abs(action.dyaw) > 15.0 + 1.0e-6:
-                raise RuntimeError(
-                    f"Witness yaw action is {action.dyaw:.6f} deg"
-                )
-        elif not isinstance(action, (HoldAction, StopAction)):
+        if not isinstance(action, allowed):
             raise RuntimeError(
                 f"Witness contains unknown action {action!r}"
             )
@@ -219,16 +248,17 @@ def _show_witness(auditor, report):
     import matplotlib.pyplot as plt
 
     witness = report.witness
-    nodes = auditor.roadmap.nodes
     figure, axis = plt.subplots(figsize=(9, 8))
-    axis.scatter(
-        nodes[:, 0],
-        nodes[:, 1],
-        s=3,
-        alpha=0.25,
-        color="gray",
-        label="2 m-clear PRM nodes",
-    )
+    searched = np.asarray(auditor.search_positions)
+    if searched.size:
+        axis.scatter(
+            searched[:, 0],
+            searched[:, 1],
+            s=3,
+            alpha=0.2,
+            color="gray",
+            label="searched fixed-action states",
+        )
     start = np.asarray(
         auditor.generated_start.blueprint.absolute_pose[:3]
     )
@@ -238,23 +268,23 @@ def _show_witness(auditor, report):
     trajectory = [start.copy()]
     position = start.copy()
     for action in witness.actions:
-        if isinstance(action, TranslateAction):
+        if isinstance(action, ForwardAction):
             yaw_radians = math.radians(yaw)
             forward = np.asarray(
                 (-math.sin(yaw_radians), math.cos(yaw_radians), 0.0)
             )
-            right = np.asarray(
-                (math.cos(yaw_radians), math.sin(yaw_radians), 0.0)
-            )
-            position = (
-                position
-                + forward * action.dx_body
-                + right * action.dy_body
-                + np.asarray((0.0, 0.0, action.dz_world))
-            )
+            position = position + forward * TASK_FORWARD_STEP_METERS
             trajectory.append(position.copy())
-        elif isinstance(action, RotateAction):
-            yaw += action.dyaw
+        elif isinstance(action, AscendAction):
+            position[2] += TASK_VERTICAL_STEP_METERS
+            trajectory.append(position.copy())
+        elif isinstance(action, DescendAction):
+            position[2] -= TASK_VERTICAL_STEP_METERS
+            trajectory.append(position.copy())
+        elif isinstance(action, TurnLeftAction):
+            yaw += TASK_YAW_STEP_DEGREES
+        elif isinstance(action, TurnRightAction):
+            yaw -= TASK_YAW_STEP_DEGREES
         elif isinstance(action, HoldAction):
             trajectory.append(position.copy())
     trajectory = np.asarray(trajectory)
@@ -546,12 +576,13 @@ def _replay(
         invalid_pose = client.get_pose()
         invalid_clock = session.refresh()
         try:
-            executor.execute_components(0.25, 0.0, 0.0, 1.0)
+            executor.execute(object())
         except InvalidTaskAction:
             pass
         else:
             raise RuntimeError(
-                "Research executor accepted mixed translation and yaw"
+                "Research executor accepted an action outside the "
+                "seven fixed task actions"
             )
         if (
             executor.action_count != 0
@@ -565,7 +596,8 @@ def _replay(
             or session.refresh().step_index != invalid_clock.step_index
         ):
             raise RuntimeError(
-                "Rejected mixed action changed pose, clock, or action count"
+                "Rejected invalid action changed pose, clock, or "
+                "action count"
             )
         cue_observations = {}
         if witness.cue.first_step == 0:
@@ -738,6 +770,10 @@ def _search_once(
     scenario_id = None
     session = None
     try:
+        print(
+            f"{stratum.name} setup start "
+            f"search_timeout={args.search_timeout:.1f}s"
+        )
         setup_started = time.perf_counter()
         (
             scenario_id,
@@ -752,11 +788,17 @@ def _search_once(
             start_seed,
         )
         setup_seconds = time.perf_counter() - setup_started
+        print(
+            f"{stratum.name} setup PASS "
+            f"time={setup_seconds:.1f}s; fixed-action search start"
+        )
         auditor = SpatiotemporalFeasibilityAuditor(
             client,
             session,
             scenario_id,
             generated,
+            search_timeout_seconds=args.search_timeout,
+            progress_callback=print,
         )
         report = auditor.run()
         digest = _witness_digest(report)
@@ -764,7 +806,7 @@ def _search_once(
         timing = dict(report.phase_seconds)
         timing_text = (
             f"setup={setup_seconds:.1f}s "
-            f"roadmap={timing['roadmap']:.1f}s "
+            f"action_search={timing['action_search']:.1f}s "
             f"goal={timing['goal_visibility']:.1f}s "
             f"cue_search={timing['temporal_cue_search']:.1f}s "
             f"total={time.perf_counter() - search_started:.1f}s"
@@ -780,8 +822,11 @@ def _search_once(
             candidate_text = "none"
             if witness is not None:
                 candidate_text = (
-                    f"T{witness.translate_actions}/"
-                    f"R{witness.rotate_actions}/"
+                    f"F{witness.forward_actions}/"
+                    f"U{witness.ascend_actions}/"
+                    f"D{witness.descend_actions}/"
+                    f"L{witness.turn_left_actions}/"
+                    f"R{witness.turn_right_actions}/"
                     f"H{witness.hold_actions}/"
                     f"S{witness.stop_actions} "
                     f"total={witness.total_actions} "
@@ -791,8 +836,8 @@ def _search_once(
                 f"{stratum.name} search FAIL "
                 f"start={report.start_id} "
                 f"status={report.status.name} "
-                f"roadmap={report.roadmap_nodes}n/"
-                f"{report.roadmap_edges}e "
+                f"search={report.searched_states}states/"
+                f"{report.checked_motion_edges}edges "
                 f"steps={report.queried_steps} "
                 f"cue_path={report.cue_path_found} "
                 f"goal_path={report.goal_view_path_found} "
@@ -807,15 +852,21 @@ def _search_once(
             if args.show_witness and witness is not None:
                 _show_witness(auditor, report)
         else:
-            _validate_witness_structure(report)
+            _validate_witness_structure(
+                report,
+                generated.blueprint.action_spec.horizon_steps,
+            )
             print(
                 f"{stratum.name} search PASS "
                 f"start={report.start_id} "
-                f"roadmap={report.roadmap_nodes}n/"
-                f"{report.roadmap_edges}e "
+                f"search={report.searched_states}states/"
+                f"{report.checked_motion_edges}edges "
                 f"steps={report.queried_steps} "
-                f"actions=T{witness.translate_actions}/"
-                f"R{witness.rotate_actions}/"
+                f"actions=F{witness.forward_actions}/"
+                f"U{witness.ascend_actions}/"
+                f"D{witness.descend_actions}/"
+                f"L{witness.turn_left_actions}/"
+                f"R{witness.turn_right_actions}/"
                 f"H{witness.hold_actions}/"
                 f"S{witness.stop_actions} "
                 f"total={witness.total_actions} "
@@ -890,6 +941,7 @@ def main():
                 "anchor": list(args.anchor),
                 "seed": args.seed,
                 "start_seed": args.start_seed,
+                "horizon_steps": args.horizon_steps,
                 "firetrucks": args.firetrucks,
                 "pedestrians": args.pedestrians,
                 "jpeg_quality": args.record_jpeg_quality,
@@ -953,12 +1005,12 @@ def main():
                 if (
                     repeated_blueprint != blueprint_id
                     or repeated_report.start_id != report.start_id
-                    or repeated_report.roadmap_digest
-                    != report.roadmap_digest
+                    or repeated_report.search_digest
+                    != report.search_digest
                 ):
                     raise RuntimeError(
-                        f"{stratum.name} task start or PRM is "
-                        "not deterministic"
+                        f"{stratum.name} task start or fixed action "
+                        "lattice is not deterministic"
                     )
                 if repeated_digest != digest:
                     print(
@@ -1012,7 +1064,7 @@ def main():
                 "was written."
             )
         )
-    except Exception as error:
+    except BaseException as error:
         validation_error = error
         raise
     finally:

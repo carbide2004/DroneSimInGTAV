@@ -1,13 +1,13 @@
-"""Evaluation-only Stage 2D joint-path witness search.
+"""Evaluation-only Stage 2D joint-witness search.
 
-This module uses privileged scenario and visibility truth. Its reports must
-never be exposed as an agent observation.
+The search uses privileged scenario and visibility truth. It operates directly
+on the seven fixed research actions and must never be exposed as an agent
+observation.
 """
 
 import hashlib
 import heapq
 import math
-import random
 import time
 from dataclasses import dataclass
 from enum import IntEnum
@@ -21,18 +21,19 @@ from .dronesim_client import (
     VisibilityTargetRole,
 )
 from .research_actions import (
+    AscendAction,
+    DescendAction,
+    ForwardAction,
     HoldAction,
-    RotateAction,
     StopAction,
-    TranslateAction,
+    TurnLeftAction,
+    TurnRightAction,
 )
 from .task_starts import (
-    TASK_ACTIVITY_RADIUS_METERS,
-    TASK_ACTIVITY_VERTICAL_METERS,
-    TASK_HORIZON_STEPS,
-    TASK_MAX_TRANSLATION_METERS,
-    TASK_MAX_YAW_DEGREES,
+    TASK_FORWARD_STEP_METERS,
     TASK_MIN_CUE_HORIZONTAL_DISPLACEMENT_METERS,
+    TASK_VERTICAL_STEP_METERS,
+    TASK_YAW_STEP_DEGREES,
     GeneratedTaskStart,
     _assess_target_view,
     pair_view_matrices,
@@ -40,19 +41,21 @@ from .task_starts import (
 )
 
 
-PRM_NODE_COUNT = 1024
-PRM_MAX_PROPOSALS = 8192
-PRM_NEIGHBORS = 16
-PRM_MAX_EDGE_METERS = 24.0
-GEOMETRY_BATCH_SIZE = 256
-VISIBILITY_BATCH_SIZE = 64
-CUE_RESPONDERS_PER_STEP = 16
-CUE_FIRST_VIEW_CASES_PER_STEP = 32
-CUE_VIEW_CASES_PER_RESPONDER = 2
-GOAL_CANDIDATE_LIMIT = 64
-GOAL_ANGULAR_BINS = 16
-GOAL_CASES_PER_ANGULAR_BIN = 4
+SEARCH_FRONTIER_BATCH = 64
+GEOMETRY_MOTIONS_PER_BATCH = 128
+SEARCH_MAX_EXPANDED_GOAL = 8192
+SEARCH_MAX_EXPANDED_CUE_PER_TARGET = 256
+SEARCH_RESULT_LIMIT = 4
+SEARCH_RESULTS_PER_CUE_TARGET = 2
+VIEW_QUERY_MAX_HEURISTIC_ACTIONS = 3
+CUE_RESPONDERS_PER_SEARCH = 8
+CUE_SEARCH_STEP_STRIDE = 4
+SEARCH_FORWARD_DETOUR_DEGREES = 60.0
 REQUIRED_ACTION_MARGIN = 5
+_POSITION_KEY_METERS = 0.5
+_VIEW_MIN_DISTANCE_METERS = 6.0
+_VIEW_MAX_DISTANCE_METERS = 80.0
+_IDEAL_HEIGHTS_METERS = (20.0, 30.0, 40.0)
 
 
 class FeasibilityStatus(IntEnum):
@@ -79,7 +82,6 @@ class CueWitness:
 class GoalWitness:
     stable_id: int
     pose: tuple
-    node_index: int
 
 
 @dataclass(frozen=True)
@@ -87,8 +89,11 @@ class JointPathWitness:
     cue: CueWitness
     goal: GoalWitness
     actions: tuple
-    translate_actions: int
-    rotate_actions: int
+    forward_actions: int
+    ascend_actions: int
+    descend_actions: int
+    turn_left_actions: int
+    turn_right_actions: int
     hold_actions: int
     stop_actions: int
     total_actions: int
@@ -103,9 +108,9 @@ class SpatiotemporalFeasibilityReport:
     cue_path_found: bool
     goal_view_path_found: bool
     cue_then_goal_path_found: bool
-    roadmap_digest: str
-    roadmap_nodes: int
-    roadmap_edges: int
+    search_digest: str
+    searched_states: int
+    checked_motion_edges: int
     queried_steps: int
     minimum_ordered_actions: int | None
     cue_diagnostics: tuple
@@ -115,22 +120,20 @@ class SpatiotemporalFeasibilityReport:
 
 
 @dataclass(frozen=True)
-class _Candidate:
-    stable_id: int
-    role: ScenarioEntityRole
-    step: int
-    node_index: int
-    center: tuple
+class _SearchNode:
+    position: tuple
     yaw: float
-    entity_position: tuple
-    entity_task_state: ScenarioTaskState
+    cost: int
+    parent: int
+    action: object | None
 
 
 @dataclass(frozen=True)
-class _Goal:
+class _ObservationPath:
     stable_id: int
-    node_index: int
-    center: tuple
+    role: ScenarioEntityRole
+    actions: tuple
+    position: tuple
     yaw: float
 
 
@@ -144,59 +147,37 @@ def _yaw_toward(origin, target):
     return math.degrees(math.atan2(-dx, dy))
 
 
-def _rotation_count(source_yaw, target_yaw):
-    return int(
-        math.ceil(
-            abs(_angle_delta(target_yaw, source_yaw))
-            / TASK_MAX_YAW_DEGREES
-            - 1.0e-12
-        )
+def _nearest_step_count(value, step):
+    magnitude = int(
+        math.floor(abs(float(value)) / float(step) + 0.5)
     )
+    return magnitude if value >= 0.0 else -magnitude
 
 
-def _rotation_actions(source_yaw, target_yaw):
-    remaining = _angle_delta(target_yaw, source_yaw)
-    actions = []
-    while abs(remaining) > 1.0e-9:
-        delta = math.copysign(
-            min(abs(remaining), TASK_MAX_YAW_DEGREES),
-            remaining,
-        )
-        actions.append(RotateAction(delta))
-        remaining -= delta
-    return actions
-
-
-def _translation_actions(points, yaw_degrees):
-    actions = []
-    yaw = math.radians(float(yaw_degrees))
-    forward = np.asarray((-math.sin(yaw), math.cos(yaw), 0.0))
-    right = np.asarray((math.cos(yaw), math.sin(yaw), 0.0))
-    for start, end in zip(points, points[1:]):
-        delta = np.asarray(end, dtype=np.float64) - np.asarray(
-            start,
-            dtype=np.float64,
-        )
-        distance = float(np.linalg.norm(delta))
-        count = max(
-            1,
-            int(
-                math.ceil(
-                    distance / TASK_MAX_TRANSLATION_METERS
-                    - 1.0e-12
-                )
-            ),
-        )
-        piece = delta / count
-        for _ in range(count):
-            actions.append(
-                TranslateAction(
-                    float(np.dot(piece, forward)),
-                    float(np.dot(piece, right)),
-                    float(piece[2]),
-                )
+def _apply_action_pose(position, yaw_degrees, action):
+    position = np.asarray(position, dtype=np.float64).copy()
+    yaw_degrees = float(yaw_degrees)
+    if isinstance(action, ForwardAction):
+        yaw = math.radians(yaw_degrees)
+        position += np.asarray(
+            (
+                -math.sin(yaw) * TASK_FORWARD_STEP_METERS,
+                math.cos(yaw) * TASK_FORWARD_STEP_METERS,
+                0.0,
             )
-    return actions
+        )
+    elif isinstance(action, AscendAction):
+        position[2] += TASK_VERTICAL_STEP_METERS
+    elif isinstance(action, DescendAction):
+        position[2] -= TASK_VERTICAL_STEP_METERS
+    elif isinstance(action, TurnLeftAction):
+        yaw_degrees += TASK_YAW_STEP_DEGREES
+    elif isinstance(action, TurnRightAction):
+        yaw_degrees -= TASK_YAW_STEP_DEGREES
+    elif not isinstance(action, (HoldAction, StopAction)):
+        raise TypeError(f"Unsupported research action {action!r}")
+    yaw_degrees = (yaw_degrees + 180.0) % 360.0 - 180.0
+    return tuple(float(value) for value in position), yaw_degrees
 
 
 def _target_observable(target, center, yaw, observation_spec):
@@ -234,6 +215,35 @@ def _response_entities(snapshot):
             ScenarioEntityRole.FLEEING_PEDESTRIAN,
         )
     )
+
+
+def _selected_response_entities(snapshot, task_step):
+    entities = sorted(
+        _response_entities(snapshot),
+        key=lambda entity: (
+            entity.role != ScenarioEntityRole.FIRE_TRUCK,
+            entity.stable_id,
+        ),
+    )
+    trucks = [
+        entity
+        for entity in entities
+        if entity.role == ScenarioEntityRole.FIRE_TRUCK
+    ]
+    pedestrians = [
+        entity
+        for entity in entities
+        if entity.role == ScenarioEntityRole.FLEEING_PEDESTRIAN
+    ]
+    selected = trucks[:CUE_RESPONDERS_PER_SEARCH]
+    remaining = CUE_RESPONDERS_PER_SEARCH - len(selected)
+    if pedestrians and remaining > 0:
+        offset = (
+            (task_step // CUE_SEARCH_STEP_STRIDE) * remaining
+        ) % len(pedestrians)
+        rotated = pedestrians[offset:] + pedestrians[:offset]
+        selected.extend(rotated[:remaining])
+    return tuple(selected)
 
 
 def _source_entity(snapshot):
@@ -279,84 +289,6 @@ def _direction_cosine(previous, current, event_position):
     )
 
 
-class _Roadmap:
-    def __init__(self, nodes, adjacency, start_distances, start_parents):
-        self.nodes = np.asarray(nodes, dtype=np.float64)
-        self.adjacency = tuple(tuple(edges) for edges in adjacency)
-        self.start_distances = tuple(start_distances)
-        self.start_parents = tuple(start_parents)
-        self._shortest_cache = {}
-
-    @property
-    def edge_count(self):
-        return sum(len(edges) for edges in self.adjacency) // 2
-
-    def start_path(self, target):
-        return self._reconstruct(self.start_parents, 0, target)
-
-    def shortest(self, source, target):
-        source = int(source)
-        target = int(target)
-        if source not in self._shortest_cache:
-            self._shortest_cache[source] = self._dijkstra(source)
-        distances, parents = self._shortest_cache[source]
-        return distances[target], self._reconstruct(
-            parents,
-            source,
-            target,
-        )
-
-    def _dijkstra(self, source):
-        distances = [math.inf] * len(self.nodes)
-        parents = [-1] * len(self.nodes)
-        distances[source] = 0
-        queue = [(0, source)]
-        while queue:
-            distance, node = heapq.heappop(queue)
-            if distance != distances[node]:
-                continue
-            for neighbor, cost in self.adjacency[node]:
-                candidate = distance + cost
-                if candidate < distances[neighbor]:
-                    distances[neighbor] = candidate
-                    parents[neighbor] = node
-                    heapq.heappush(queue, (candidate, neighbor))
-        return distances, parents
-
-    @staticmethod
-    def _reconstruct(parents, source, target):
-        if source == target:
-            return (source,)
-        if parents[target] < 0:
-            return ()
-        path = [target]
-        while path[-1] != source:
-            parent = parents[path[-1]]
-            if parent < 0:
-                return ()
-            path.append(parent)
-        path.reverse()
-        return tuple(path)
-
-
-def _dijkstra(adjacency, source):
-    distances = [math.inf] * len(adjacency)
-    parents = [-1] * len(adjacency)
-    distances[source] = 0
-    queue = [(0, source)]
-    while queue:
-        distance, node = heapq.heappop(queue)
-        if distance != distances[node]:
-            continue
-        for neighbor, cost in adjacency[node]:
-            candidate = distance + cost
-            if candidate < distances[neighbor]:
-                distances[neighbor] = candidate
-                parents[neighbor] = node
-                heapq.heappush(queue, (candidate, neighbor))
-    return distances, parents
-
-
 class SpatiotemporalFeasibilityAuditor:
     def __init__(
         self,
@@ -364,6 +296,8 @@ class SpatiotemporalFeasibilityAuditor:
         lockstep,
         scenario_id,
         generated_start,
+        search_timeout_seconds=120.0,
+        progress_callback=None,
     ):
         if not isinstance(generated_start, GeneratedTaskStart):
             raise TypeError(
@@ -375,8 +309,24 @@ class SpatiotemporalFeasibilityAuditor:
         self.generated_start = generated_start
         self.blueprint = generated_start.blueprint
         self.spec = self.blueprint.observation_spec
-        self.roadmap = None
-        self._roadmap_digest = ""
+        self.horizon_steps = int(
+            self.blueprint.action_spec.horizon_steps
+        )
+        self.search_timeout_seconds = float(search_timeout_seconds)
+        if (
+            not math.isfinite(self.search_timeout_seconds)
+            or self.search_timeout_seconds <= 0.0
+        ):
+            raise ValueError(
+                "search_timeout_seconds must be finite and positive"
+            )
+        self.progress_callback = progress_callback
+        self._search_started = None
+        self._last_progress = None
+        self.search_positions = []
+        self._searched_keys = set()
+        self._motion_cache = {}
+        self._checked_motion_edges = 0
         self._cue_diagnostics = {
             "first_view_proposed": 0,
             "first_view_observable": 0,
@@ -388,6 +338,53 @@ class SpatiotemporalFeasibilityAuditor:
             "second_view_not_observable": 0,
             "valid_transition": 0,
         }
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(b"fixed-action-lattice-v1")
+        digest.update(
+            np.asarray(
+                self.blueprint.absolute_pose[:3],
+                dtype="<f4",
+            ).tobytes()
+        )
+        digest.update(
+            np.asarray(
+                (
+                    self.blueprint.absolute_pose[5],
+                    TASK_FORWARD_STEP_METERS,
+                    TASK_VERTICAL_STEP_METERS,
+                    TASK_YAW_STEP_DEGREES,
+                ),
+                dtype="<f4",
+            ).tobytes()
+        )
+        self._search_digest = digest.hexdigest()
+
+    def _check_search_time(self, phase, expanded=0, queued=0):
+        now = time.perf_counter()
+        if self._search_started is None:
+            self._search_started = now
+            self._last_progress = now
+        elapsed = now - self._search_started
+        if elapsed >= self.search_timeout_seconds:
+            raise TimeoutError(
+                "ACTION_SEARCH_TIMEOUT: fixed-action search exceeded "
+                f"{self.search_timeout_seconds:.1f}s during {phase}; "
+                f"expanded={expanded}, queued={queued}, "
+                f"states={len(self._searched_keys)}, "
+                f"motion_edges={self._checked_motion_edges}"
+            )
+        if (
+            self.progress_callback is not None
+            and now - self._last_progress >= 10.0
+        ):
+            self.progress_callback(
+                "action search "
+                f"phase={phase} elapsed={elapsed:.1f}s "
+                f"expanded={expanded} queued={queued} "
+                f"states={len(self._searched_keys)} "
+                f"motion_edges={self._checked_motion_edges}"
+            )
+            self._last_progress = now
 
     def _require_instant(self, snapshot, reference):
         if (
@@ -398,155 +395,6 @@ class SpatiotemporalFeasibilityAuditor:
             raise RuntimeError(
                 "Evaluation batch does not belong to the frozen instant"
             )
-
-    def build_roadmap(self):
-        if self.roadmap is not None:
-            return self.roadmap
-        clock = self.lockstep.refresh()
-        roadmap_seed = (
-            int(self.blueprint.start_seed)
-            ^ (
-                int(self.blueprint.visibility_stratum)
-                * 0x9E3779B97F4A7C15
-            )
-            ^ (
-                int(self.blueprint.candidate_index)
-                * 0xBF58476D1CE4E5B9
-            )
-            ^ 0x50524D5F32445F31
-        ) & 0xFFFFFFFFFFFFFFFF
-        rng = random.Random(
-            roadmap_seed
-        )
-        start = tuple(self.blueprint.absolute_pose[:3])
-        proposals = [start]
-        seen = {
-            tuple(round(float(value), 3) for value in start)
-        }
-        while len(proposals) < PRM_MAX_PROPOSALS:
-            radius = math.sqrt(rng.random()) * (
-                TASK_ACTIVITY_RADIUS_METERS
-            )
-            angle = rng.uniform(-math.pi, math.pi)
-            position = (
-                start[0] + math.cos(angle) * radius,
-                start[1] + math.sin(angle) * radius,
-                start[2]
-                + rng.uniform(
-                    -TASK_ACTIVITY_VERTICAL_METERS,
-                    TASK_ACTIVITY_VERTICAL_METERS,
-                ),
-            )
-            if not self.blueprint.contains_world_position(position):
-                continue
-            key = tuple(round(float(value), 3) for value in position)
-            if key in seen:
-                continue
-            seen.add(key)
-            proposals.append(position)
-
-        accepted = []
-        for offset in range(0, len(proposals), GEOMETRY_BATCH_SIZE):
-            batch = proposals[offset : offset + GEOMETRY_BATCH_SIZE]
-            result = self.client.probe_camera_geometry_batch(
-                self.lockstep.session_id,
-                points=batch,
-                timeout=30.0,
-            )
-            self._require_instant(result, clock)
-            for point, clear in zip(batch, result.point_clear):
-                if clear:
-                    accepted.append(point)
-                    if len(accepted) == PRM_NODE_COUNT:
-                        break
-            if len(accepted) == PRM_NODE_COUNT:
-                break
-        if not accepted or accepted[0] != start:
-            raise RuntimeError(
-                "PROFILE_START_CLEARANCE_FAILED: start is not 2 m clear"
-            )
-        if len(accepted) != PRM_NODE_COUNT:
-            raise RuntimeError(
-                "PRM accepted "
-                f"{len(accepted)}/{PRM_NODE_COUNT} clear nodes"
-            )
-
-        nodes = np.asarray(accepted, dtype=np.float64)
-        delta = nodes[:, None, :] - nodes[None, :, :]
-        distances = np.linalg.norm(delta, axis=2)
-        edge_candidates = set()
-        for node_index in range(len(nodes)):
-            order = np.argsort(
-                distances[node_index],
-                kind="stable",
-            )
-            neighbors = [
-                int(index)
-                for index in order
-                if index != node_index
-                and distances[node_index, index]
-                <= PRM_MAX_EDGE_METERS
-            ][:PRM_NEIGHBORS]
-            for neighbor in neighbors:
-                edge_candidates.add(
-                    tuple(sorted((node_index, neighbor)))
-                )
-        ordered_edges = sorted(edge_candidates)
-        clear_edges = []
-        for offset in range(
-            0,
-            len(ordered_edges),
-            GEOMETRY_BATCH_SIZE,
-        ):
-            indices = ordered_edges[
-                offset : offset + GEOMETRY_BATCH_SIZE
-            ]
-            segments = [
-                (
-                    tuple(nodes[left]),
-                    tuple(nodes[right]),
-                )
-                for left, right in indices
-            ]
-            result = self.client.probe_camera_geometry_batch(
-                self.lockstep.session_id,
-                segments=segments,
-                timeout=30.0,
-            )
-            self._require_instant(result, clock)
-            clear_edges.extend(
-                edge
-                for edge, clear in zip(indices, result.segment_clear)
-                if clear
-            )
-
-        adjacency = [[] for _ in range(len(nodes))]
-        for left, right in clear_edges:
-            length = float(distances[left, right])
-            cost = int(
-                math.ceil(
-                    length / TASK_MAX_TRANSLATION_METERS
-                    - 1.0e-12
-                )
-            )
-            adjacency[left].append((right, cost))
-            adjacency[right].append((left, cost))
-        for edges in adjacency:
-            edges.sort()
-        start_distances, start_parents = _dijkstra(adjacency, 0)
-        self.roadmap = _Roadmap(
-            nodes,
-            adjacency,
-            start_distances,
-            start_parents,
-        )
-        digest = hashlib.blake2b(digest_size=16)
-        digest.update(nodes.astype("<f4").tobytes())
-        for left, right in clear_edges:
-            digest.update(int(left).to_bytes(4, "little"))
-            digest.update(int(right).to_bytes(4, "little"))
-        self._roadmap_digest = digest.hexdigest()
-        return self.roadmap
 
     def _query_cases(self, cases, clock):
         if not cases:
@@ -560,237 +408,465 @@ class SpatiotemporalFeasibilityAuditor:
         self._require_instant(result, clock)
         return result.cases
 
-    def _goal_candidates(self, scenario, clock):
-        source = _source_entity(scenario)
-        start_yaw = self.blueprint.absolute_pose[5]
-        candidates = []
-        for node_index, center in enumerate(self.roadmap.nodes):
-            start_cost = self.roadmap.start_distances[node_index]
-            if not math.isfinite(start_cost):
-                continue
-            distance = math.dist(center, source.position)
-            if distance < 8.0 or distance > 80.0:
-                continue
-            yaw = _yaw_toward(center, source.position)
-            lower_bound = (
-                start_cost
-                + _rotation_count(start_yaw, yaw)
-                + 1
+    def _state_key(self, position, yaw):
+        origin = self.blueprint.absolute_pose
+        return (
+            round(
+                (float(position[0]) - origin[0])
+                / _POSITION_KEY_METERS
+            ),
+            round(
+                (float(position[1]) - origin[1])
+                / _POSITION_KEY_METERS
+            ),
+            round(
+                (float(position[2]) - origin[2])
+                / TASK_VERTICAL_STEP_METERS
+            ),
+            _nearest_step_count(
+                _angle_delta(yaw, origin[5]),
+                TASK_YAW_STEP_DEGREES,
             )
-            if lower_bound > TASK_HORIZON_STEPS:
-                continue
-            angle = (
-                math.atan2(
-                    float(center[1] - source.position[1]),
-                    float(center[0] - source.position[0]),
+            % round(360.0 / TASK_YAW_STEP_DEGREES),
+        )
+
+    @staticmethod
+    def _motion_key(position, yaw, action):
+        return (
+            *(round(float(value), 4) for value in position),
+            round(float(yaw), 4),
+            type(action).__name__,
+        )
+
+    def _ideal_poses(self, targets):
+        base_yaw = float(self.blueprint.absolute_pose[5])
+        ideals = []
+        yaw_bins = round(360.0 / TASK_YAW_STEP_DEGREES)
+        for target in targets:
+            point = np.asarray(target.position, dtype=np.float64)
+            for yaw_index in range(yaw_bins):
+                yaw = (
+                    base_yaw
+                    + yaw_index * TASK_YAW_STEP_DEGREES
                 )
-                + 2.0 * math.pi
-            ) % (2.0 * math.pi)
-            angular_bin = min(
-                GOAL_ANGULAR_BINS - 1,
-                int(
-                    angle
-                    / (2.0 * math.pi)
-                    * GOAL_ANGULAR_BINS
-                ),
+                radians = math.radians(yaw)
+                forward = np.asarray(
+                    (-math.sin(radians), math.cos(radians))
+                )
+                for height in _IDEAL_HEIGHTS_METERS:
+                    center = (
+                        point[0] - forward[0] * height,
+                        point[1] - forward[1] * height,
+                        point[2] + height,
+                    )
+                    if self.blueprint.contains_world_position(center):
+                        ideals.append(
+                            (
+                                target.stable_id,
+                                target.role,
+                                center,
+                                (
+                                    (yaw + 180.0) % 360.0
+                                    - 180.0
+                                ),
+                            )
+                        )
+            for height in _IDEAL_HEIGHTS_METERS:
+                center = (
+                    point[0],
+                    point[1],
+                    point[2] + height,
+                )
+                if self.blueprint.contains_world_position(center):
+                    ideals.append(
+                        (
+                            target.stable_id,
+                            target.role,
+                            center,
+                            base_yaw,
+                        )
+                    )
+        return tuple(ideals)
+
+    @staticmethod
+    def _heuristic(position, yaw, ideals):
+        best = None
+        position = np.asarray(position, dtype=np.float64)
+        for stable_id, role, center, ideal_yaw in ideals:
+            delta = np.asarray(center, dtype=np.float64) - position
+            horizontal_distance = float(np.linalg.norm(delta[:2]))
+            movement = math.ceil(
+                horizontal_distance / TASK_FORWARD_STEP_METERS
+                - 1.0e-12
             )
+            vertical = math.ceil(
+                abs(float(delta[2]))
+                / TASK_VERTICAL_STEP_METERS
+                - 1.0e-12
+            )
+            if horizontal_distance > TASK_FORWARD_STEP_METERS * 0.5:
+                travel_yaw = _yaw_toward(position, center)
+                turns = math.ceil(
+                    abs(_angle_delta(travel_yaw, yaw))
+                    / TASK_YAW_STEP_DEGREES
+                    - 1.0e-12
+                ) + math.ceil(
+                    abs(_angle_delta(ideal_yaw, travel_yaw))
+                    / TASK_YAW_STEP_DEGREES
+                    - 1.0e-12
+                )
+            else:
+                travel_yaw = float(ideal_yaw)
+                turns = math.ceil(
+                    abs(_angle_delta(ideal_yaw, yaw))
+                    / TASK_YAW_STEP_DEGREES
+                    - 1.0e-12
+                )
             rank = (
-                abs(distance - 25.0),
-                lower_bound,
-                node_index,
+                int(movement + vertical + turns),
+                stable_id,
+                int(role),
             )
-            candidates.append(
-                (
-                    angular_bin,
+            if best is None or rank < best[0]:
+                best = (
                     rank,
-                    _Goal(
-                        stable_id=source.stable_id,
-                        node_index=node_index,
-                        center=tuple(float(value) for value in center),
-                        yaw=yaw,
-                    ),
+                    stable_id,
+                    role,
+                    tuple(float(value) for value in center),
+                    float(ideal_yaw),
+                    float(travel_yaw),
+                )
+        return best
+
+    @staticmethod
+    def _potentially_visible(position, yaw, target):
+        delta = np.asarray(target.position, dtype=np.float64) - np.asarray(
+            position,
+            dtype=np.float64,
+        )
+        distance = float(np.linalg.norm(delta))
+        if (
+            distance < _VIEW_MIN_DISTANCE_METERS
+            or distance > _VIEW_MAX_DISTANCE_METERS
+            or delta[2] >= 0.0
+        ):
+            return False
+        horizontal = float(np.linalg.norm(delta[:2]))
+        vertical = -float(delta[2])
+        nadir_candidate = horizontal <= max(10.0, vertical * 0.6)
+        if horizontal <= 1.0e-9:
+            return nadir_candidate
+        yaw_error = abs(
+            _angle_delta(
+                _yaw_toward(position, target.position),
+                yaw,
+            )
+        )
+        oblique_candidate = (
+            yaw_error <= 55.0
+            and 0.3 <= vertical / horizontal <= 3.0
+        )
+        return nadir_candidate or oblique_candidate
+
+    @staticmethod
+    def _reconstruct(nodes, index):
+        actions = []
+        while nodes[index].parent >= 0:
+            actions.append(nodes[index].action)
+            index = nodes[index].parent
+        actions.reverse()
+        return tuple(actions)
+
+    def _search_observation_paths(
+        self,
+        targets,
+        start_position,
+        start_yaw,
+        max_actions,
+        clock,
+        max_expanded,
+        phase,
+    ):
+        targets = tuple(
+            sorted(targets, key=lambda item: (item.role, item.stable_id))
+        )
+        if not targets or max_actions < 0:
+            return ()
+        ideals = self._ideal_poses(targets)
+        if not ideals:
+            return ()
+        target_map = {
+            target.stable_id: target
+            for target in targets
+        }
+        nodes = [
+            _SearchNode(
+                tuple(float(value) for value in start_position),
+                float(start_yaw),
+                0,
+                -1,
+                None,
+            )
+        ]
+        best_cost = {
+            self._state_key(start_position, start_yaw): 0
+        }
+        heuristic = self._heuristic(start_position, start_yaw, ideals)
+        queue = [(heuristic[0][0], 0, 0)]
+        expanded = 0
+        results = []
+
+        def enqueue(position, yaw, cost, parent, action):
+            if cost > max_actions:
+                return
+            key = self._state_key(position, yaw)
+            if cost >= best_cost.get(key, math.inf):
+                return
+            estimate = self._heuristic(position, yaw, ideals)
+            if estimate is None:
+                return
+            best_cost[key] = cost
+            node_index = len(nodes)
+            nodes.append(
+                _SearchNode(
+                    tuple(float(value) for value in position),
+                    float(yaw),
+                    int(cost),
+                    int(parent),
+                    action,
                 )
             )
-        selected_entries = []
-        selected_nodes = set()
-        for angular_bin in range(GOAL_ANGULAR_BINS):
-            in_bin = sorted(
+            heapq.heappush(
+                queue,
                 (
-                    (rank, candidate)
-                    for candidate_bin, rank, candidate in candidates
-                    if candidate_bin == angular_bin
+                    cost + estimate[0][0],
+                    cost,
+                    node_index,
                 ),
-                key=lambda item: item[0],
             )
-            for _rank, candidate in in_bin[
-                :GOAL_CASES_PER_ANGULAR_BIN
-            ]:
-                selected_entries.append(candidate)
-                selected_nodes.add(candidate.node_index)
-        if len(selected_entries) < GOAL_CANDIDATE_LIMIT:
-            remaining = sorted(
-                (
-                    (rank, candidate)
-                    for _angular_bin, rank, candidate in candidates
-                    if candidate.node_index not in selected_nodes
-                ),
-                key=lambda item: item[0],
+            if key not in self._searched_keys:
+                self._searched_keys.add(key)
+                self.search_positions.append(
+                    tuple(float(value) for value in position)
+                )
+
+        while queue and expanded < max_expanded:
+            self._check_search_time(
+                phase,
+                expanded=expanded,
+                queued=len(queue),
             )
-            selected_entries.extend(
-                candidate
-                for _rank, candidate in remaining[
-                    : GOAL_CANDIDATE_LIMIT - len(selected_entries)
-                ]
-            )
-        selected = selected_entries[:GOAL_CANDIDATE_LIMIT]
-        observable = []
-        for offset in range(0, len(selected), VISIBILITY_BATCH_SIZE):
-            batch = selected[offset : offset + VISIBILITY_BATCH_SIZE]
+            frontier = []
+            while queue and len(frontier) < SEARCH_FRONTIER_BATCH:
+                _score, cost, node_index = heapq.heappop(queue)
+                node = nodes[node_index]
+                if cost != node.cost:
+                    continue
+                if best_cost.get(
+                    self._state_key(node.position, node.yaw)
+                ) != cost:
+                    continue
+                frontier.append(node_index)
+            if not frontier:
+                break
+            expanded += len(frontier)
+
+            visibility_meta = []
+            for node_index in frontier:
+                node = nodes[node_index]
+                estimate = self._heuristic(
+                    node.position,
+                    node.yaw,
+                    ideals,
+                )
+                if (
+                    estimate[0][0]
+                    > VIEW_QUERY_MAX_HEURISTIC_ACTIONS
+                ):
+                    continue
+                target = target_map[estimate[1]]
+                if self._potentially_visible(
+                    node.position,
+                    node.yaw,
+                    target,
+                ):
+                    visibility_meta.append((node_index, target))
+            visibility_meta = visibility_meta[:64]
             snapshots = self._query_cases(
                 [
                     TargetVisibilityCase(
-                        item.stable_id,
-                        item.center,
+                        target.stable_id,
+                        nodes[node_index].position,
                     )
-                    for item in batch
+                    for node_index, target in visibility_meta
                 ],
                 clock,
             )
-            for item, snapshot in zip(batch, snapshots):
-                if _target_observable(
+            for (node_index, target), snapshot in zip(
+                visibility_meta,
+                snapshots,
+            ):
+                node = nodes[node_index]
+                if not _target_observable(
                     snapshot.target,
-                    item.center,
-                    item.yaw,
+                    node.position,
+                    node.yaw,
                     self.spec,
                 ):
-                    observable.append(item)
-        return tuple(observable)
-
-    def _select_new_candidates(self, scenario, task_step):
-        entities = sorted(
-            _response_entities(scenario),
-            key=lambda entity: (
-                entity.role
-                != ScenarioEntityRole.FIRE_TRUCK,
-                entity.stable_id,
-            ),
-        )
-        trucks = [
-            entity
-            for entity in entities
-            if entity.role == ScenarioEntityRole.FIRE_TRUCK
-        ]
-        pedestrians = [
-            entity
-            for entity in entities
-            if entity.role == ScenarioEntityRole.FLEEING_PEDESTRIAN
-        ]
-        selected = trucks[:CUE_RESPONDERS_PER_STEP]
-        remaining = CUE_RESPONDERS_PER_STEP - len(selected)
-        if pedestrians and remaining > 0:
-            offset = (
-                task_step * remaining
-            ) % len(pedestrians)
-            rotated = pedestrians[offset:] + pedestrians[:offset]
-            selected.extend(rotated[:remaining])
-
-        per_entity_candidates = []
-        start_yaw = self.blueprint.absolute_pose[5]
-        for entity in selected:
-            candidates_for_entity = []
-            for node_index, center in enumerate(self.roadmap.nodes):
-                translation_cost = self.roadmap.start_distances[node_index]
-                if not math.isfinite(translation_cost):
                     continue
-                distance = math.dist(center, entity.position)
-                if distance < 8.0 or distance > 60.0:
-                    continue
-                yaw = _yaw_toward(center, entity.position)
-                arrival_cost = (
-                    translation_cost
-                    + _rotation_count(start_yaw, yaw)
+                results.append(
+                    _ObservationPath(
+                        stable_id=target.stable_id,
+                        role=target.role,
+                        actions=self._reconstruct(nodes, node_index),
+                        position=node.position,
+                        yaw=node.yaw,
+                    )
                 )
-                if arrival_cost > task_step:
-                    continue
-                candidates_for_entity.append(
-                    {
-                        "arrival_cost": arrival_cost,
-                        "distance_rank": abs(distance - 25.0),
-                        "node_index": node_index,
-                        "yaw": yaw,
-                    }
+            if results:
+                results.sort(
+                    key=lambda item: (
+                        len(item.actions),
+                        item.stable_id,
+                        item.position,
+                        item.yaw,
+                    )
                 )
-            if not candidates_for_entity:
-                continue
-            fastest = min(
-                candidates_for_entity,
-                key=lambda item: (
-                    item["arrival_cost"],
-                    item["node_index"],
-                    item["yaw"],
-                ),
-            )
-            selected_for_entity = [fastest]
-            observation_ranked = sorted(
-                candidates_for_entity,
-                key=lambda item: (
-                    item["distance_rank"],
-                    item["arrival_cost"],
-                    item["node_index"],
-                    item["yaw"],
-                ),
-            )
-            for item in observation_ranked:
-                if item["node_index"] == fastest["node_index"]:
+                return tuple(results[:SEARCH_RESULT_LIMIT])
+
+            movement_meta = []
+            for node_index in frontier:
+                node = nodes[node_index]
+                if node.cost >= max_actions:
                     continue
-                selected_for_entity.append(item)
+                estimate = self._heuristic(
+                    node.position,
+                    node.yaw,
+                    ideals,
+                )
+                for action in (TurnLeftAction(), TurnRightAction()):
+                    position, yaw = _apply_action_pose(
+                        node.position,
+                        node.yaw,
+                        action,
+                    )
+                    enqueue(
+                        position,
+                        yaw,
+                        node.cost + 1,
+                        node_index,
+                        action,
+                    )
+                movement_actions = []
+                ideal_center = estimate[3]
+                travel_yaw = _yaw_toward(
+                    node.position,
+                    ideal_center,
+                )
                 if (
-                    len(selected_for_entity)
-                    == CUE_VIEW_CASES_PER_RESPONDER
+                    abs(_angle_delta(travel_yaw, node.yaw))
+                    <= SEARCH_FORWARD_DETOUR_DEGREES
                 ):
-                    break
-            per_entity_candidates.extend(
-                (
-                    item["arrival_cost"],
-                    entity.stable_id,
-                    item["node_index"],
-                    item["yaw"],
-                    entity,
+                    movement_actions.append(ForwardAction())
+                vertical_delta = (
+                    ideal_center[2] - node.position[2]
                 )
-                for item in selected_for_entity
-            )
-        per_entity_candidates.sort(key=lambda item: item[:4])
-        candidates = []
-        for (
-            _arrival_cost,
-            _stable_id,
-            node_index,
-            yaw,
-            entity,
-        ) in per_entity_candidates[:CUE_FIRST_VIEW_CASES_PER_STEP]:
-            candidates.append(
-                _Candidate(
-                    stable_id=entity.stable_id,
-                    role=entity.role,
-                    step=task_step,
-                    node_index=node_index,
-                    center=tuple(
-                        float(value)
-                        for value in self.roadmap.nodes[node_index]
-                    ),
-                    yaw=yaw,
-                    entity_position=entity.position,
-                    entity_task_state=entity.task_state,
-                )
-            )
-        return tuple(candidates)
+                if vertical_delta >= TASK_VERTICAL_STEP_METERS * 0.5:
+                    movement_actions.append(AscendAction())
+                elif (
+                    vertical_delta
+                    <= -TASK_VERTICAL_STEP_METERS * 0.5
+                ):
+                    movement_actions.append(DescendAction())
+                for action in movement_actions:
+                    position, yaw = _apply_action_pose(
+                        node.position,
+                        node.yaw,
+                        action,
+                    )
+                    if not self.blueprint.contains_world_position(position):
+                        continue
+                    motion_key = self._motion_key(
+                        node.position,
+                        node.yaw,
+                        action,
+                    )
+                    cached_clear = self._motion_cache.get(motion_key)
+                    if cached_clear is not None:
+                        if cached_clear:
+                            enqueue(
+                                position,
+                                yaw,
+                                node.cost + 1,
+                                node_index,
+                                action,
+                            )
+                        continue
+                    movement_meta.append(
+                        (
+                            node_index,
+                            action,
+                            position,
+                            yaw,
+                            motion_key,
+                        )
+                    )
+            if movement_meta:
+                for offset in range(
+                    0,
+                    len(movement_meta),
+                    GEOMETRY_MOTIONS_PER_BATCH,
+                ):
+                    batch = movement_meta[
+                        offset : offset
+                        + GEOMETRY_MOTIONS_PER_BATCH
+                    ]
+                    geometry = (
+                        self.client.probe_camera_geometry_batch(
+                            self.lockstep.session_id,
+                            points=[item[2] for item in batch],
+                            segments=[
+                                (
+                                    nodes[item[0]].position,
+                                    item[2],
+                                )
+                                for item in batch
+                            ],
+                            timeout=30.0,
+                        )
+                    )
+                    self._require_instant(geometry, clock)
+                    self._check_search_time(
+                        phase,
+                        expanded=expanded,
+                        queued=len(queue),
+                    )
+                    self._checked_motion_edges += len(batch)
+                    for item, point_clear, segment_clear in zip(
+                        batch,
+                        geometry.point_clear,
+                        geometry.segment_clear,
+                    ):
+                        clear = bool(point_clear and segment_clear)
+                        self._motion_cache[item[4]] = clear
+                        if not clear:
+                            continue
+                        node_index, action, position, yaw, _key = item
+                        enqueue(
+                            position,
+                            yaw,
+                            nodes[node_index].cost + 1,
+                            node_index,
+                            action,
+                        )
+        return ()
 
-    def _initial_candidates(self, scenario):
+    def _initial_observation_paths(self, scenario):
         entity_map = _scenario_entity_map(scenario)
         matrices = pair_view_matrices(
             self.generated_start.rgbd_pair
         )
-        candidates = []
+        paths = []
         for target in self.generated_start.visibility.targets:
             if target.role not in (
                 VisibilityTargetRole.FIRE_TRUCK,
@@ -809,184 +885,189 @@ class SpatiotemporalFeasibilityAuditor:
                 for name in ("oblique", "nadir")
             ):
                 continue
-            candidates.append(
-                _Candidate(
+            paths.append(
+                _ObservationPath(
                     stable_id=entity.stable_id,
                     role=entity.role,
-                    step=0,
-                    node_index=0,
-                    center=tuple(
+                    actions=(),
+                    position=tuple(
                         self.blueprint.absolute_pose[:3]
                     ),
-                    yaw=self.blueprint.absolute_pose[5],
-                    entity_position=entity.position,
-                    entity_task_state=entity.task_state,
+                    yaw=float(self.blueprint.absolute_pose[5]),
                 )
             )
-        selected = tuple(candidates[:CUE_RESPONDERS_PER_STEP])
-        self._cue_diagnostics["first_view_proposed"] += len(selected)
-        self._cue_diagnostics["first_view_observable"] += len(selected)
-        return selected
+        paths.sort(key=lambda item: (item.role, item.stable_id))
+        self._cue_diagnostics["first_view_proposed"] += len(paths)
+        self._cue_diagnostics["first_view_observable"] += len(paths)
+        return tuple(paths[:SEARCH_RESULT_LIMIT])
 
-    def _observable_new_candidates(self, candidates, clock):
-        self._cue_diagnostics["first_view_proposed"] += len(candidates)
+    def _start_observation_paths(self, scenario, clock):
+        responders = tuple(
+            sorted(
+                _response_entities(scenario),
+                key=lambda entity: (
+                    int(entity.role),
+                    entity.stable_id,
+                ),
+            )
+        )
+        if not responders:
+            return ()
+        center = tuple(self.blueprint.absolute_pose[:3])
+        yaw = float(self.blueprint.absolute_pose[5])
         snapshots = self._query_cases(
             [
-                TargetVisibilityCase(
-                    candidate.stable_id,
-                    candidate.center,
-                )
-                for candidate in candidates
+                TargetVisibilityCase(entity.stable_id, center)
+                for entity in responders
             ],
             clock,
         )
-        observable = tuple(
-            candidate
-            for candidate, snapshot in zip(candidates, snapshots)
-            if _target_observable(
+        self._cue_diagnostics["first_view_proposed"] += len(
+            responders
+        )
+        paths = []
+        for entity, snapshot in zip(responders, snapshots):
+            if not _target_observable(
                 snapshot.target,
-                candidate.center,
-                candidate.yaw,
+                center,
+                yaw,
                 self.spec,
+            ):
+                continue
+            paths.append(
+                _ObservationPath(
+                    stable_id=entity.stable_id,
+                    role=entity.role,
+                    actions=(),
+                    position=center,
+                    yaw=yaw,
+                )
+            )
+        return tuple(paths)
+
+    @staticmethod
+    def _merge_observation_paths(*groups):
+        merged = {}
+        for group in groups:
+            for path in group:
+                key = (
+                    path.stable_id,
+                    tuple(type(action) for action in path.actions),
+                    path.position,
+                    path.yaw,
+                )
+                previous = merged.get(key)
+                if (
+                    previous is None
+                    or len(path.actions) < len(previous.actions)
+                ):
+                    merged[key] = path
+        return tuple(
+            sorted(
+                merged.values(),
+                key=lambda item: (
+                    len(item.actions),
+                    int(item.role),
+                    item.stable_id,
+                    item.position,
+                    item.yaw,
+                ),
             )
         )
-        self._cue_diagnostics["first_view_observable"] += len(
-            observable
+
+    def _search_response_observation_paths(
+        self,
+        responders,
+        start_position,
+        start_yaw,
+        max_actions,
+        clock,
+        phase,
+    ):
+        paths = []
+        for responder in responders:
+            target_paths = self._search_observation_paths(
+                (responder,),
+                start_position,
+                start_yaw,
+                max_actions,
+                clock,
+                SEARCH_MAX_EXPANDED_CUE_PER_TARGET,
+                f"{phase}-entity-{responder.stable_id}",
+            )
+            paths.extend(
+                target_paths[:SEARCH_RESULTS_PER_CUE_TARGET]
+            )
+        paths.sort(
+            key=lambda item: (
+                len(item.actions),
+                int(item.role),
+                item.stable_id,
+                item.position,
+                item.yaw,
+            )
         )
-        return observable
+        return tuple(paths)
+
+    def _motion_clear(self, start_position, start_yaw, action, clock):
+        position, yaw = _apply_action_pose(
+            start_position,
+            start_yaw,
+            action,
+        )
+        if not self.blueprint.contains_world_position(position):
+            return None
+        motion_key = self._motion_key(
+            start_position,
+            start_yaw,
+            action,
+        )
+        cached_clear = self._motion_cache.get(motion_key)
+        if cached_clear is not None:
+            return (position, yaw) if cached_clear else None
+        geometry = self.client.probe_camera_geometry_batch(
+            self.lockstep.session_id,
+            points=[position],
+            segments=[(start_position, position)],
+            timeout=30.0,
+        )
+        self._require_instant(geometry, clock)
+        self._checked_motion_edges += 1
+        clear = bool(
+            geometry.point_clear[0] and geometry.segment_clear[0]
+        )
+        self._motion_cache[motion_key] = clear
+        if not clear:
+            return None
+        return position, yaw
 
     def _transition_candidates(
         self,
-        previous_candidates,
+        previous_paths,
         previous_scenario,
         current_scenario,
         clock,
     ):
         previous_entities = _scenario_entity_map(previous_scenario)
         current_entities = _scenario_entity_map(current_scenario)
-        base_cases = []
-        translation_geometry = []
-        translation_meta = []
-        self._cue_diagnostics["transition_cases"] += len(
-            previous_candidates
-        )
-        for candidate in previous_candidates:
-            current = current_entities.get(candidate.stable_id)
-            previous = previous_entities.get(candidate.stable_id)
-            if current is None or previous is None:
+        results = []
+        self._cue_diagnostics["transition_cases"] += len(previous_paths)
+        for path in previous_paths:
+            previous = previous_entities.get(path.stable_id)
+            current = current_entities.get(path.stable_id)
+            if previous is None or current is None:
                 self._cue_diagnostics["entity_missing"] += 1
                 continue
-            base_cases.append(
-                (
-                    candidate,
-                    previous,
-                    current,
-                    TargetVisibilityCase(
-                        candidate.stable_id,
-                        candidate.center,
-                    ),
-                )
-            )
-            delta = np.asarray(current.position, dtype=np.float64) - (
-                np.asarray(previous.position, dtype=np.float64)
-            )
-            length = float(np.linalg.norm(delta))
-            if length > TASK_MAX_TRANSLATION_METERS:
-                delta *= TASK_MAX_TRANSLATION_METERS / length
-            translated = tuple(
-                float(value)
-                for value in (
-                    np.asarray(candidate.center, dtype=np.float64)
-                    + delta
-                )
-            )
-            if (
-                length > 1.0e-6
-                and self.blueprint.contains_world_position(translated)
-            ):
-                translation_geometry.append(
-                    (candidate.center, translated)
-                )
-                translation_meta.append(
-                    (candidate, previous, current, translated)
-                )
-
-        clear_translation = []
-        if translation_geometry:
-            geometry = self.client.probe_camera_geometry_batch(
-                self.lockstep.session_id,
-                points=[
-                    translated
-                    for _candidate, _previous, _current, translated
-                    in translation_meta
-                ],
-                segments=translation_geometry,
-                timeout=30.0,
-            )
-            self._require_instant(geometry, clock)
-            for item, point_clear, segment_clear in zip(
-                translation_meta,
-                geometry.point_clear,
-                geometry.segment_clear,
-            ):
-                if point_clear and segment_clear:
-                    clear_translation.append(item)
-
-        query_meta = [
-            ("base", candidate, previous, current, candidate.center)
-            for candidate, previous, current, _case in base_cases
-        ]
-        query_cases = [case for *_rest, case in base_cases]
-        remaining = VISIBILITY_BATCH_SIZE - len(query_cases)
-        for candidate, previous, current, translated in (
-            clear_translation[:remaining]
-        ):
-            query_meta.append(
-                (
-                    "translate",
-                    candidate,
-                    previous,
-                    current,
-                    translated,
-                )
-            )
-            query_cases.append(
-                TargetVisibilityCase(
-                    candidate.stable_id,
-                    translated,
-                )
-            )
-        snapshots = self._query_cases(query_cases, clock)
-        grouped = {}
-        for meta, snapshot in zip(query_meta, snapshots):
-            grouped.setdefault(meta[1].stable_id, {})[meta[0]] = (
-                meta,
-                snapshot,
-            )
-
-        results = []
-        for candidate in previous_candidates:
-            variants = grouped.get(candidate.stable_id, {})
-            if "base" not in variants:
-                continue
-            _meta, base_snapshot = variants["base"]
-            previous = previous_entities[candidate.stable_id]
-            current = current_entities[candidate.stable_id]
-            displacement = math.dist(
-                previous.position[:2],
-                current.position[:2],
-            )
-            cosine = _direction_cosine(
-                previous,
-                current,
-                current_scenario.event_position,
-            )
             if (
                 previous.task_state != ScenarioTaskState.ACTIVE
                 or current.task_state != ScenarioTaskState.ACTIVE
             ):
                 self._cue_diagnostics["task_inactive"] += 1
                 continue
+            displacement = math.dist(
+                previous.position[:2],
+                current.position[:2],
+            )
             if (
                 displacement
                 < TASK_MIN_CUE_HORIZONTAL_DISPLACEMENT_METERS
@@ -995,235 +1076,219 @@ class SpatiotemporalFeasibilityAuditor:
                     "displacement_below_minimum"
                 ] += 1
                 continue
+            cosine = _direction_cosine(
+                previous,
+                current,
+                current_scenario.event_position,
+            )
             if cosine < 0.5:
                 self._cue_diagnostics[
                     "direction_cosine_below_0_5"
                 ] += 1
                 continue
 
-            transition = None
-            second_center = candidate.center
-            second_yaw = candidate.yaw
-            if _target_observable(
-                base_snapshot.target,
-                candidate.center,
-                candidate.yaw,
-                self.spec,
+            variants = [
+                (
+                    HoldAction(),
+                    path.position,
+                    path.yaw,
+                    False,
+                ),
+                (
+                    TurnLeftAction(),
+                    path.position,
+                    _apply_action_pose(
+                        path.position,
+                        path.yaw,
+                        TurnLeftAction(),
+                    )[1],
+                    False,
+                ),
+                (
+                    TurnRightAction(),
+                    path.position,
+                    _apply_action_pose(
+                        path.position,
+                        path.yaw,
+                        TurnRightAction(),
+                    )[1],
+                    False,
+                ),
+            ]
+            for action in (
+                ForwardAction(),
+                AscendAction(),
+                DescendAction(),
             ):
-                transition = HoldAction()
-            else:
-                rotate_yaw = _yaw_toward(
-                    candidate.center,
-                    current.position,
+                moved = self._motion_clear(
+                    path.position,
+                    path.yaw,
+                    action,
+                    clock,
                 )
-                rotate_delta = _angle_delta(
-                    rotate_yaw,
-                    candidate.yaw,
-                )
-                if (
-                    abs(rotate_delta)
-                    <= TASK_MAX_YAW_DEGREES + 1.0e-9
-                    and abs(rotate_delta) > 1.0e-9
-                    and _target_observable(
-                        base_snapshot.target,
-                        candidate.center,
-                        rotate_yaw,
-                        self.spec,
-                    )
-                ):
-                    transition = RotateAction(rotate_delta)
-                    second_yaw = rotate_yaw
-            if transition is None and "translate" in variants:
-                meta, translated_snapshot = variants["translate"]
-                translated = meta[4]
+                if moved is not None:
+                    variants.append((action, *moved, True))
+
+            unique_centers = []
+            center_to_index = {}
+            for _action, center, _yaw, _moved in variants:
+                key = tuple(round(value, 6) for value in center)
+                if key not in center_to_index:
+                    center_to_index[key] = len(unique_centers)
+                    unique_centers.append(center)
+            snapshots = self._query_cases(
+                [
+                    TargetVisibilityCase(path.stable_id, center)
+                    for center in unique_centers
+                ],
+                clock,
+            )
+            snapshot_map = {
+                tuple(round(value, 6) for value in center): snapshot
+                for center, snapshot in zip(unique_centers, snapshots)
+            }
+            selected = None
+            for action, center, yaw, _moved in variants:
+                snapshot = snapshot_map[
+                    tuple(round(value, 6) for value in center)
+                ]
                 if _target_observable(
-                    translated_snapshot.target,
-                    translated,
-                    candidate.yaw,
+                    snapshot.target,
+                    center,
+                    yaw,
                     self.spec,
                 ):
-                    world_delta = (
-                        np.asarray(translated, dtype=np.float64)
-                        - np.asarray(candidate.center, dtype=np.float64)
-                    )
-                    yaw = math.radians(candidate.yaw)
-                    forward = np.asarray(
-                        (-math.sin(yaw), math.cos(yaw), 0.0)
-                    )
-                    right = np.asarray(
-                        (math.cos(yaw), math.sin(yaw), 0.0)
-                    )
-                    transition = TranslateAction(
-                        float(np.dot(world_delta, forward)),
-                        float(np.dot(world_delta, right)),
-                        float(world_delta[2]),
-                    )
-                    second_center = translated
-            if transition is not None:
-                self._cue_diagnostics["valid_transition"] += 1
-                results.append(
-                    (
-                        candidate,
-                        transition,
-                        second_center,
-                        second_yaw,
-                        displacement,
-                        cosine,
-                    )
-                )
-            else:
+                    selected = (action, center, yaw)
+                    break
+            if selected is None:
                 self._cue_diagnostics[
                     "second_view_not_observable"
                 ] += 1
+                continue
+            self._cue_diagnostics["valid_transition"] += 1
+            action, center, yaw = selected
+            results.append(
+                (
+                    path,
+                    action,
+                    center,
+                    yaw,
+                    displacement,
+                    cosine,
+                )
+            )
         return tuple(results)
 
-    def _joint_witness(self, cue_transition, goals, event_position):
+    @staticmethod
+    def _count_actions(actions):
+        action_types = (
+            ForwardAction,
+            AscendAction,
+            DescendAction,
+            TurnLeftAction,
+            TurnRightAction,
+            HoldAction,
+            StopAction,
+        )
+        counts = {action_type: 0 for action_type in action_types}
+        for action in actions:
+            counts[type(action)] += 1
+        return counts
+
+    def _joint_witness(
+        self,
+        transition,
+        task_step,
+        current_scenario,
+        clock,
+    ):
         (
-            candidate,
-            transition,
-            second_center,
+            path,
+            transition_action,
+            second_position,
             second_yaw,
             displacement,
             cosine,
-        ) = cue_transition
-        start_yaw = self.blueprint.absolute_pose[5]
-        start_path_indices = self.roadmap.start_path(
-            candidate.node_index
-        )
-        if not start_path_indices:
+        ) = transition
+        padding = task_step - len(path.actions)
+        if padding < 0:
             return None
-        start_points = [
-            tuple(self.roadmap.nodes[index])
-            for index in start_path_indices
-        ]
-        travel_to_cue = _translation_actions(
-            start_points,
-            start_yaw,
+        prefix = (
+            [HoldAction() for _ in range(padding)]
+            + list(path.actions)
+            + [transition_action]
         )
-        rotate_to_cue = _rotation_actions(
-            start_yaw,
-            candidate.yaw,
+        remaining_for_goal = (
+            self.horizon_steps - len(prefix) - 1
         )
-        arrival_actions = travel_to_cue + rotate_to_cue
-        if len(arrival_actions) > candidate.step:
+        if remaining_for_goal < 0:
             return None
-        actions = [
-            HoldAction()
-            for _ in range(candidate.step - len(arrival_actions))
-        ]
-        actions.extend(arrival_actions)
-        actions.append(transition)
-
-        best = None
-        for goal in goals:
-            route_cost, path_indices = self.roadmap.shortest(
-                candidate.node_index,
-                goal.node_index,
-            )
-            if not math.isfinite(route_cost) or not path_indices:
-                continue
-            post_actions = []
-            route_yaw = second_yaw
-            if isinstance(transition, TranslateAction):
-                delta = (
-                    np.asarray(candidate.center, dtype=np.float64)
-                    - np.asarray(second_center, dtype=np.float64)
-                )
-                yaw = math.radians(route_yaw)
-                forward = np.asarray(
-                    (-math.sin(yaw), math.cos(yaw), 0.0)
-                )
-                right = np.asarray(
-                    (math.cos(yaw), math.sin(yaw), 0.0)
-                )
-                post_actions.append(
-                    TranslateAction(
-                        float(np.dot(delta, forward)),
-                        float(np.dot(delta, right)),
-                        float(delta[2]),
+        source = _source_entity(current_scenario)
+        goal_paths = self._search_observation_paths(
+            (source,),
+            second_position,
+            second_yaw,
+            remaining_for_goal,
+            clock,
+            SEARCH_MAX_EXPANDED_GOAL,
+            f"cue-to-goal-step-{task_step}",
+        )
+        if not goal_paths:
+            return None
+        goal_path = goal_paths[0]
+        final_actions = (
+            prefix
+            + list(goal_path.actions)
+            + [
+                StopAction(
+                    self.blueprint.world_to_local(
+                        current_scenario.event_position
                     )
                 )
-            route_points = [
-                tuple(self.roadmap.nodes[index])
-                for index in path_indices
             ]
-            post_actions.extend(
-                _translation_actions(route_points, route_yaw)
-            )
-            post_actions.extend(
-                _rotation_actions(route_yaw, goal.yaw)
-            )
-            final_actions = (
-                actions
-                + post_actions
-                + [
-                    StopAction(
-                        self.blueprint.world_to_local(
-                            event_position
-                        )
-                    )
-                ]
-            )
-            cue = CueWitness(
-                stable_id=candidate.stable_id,
-                role=candidate.role,
-                first_step=candidate.step,
-                second_step=candidate.step + 1,
-                first_pose=(
-                    *candidate.center,
-                    candidate.yaw,
-                ),
-                second_pose=(
-                    *second_center,
-                    second_yaw,
-                ),
-                transition_action=transition,
-                horizontal_displacement_m=displacement,
-                direction_cosine=cosine,
-            )
-            goal_witness = GoalWitness(
-                stable_id=goal.stable_id,
-                pose=(*goal.center, goal.yaw),
-                node_index=goal.node_index,
-            )
-            counts = {
-                TranslateAction: 0,
-                RotateAction: 0,
-                HoldAction: 0,
-                StopAction: 0,
-            }
-            for action in final_actions:
-                counts[type(action)] += 1
-            witness = JointPathWitness(
-                cue=cue,
-                goal=goal_witness,
-                actions=tuple(final_actions),
-                translate_actions=counts[TranslateAction],
-                rotate_actions=counts[RotateAction],
-                hold_actions=counts[HoldAction],
-                stop_actions=counts[StopAction],
-                total_actions=len(final_actions),
-                remaining_actions=(
-                    TASK_HORIZON_STEPS - len(final_actions)
-                ),
-            )
-            rank = (
-                witness.total_actions,
-                goal.node_index,
-            )
-            if best is None or rank < best[0]:
-                best = (rank, witness)
-        return None if best is None else best[1]
+        )
+        counts = self._count_actions(final_actions)
+        cue = CueWitness(
+            stable_id=path.stable_id,
+            role=path.role,
+            first_step=task_step,
+            second_step=task_step + 1,
+            first_pose=(*path.position, path.yaw),
+            second_pose=(*second_position, second_yaw),
+            transition_action=transition_action,
+            horizontal_displacement_m=displacement,
+            direction_cosine=cosine,
+        )
+        goal = GoalWitness(
+            stable_id=goal_path.stable_id,
+            pose=(*goal_path.position, goal_path.yaw),
+        )
+        return JointPathWitness(
+            cue=cue,
+            goal=goal,
+            actions=tuple(final_actions),
+            forward_actions=counts[ForwardAction],
+            ascend_actions=counts[AscendAction],
+            descend_actions=counts[DescendAction],
+            turn_left_actions=counts[TurnLeftAction],
+            turn_right_actions=counts[TurnRightAction],
+            hold_actions=counts[HoldAction],
+            stop_actions=counts[StopAction],
+            total_actions=len(final_actions),
+            remaining_actions=self.horizon_steps - len(final_actions),
+        )
 
     def run(self):
         run_started = time.perf_counter()
-        roadmap_seconds = 0.0
+        graph_seconds = 0.0
         goal_seconds = 0.0
         temporal_seconds = 0.0
+        queried_steps = 0
+        cue_path_found = False
+        goal_path_found = False
+        best_witness = None
+        best_ordered_candidate = None
         try:
-            phase_started = time.perf_counter()
-            self.build_roadmap()
-            roadmap_seconds = time.perf_counter() - phase_started
             initial_clock = self.lockstep.refresh()
             if initial_clock.step_index != 1:
                 raise RuntimeError(
@@ -1233,39 +1298,63 @@ class SpatiotemporalFeasibilityAuditor:
                 self.scenario_id
             )
             phase_started = time.perf_counter()
-            goals = self._goal_candidates(
-                previous_scenario,
+            source = _source_entity(previous_scenario)
+            goal_paths = self._search_observation_paths(
+                (source,),
+                self.blueprint.absolute_pose[:3],
+                self.blueprint.absolute_pose[5],
+                self.horizon_steps - 1,
                 initial_clock,
+                SEARCH_MAX_EXPANDED_GOAL,
+                "initial-goal",
             )
             goal_seconds = time.perf_counter() - phase_started
-            goal_path_found = bool(goals)
-            previous_candidates = self._initial_candidates(
-                previous_scenario
-            )
-            cue_path_found = False
-            best_witness = None
-            best_ordered_candidate = None
-            queried_steps = 0
+            goal_path_found = bool(goal_paths)
 
             phase_started = time.perf_counter()
-            for task_step in range(TASK_HORIZON_STEPS - 1):
-                if task_step > 0:
-                    new_candidates = self._select_new_candidates(
+            for task_step in range(self.horizon_steps - 1):
+                if task_step == 0:
+                    previous_paths = self._initial_observation_paths(
+                        previous_scenario
+                    )
+                else:
+                    start_paths = self._start_observation_paths(
+                        previous_scenario,
+                        self.lockstep.snapshot,
+                    )
+                    responders = _selected_response_entities(
                         previous_scenario,
                         task_step,
                     )
-                    previous_candidates = (
-                        self._observable_new_candidates(
-                            new_candidates,
-                            self.lockstep.snapshot,
+                    if task_step % CUE_SEARCH_STEP_STRIDE == 0:
+                        self._cue_diagnostics[
+                            "first_view_proposed"
+                        ] += len(responders)
+                        searched_paths = (
+                            self._search_response_observation_paths(
+                                responders,
+                                self.blueprint.absolute_pose[:3],
+                                self.blueprint.absolute_pose[5],
+                                task_step,
+                                self.lockstep.snapshot,
+                                f"cue-step-{task_step}",
+                            )
                         )
+                    else:
+                        searched_paths = ()
+                    previous_paths = self._merge_observation_paths(
+                        start_paths,
+                        searched_paths,
                     )
+                    self._cue_diagnostics[
+                        "first_view_observable"
+                    ] += len(previous_paths)
                 current_clock = self.lockstep.advance()
                 current_scenario = self.client.get_scenario_state(
                     self.scenario_id
                 )
                 transitions = self._transition_candidates(
-                    previous_candidates,
+                    previous_paths,
                     previous_scenario,
                     current_scenario,
                     current_clock,
@@ -1276,26 +1365,27 @@ class SpatiotemporalFeasibilityAuditor:
                 for transition in transitions:
                     witness = self._joint_witness(
                         transition,
-                        goals,
-                        current_scenario.event_position,
+                        task_step,
+                        current_scenario,
+                        current_clock,
                     )
-                    if witness is not None:
-                        if (
-                            best_ordered_candidate is None
+                    if witness is None:
+                        continue
+                    if (
+                        best_ordered_candidate is None
+                        or witness.total_actions
+                        < best_ordered_candidate.total_actions
+                    ):
+                        best_ordered_candidate = witness
+                    if (
+                        witness.total_actions <= self.horizon_steps
+                        and (
+                            best_witness is None
                             or witness.total_actions
-                            < best_ordered_candidate.total_actions
-                        ):
-                            best_ordered_candidate = witness
-                        if (
-                            witness.total_actions
-                            <= TASK_HORIZON_STEPS
-                            and (
-                                best_witness is None
-                                or witness.total_actions
-                                < best_witness.total_actions
-                            )
-                        ):
-                            best_witness = witness
+                            < best_witness.total_actions
+                        )
+                    ):
+                        best_witness = witness
                 if (
                     best_witness is not None
                     and best_witness.remaining_actions
@@ -1304,20 +1394,14 @@ class SpatiotemporalFeasibilityAuditor:
                     break
                 previous_scenario = current_scenario
             temporal_seconds = time.perf_counter() - phase_started
+            graph_seconds = goal_seconds + temporal_seconds
 
             if best_witness is None:
                 status = FeasibilityStatus.NO_JOINT_WITNESS_IN_SEARCH
-                if best_ordered_candidate is None:
-                    message = (
-                        "Finite deterministic search found no ordered "
-                        "cue-to-goal candidate"
-                    )
-                else:
-                    message = (
-                        "Shortest ordered cue-to-goal candidate requires "
-                        f"{best_ordered_candidate.total_actions} actions, "
-                        f"exceeding the {TASK_HORIZON_STEPS}-action horizon"
-                    )
+                message = (
+                    "Finite fixed-action search found no ordered "
+                    "cue-to-goal witness"
+                )
             elif (
                 best_witness.remaining_actions
                 >= REQUIRED_ACTION_MARGIN
@@ -1326,19 +1410,20 @@ class SpatiotemporalFeasibilityAuditor:
                 message = "Joint witness retains at least five actions"
             else:
                 status = FeasibilityStatus.JOINT_WITNESS_TIGHT
-                message = "Joint witness exists but retains fewer than five actions"
+                message = (
+                    "Joint witness exists but retains fewer than "
+                    "five actions"
+                )
             return SpatiotemporalFeasibilityReport(
                 start_id=self.blueprint.start_id,
-                visibility_stratum=(
-                    self.blueprint.visibility_stratum
-                ),
+                visibility_stratum=self.blueprint.visibility_stratum,
                 status=status,
                 cue_path_found=cue_path_found,
                 goal_view_path_found=goal_path_found,
                 cue_then_goal_path_found=best_witness is not None,
-                roadmap_digest=self._roadmap_digest,
-                roadmap_nodes=len(self.roadmap.nodes),
-                roadmap_edges=self.roadmap.edge_count,
+                search_digest=self._search_digest,
+                searched_states=len(self._searched_keys),
+                checked_motion_edges=self._checked_motion_edges,
                 queried_steps=queried_steps,
                 minimum_ordered_actions=(
                     None
@@ -1349,7 +1434,7 @@ class SpatiotemporalFeasibilityAuditor:
                     sorted(self._cue_diagnostics.items())
                 ),
                 phase_seconds=(
-                    ("roadmap", roadmap_seconds),
+                    ("action_search", graph_seconds),
                     ("goal_visibility", goal_seconds),
                     ("temporal_cue_search", temporal_seconds),
                     ("auditor_total", time.perf_counter() - run_started),
@@ -1358,30 +1443,24 @@ class SpatiotemporalFeasibilityAuditor:
                 message=message,
             )
         except Exception as error:
+            graph_seconds = time.perf_counter() - run_started
             return SpatiotemporalFeasibilityReport(
                 start_id=self.blueprint.start_id,
-                visibility_stratum=(
-                    self.blueprint.visibility_stratum
-                ),
+                visibility_stratum=self.blueprint.visibility_stratum,
                 status=FeasibilityStatus.UNKNOWN,
-                cue_path_found=False,
-                goal_view_path_found=False,
+                cue_path_found=cue_path_found,
+                goal_view_path_found=goal_path_found,
                 cue_then_goal_path_found=False,
-                roadmap_digest=self._roadmap_digest,
-                roadmap_nodes=(
-                    0 if self.roadmap is None else len(self.roadmap.nodes)
-                ),
-                roadmap_edges=(
-                    0 if self.roadmap is None
-                    else self.roadmap.edge_count
-                ),
-                queried_steps=0,
+                search_digest=self._search_digest,
+                searched_states=len(self._searched_keys),
+                checked_motion_edges=self._checked_motion_edges,
+                queried_steps=queried_steps,
                 minimum_ordered_actions=None,
                 cue_diagnostics=tuple(
                     sorted(self._cue_diagnostics.items())
                 ),
                 phase_seconds=(
-                    ("roadmap", roadmap_seconds),
+                    ("action_search", graph_seconds),
                     ("goal_visibility", goal_seconds),
                     ("temporal_cue_search", temporal_seconds),
                     ("auditor_total", time.perf_counter() - run_started),

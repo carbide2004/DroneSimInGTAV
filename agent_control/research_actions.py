@@ -1,8 +1,8 @@
 """Strict task actions for the hidden-event localization environment.
 
 The low-level camera protocol accepts an absolute position and yaw together.
-This module deliberately exposes the narrower research action semantics:
-translation, yaw rotation, hold, and stop are mutually exclusive.
+This module deliberately exposes only seven fixed research actions:
+forward, ascend, descend, turn left, turn right, hold, and stop.
 """
 
 import math
@@ -13,9 +13,9 @@ from .dronesim_client import (
     LockstepSession,
 )
 from .task_starts import (
-    TASK_HORIZON_STEPS,
-    TASK_MAX_TRANSLATION_METERS,
-    TASK_MAX_YAW_DEGREES,
+    TASK_FORWARD_STEP_METERS,
+    TASK_VERTICAL_STEP_METERS,
+    TASK_YAW_STEP_DEGREES,
     TaskRelativePoseController,
     TaskStartBlueprint,
     make_agent_observation,
@@ -45,44 +45,28 @@ def _angle_error_degrees(left, right):
 
 
 @dataclass(frozen=True)
-class TranslateAction:
-    dx_body: float
-    dy_body: float
-    dz_world: float
-
-    def __post_init__(self):
-        values = _finite_values(
-            self.dx_body,
-            self.dy_body,
-            self.dz_world,
-        )
-        distance = math.sqrt(sum(value * value for value in values))
-        if distance <= 0.0:
-            raise InvalidTaskAction(
-                "Zero translation must be represented by HoldAction"
-            )
-        if distance > TASK_MAX_TRANSLATION_METERS + 1.0e-6:
-            raise InvalidTaskAction(
-                "Translation norm exceeds "
-                f"{TASK_MAX_TRANSLATION_METERS:.1f} m"
-            )
+class ForwardAction:
+    pass
 
 
 @dataclass(frozen=True)
-class RotateAction:
-    dyaw: float
+class AscendAction:
+    pass
 
-    def __post_init__(self):
-        (dyaw,) = _finite_values(self.dyaw)
-        if abs(dyaw) <= 0.0:
-            raise InvalidTaskAction(
-                "Zero rotation must be represented by HoldAction"
-            )
-        if abs(dyaw) > TASK_MAX_YAW_DEGREES + 1.0e-6:
-            raise InvalidTaskAction(
-                "Yaw rotation exceeds "
-                f"{TASK_MAX_YAW_DEGREES:.1f} degrees"
-            )
+
+@dataclass(frozen=True)
+class DescendAction:
+    pass
+
+
+@dataclass(frozen=True)
+class TurnLeftAction:
+    pass
+
+
+@dataclass(frozen=True)
+class TurnRightAction:
+    pass
 
 
 @dataclass(frozen=True)
@@ -110,8 +94,11 @@ class StopAction:
 
 
 TaskAction = (
-    TranslateAction
-    | RotateAction
+    ForwardAction
+    | AscendAction
+    | DescendAction
+    | TurnLeftAction
+    | TurnRightAction
     | HoldAction
     | StopAction
 )
@@ -128,7 +115,7 @@ class TaskStepResult:
 
 
 class ResearchActionExecutor:
-    """Execute mutually exclusive research actions in one lockstep session."""
+    """Execute fixed research actions in one lockstep session."""
 
     def __init__(
         self,
@@ -156,6 +143,9 @@ class ResearchActionExecutor:
             )
         self.controller = TaskRelativePoseController(client, blueprint)
         self.controller.synchronize()
+        self._horizon_steps = int(
+            blueprint.action_spec.horizon_steps
+        )
         self._pair = initial_pair
         self._action_count = 0
         self._stopped = False
@@ -186,9 +176,9 @@ class ResearchActionExecutor:
             )
         if self._stopped:
             raise RuntimeError("The task episode has already stopped")
-        if self._action_count >= TASK_HORIZON_STEPS:
+        if self._action_count >= self._horizon_steps:
             raise RuntimeError(
-                f"The {TASK_HORIZON_STEPS}-action task horizon "
+                f"The {self._horizon_steps}-action task horizon "
                 "is exhausted"
             )
 
@@ -223,15 +213,19 @@ class ResearchActionExecutor:
         if not isinstance(
             action,
             (
-                TranslateAction,
-                RotateAction,
+                ForwardAction,
+                AscendAction,
+                DescendAction,
+                TurnLeftAction,
+                TurnRightAction,
                 HoldAction,
                 StopAction,
             ),
         ):
             raise InvalidTaskAction(
-                "Expected TranslateAction, RotateAction, HoldAction, "
-                "or StopAction"
+                "Expected one fixed research action: ForwardAction, "
+                "AscendAction, DescendAction, TurnLeftAction, "
+                "TurnRightAction, HoldAction, or StopAction"
             )
 
         before_pose = self.client.get_pose()
@@ -247,17 +241,17 @@ class ResearchActionExecutor:
                 agent_observation=None,
                 stopped=True,
             )
-        if self._action_count >= TASK_HORIZON_STEPS - 1:
+        if self._action_count >= self._horizon_steps - 1:
             raise InvalidTaskAction(
                 "A non-terminal action would leave no action for STOP"
             )
 
         try:
-            if isinstance(action, TranslateAction):
+            if isinstance(action, ForwardAction):
                 self.controller.step_relative(
-                    action.dx_body,
-                    action.dy_body,
-                    action.dz_world,
+                    TASK_FORWARD_STEP_METERS,
+                    0.0,
+                    0.0,
                     0.0,
                 )
                 actual = self.client.get_pose()
@@ -267,14 +261,51 @@ class ResearchActionExecutor:
                 ) > _POSE_ANGLE_TOLERANCE_DEGREES:
                     self._failed = True
                     raise RuntimeError(
-                        "TRANSLATE changed camera yaw"
+                        "FORWARD changed camera yaw"
                     )
-            elif isinstance(action, RotateAction):
+            elif isinstance(action, AscendAction):
+                self.controller.step_relative(
+                    0.0,
+                    0.0,
+                    TASK_VERTICAL_STEP_METERS,
+                    0.0,
+                )
+                actual = self.client.get_pose()
+                if _angle_error_degrees(
+                    actual[5],
+                    before_pose[5],
+                ) > _POSE_ANGLE_TOLERANCE_DEGREES:
+                    self._failed = True
+                    raise RuntimeError(
+                        "ASCEND changed camera yaw"
+                    )
+            elif isinstance(action, DescendAction):
+                self.controller.step_relative(
+                    0.0,
+                    0.0,
+                    -TASK_VERTICAL_STEP_METERS,
+                    0.0,
+                )
+                actual = self.client.get_pose()
+                if _angle_error_degrees(
+                    actual[5],
+                    before_pose[5],
+                ) > _POSE_ANGLE_TOLERANCE_DEGREES:
+                    self._failed = True
+                    raise RuntimeError(
+                        "DESCEND changed camera yaw"
+                    )
+            elif isinstance(action, (TurnLeftAction, TurnRightAction)):
+                yaw_delta = (
+                    TASK_YAW_STEP_DEGREES
+                    if isinstance(action, TurnLeftAction)
+                    else -TASK_YAW_STEP_DEGREES
+                )
                 self.controller.step_relative(
                     0.0,
                     0.0,
                     0.0,
-                    action.dyaw,
+                    yaw_delta,
                 )
                 actual = self.client.get_pose()
                 position_error = math.dist(
@@ -284,7 +315,7 @@ class ResearchActionExecutor:
                 if position_error > _POSE_POSITION_TOLERANCE_METERS:
                     self._failed = True
                     raise RuntimeError(
-                        "ROTATE changed camera position"
+                        "TURN changed camera position"
                     )
             else:
                 actual = self.client.get_pose()
@@ -347,39 +378,3 @@ class ResearchActionExecutor:
                 stopped=False,
             )
         return result
-
-    def execute_components(
-        self,
-        dx_body,
-        dy_body,
-        dz_world,
-        dyaw,
-        timeout_ms=5000,
-    ):
-        dx_body, dy_body, dz_world, dyaw = _finite_values(
-            dx_body,
-            dy_body,
-            dz_world,
-            dyaw,
-        )
-        translating = math.sqrt(
-            dx_body * dx_body
-            + dy_body * dy_body
-            + dz_world * dz_world
-        ) > 0.0
-        rotating = abs(dyaw) > 0.0
-        if translating and rotating:
-            raise InvalidTaskAction(
-                "Translation and yaw rotation cannot share one action"
-            )
-        if translating:
-            action = TranslateAction(
-                dx_body,
-                dy_body,
-                dz_world,
-            )
-        elif rotating:
-            action = RotateAction(dyaw)
-        else:
-            action = HoldAction()
-        return self.execute(action, timeout_ms=timeout_ms)

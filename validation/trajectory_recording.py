@@ -10,29 +10,30 @@ from pathlib import Path
 import numpy as np
 
 from agent_control.research_actions import (
+    AscendAction,
+    DescendAction,
+    ForwardAction,
     HoldAction,
-    RotateAction,
     StopAction,
-    TranslateAction,
+    TurnLeftAction,
+    TurnRightAction,
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def serialize_action(action):
-    if isinstance(action, TranslateAction):
-        return {
-            "type": "TRANSLATE",
-            "dx_body": action.dx_body,
-            "dy_body": action.dy_body,
-            "dz_world": action.dz_world,
-        }
-    if isinstance(action, RotateAction):
-        return {
-            "type": "ROTATE",
-            "dyaw": action.dyaw,
-        }
+    if isinstance(action, ForwardAction):
+        return {"type": "FORWARD"}
+    if isinstance(action, AscendAction):
+        return {"type": "ASCEND"}
+    if isinstance(action, DescendAction):
+        return {"type": "DESCEND"}
+    if isinstance(action, TurnLeftAction):
+        return {"type": "TURN_LEFT"}
+    if isinstance(action, TurnRightAction):
+        return {"type": "TURN_RIGHT"}
     if isinstance(action, HoldAction):
         return {"type": "HOLD"}
     if isinstance(action, StopAction):
@@ -124,14 +125,16 @@ def _serialize_witness(witness):
         "goal": {
             "stable_id": witness.goal.stable_id,
             "pose": list(witness.goal.pose),
-            "node_index": witness.goal.node_index,
         },
         "actions": [
             serialize_action(action)
             for action in witness.actions
         ],
-        "translate_actions": witness.translate_actions,
-        "rotate_actions": witness.rotate_actions,
+        "forward_actions": witness.forward_actions,
+        "ascend_actions": witness.ascend_actions,
+        "descend_actions": witness.descend_actions,
+        "turn_left_actions": witness.turn_left_actions,
+        "turn_right_actions": witness.turn_right_actions,
         "hold_actions": witness.hold_actions,
         "stop_actions": witness.stop_actions,
         "total_actions": witness.total_actions,
