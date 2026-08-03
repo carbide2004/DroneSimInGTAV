@@ -87,6 +87,7 @@ private:
     bool spawn_pedestrian(std::size_t index, std::string& error);
     void complete_prepare();
     void update_running();
+    bool visual_fire_effects_alive() const;
     void suppress_ambient_for_frame() const;
     void count_ambient(
         std::uint32_t& pedestrians,

@@ -161,7 +161,7 @@ def _draw_box(axis, target, view_name):
         linewidth = 2.5 if observable else 1.5
     elif role == "FIRE_ENVELOPE":
         color = "orange"
-        label = "FIRE_ENVELOPE"
+        label = "SMOKE_ENVELOPE"
         linewidth = 1.5
     else:
         return

@@ -212,8 +212,13 @@ def _show_start_views(generated):
                 markersize=8,
                 markeredgewidth=linewidth,
             )
+            role_label = (
+                "SMOKE_ENVELOPE"
+                if target.role == VisibilityTargetRole.FIRE_ENVELOPE
+                else target.role.name
+            )
             label = (
-                f"{target.role.name} id={target.stable_id} "
+                f"{role_label} id={target.stable_id} "
                 f"clear={view.clear_in_frustum_samples}/"
                 f"{view.in_frustum_samples} "
                 f"span={view.projected_span_pixels:.1f}px "

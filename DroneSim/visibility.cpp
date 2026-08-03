@@ -1,6 +1,7 @@
 #include "visibility.h"
 
 #include "camera.h"
+#include "fire_visual_config.h"
 #include "keyboard.h"
 #include "main.h"
 #include "natives.h"
@@ -23,8 +24,6 @@ constexpr std::size_t kMaximumOutstandingRaycasts = 8;
 constexpr int kMaximumRaycastFrames = 8;
 constexpr float kMinimumModelExtentMeters = 0.01f;
 constexpr float kDuplicatePointToleranceSquared = 1.0e-4f;
-constexpr float kFireEnvelopeRadiusMeters = 8.0f;
-constexpr float kFireEnvelopeHeightMeters = 25.0f;
 constexpr float kCameraClearanceRadiusMeters = 1.0f;
 constexpr float kProfileClearanceRadiusMeters = 2.0f;
 constexpr std::size_t kMaximumGeometryBatchItems = 256;
@@ -194,9 +193,9 @@ VisibilityTargetSnapshot build_fire_envelope(
     VisibilityTargetSnapshot target;
     target.role = VisibilityTargetRole::FireEnvelope;
     const std::array<float, 3> heights = {
-        5.0f,
-        15.0f,
-        kFireEnvelopeHeightMeters,
+        3.0f,
+        9.0f,
+        FireVisualConfig::kSmokeEnvelopeHeightMeters,
     };
     for (float height : heights) {
         VisibilitySampleSnapshot center;
@@ -212,9 +211,11 @@ VisibilityTargetSnapshot build_fire_envelope(
             VisibilitySampleSnapshot ring;
             ring.position = {
                 event_position.x +
-                    std::cos(angle) * kFireEnvelopeRadiusMeters,
+                    std::cos(angle) *
+                        FireVisualConfig::kSmokeEnvelopeRadiusMeters,
                 event_position.y +
-                    std::sin(angle) * kFireEnvelopeRadiusMeters,
+                    std::sin(angle) *
+                        FireVisualConfig::kSmokeEnvelopeRadiusMeters,
                 event_position.z + height,
             };
             target.samples.push_back(ring);

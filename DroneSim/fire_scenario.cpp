@@ -1,5 +1,6 @@
 #include "fire_scenario.h"
 
+#include "fire_visual_config.h"
 #include "logging.h"
 #include "main.h"
 #include "natives.h"
@@ -36,16 +37,15 @@ constexpr std::size_t kMaximumWorldEntities = 2048;
 constexpr std::uint32_t kFireActivationTimeoutMilliseconds = 3000;
 constexpr auto kModelLoadTimeout = std::chrono::seconds(10);
 constexpr float kPi = 3.14159265358979323846f;
-constexpr float kVisualFireRangeMeters = 500.0f;
 constexpr std::uint64_t kFiretruckRandomStreamTag =
     0x4649524554525543ULL;  // "FIRETRUC"
 constexpr std::uint64_t kPedestrianPositionRandomStreamTag =
     0x5045445F504F5349ULL;  // "PED_POSI"
 constexpr std::uint64_t kPedestrianModelRandomStreamTag =
     0x5045445F4D4F444CULL;  // "PED_MODL"
-char kFirePtfxAsset[] = "core";
-char kFirePtfxEffect[] = "ent_ray_ch2_farm_fire_dble";
-char kLargeFirePtfxEffect[] = "ent_ray_ch2_farm_fire_l_l_l";
+char kVehicleFirePtfxEffect[] = "fire_vehicle";
+char kWideFirePtfxEffect[] = "ent_ray_ch2_farm_fire_dble";
+char kTallFirePtfxEffect[] = "ent_ray_ch2_farm_fire_l_l_l";
 
 const std::array<const char*, 4> kCivilianModels = {
     "a_m_y_business_01",
@@ -569,7 +569,8 @@ bool FireScenario::request_models(std::string& error) {
     for (const Hash model : requested_models_) {
         STREAMING::REQUEST_MODEL(model);
     }
-    STREAMING::REQUEST_NAMED_PTFX_ASSET(kFirePtfxAsset);
+    STREAMING::REQUEST_NAMED_PTFX_ASSET(
+        FireVisualConfig::kPtfxAsset);
     fire_ptfx_asset_requested_ = true;
     model_deadline_ =
         std::chrono::steady_clock::now() + kModelLoadTimeout;
@@ -585,7 +586,7 @@ bool FireScenario::models_loaded() const {
                 return STREAMING::HAS_MODEL_LOADED(model);
             }) &&
         STREAMING::HAS_NAMED_PTFX_ASSET_LOADED(
-            kFirePtfxAsset);
+            FireVisualConfig::kPtfxAsset);
 }
 
 void FireScenario::tick() {
@@ -662,7 +663,7 @@ void FireScenario::tick() {
                 STREAMING::REQUEST_MODEL(model);
             }
             STREAMING::REQUEST_NAMED_PTFX_ASSET(
-                kFirePtfxAsset);
+                FireVisualConfig::kPtfxAsset);
             if (std::chrono::steady_clock::now() >= model_deadline_) {
                 fail(
                     "Scenario models or fire particle asset did not load "
@@ -1064,16 +1065,52 @@ ScenarioOperationStatus FireScenario::start(
     }
     script_fire_created_ = true;
     if (!STREAMING::HAS_NAMED_PTFX_ASSET_LOADED(
-            kFirePtfxAsset)) {
+            FireVisualConfig::kPtfxAsset)) {
         fail("The fire particle asset was lost before Start");
         error = failure_;
         return ScenarioOperationStatus::StartFailed;
     }
-    const auto start_visual_effect = [&](
-                                         char* effect,
-                                         float z_offset,
-                                         float scale) {
-        GRAPHICS::_SET_PTFX_ASSET_NEXT_CALL(kFirePtfxAsset);
+    const auto register_visual_effect = [&](Any handle) {
+        if (handle == 0 ||
+            !GRAPHICS::DOES_PARTICLE_FX_LOOPED_EXIST(
+                static_cast<int>(handle))) {
+            return false;
+        }
+        GRAPHICS::_SET_PARTICLE_FX_LOOPED_RANGE(
+            handle,
+            FireVisualConfig::kMaximumRenderRangeMeters);
+        visual_fire_handles_.push_back(handle);
+        return true;
+    };
+    const auto start_vehicle_visual_effect = [&](
+                                                 char* effect,
+                                                 float z_offset,
+                                                 float scale) {
+        GRAPHICS::_SET_PTFX_ASSET_NEXT_CALL(
+            FireVisualConfig::kPtfxAsset);
+        const Any handle =
+            GRAPHICS::START_PARTICLE_FX_LOOPED_ON_ENTITY(
+                effect,
+                source_vehicle_,
+                0.0f,
+                0.0f,
+                z_offset,
+                0.0f,
+                0.0f,
+                0.0f,
+                scale,
+                FALSE,
+                FALSE,
+                FALSE);
+        return register_visual_effect(handle);
+    };
+    const auto start_world_visual_effect = [&](
+                                               char* effect,
+                                               float z_offset,
+                                               float scale,
+                                               bool dark_smoke) {
+        GRAPHICS::_SET_PTFX_ASSET_NEXT_CALL(
+            FireVisualConfig::kPtfxAsset);
         const Any handle =
             GRAPHICS::START_PARTICLE_FX_LOOPED_AT_COORD(
                 effect,
@@ -1088,22 +1125,44 @@ ScenarioOperationStatus FireScenario::start(
                 FALSE,
                 FALSE,
                 FALSE);
-        if (handle == 0 ||
-            !GRAPHICS::DOES_PARTICLE_FX_LOOPED_EXIST(
-                static_cast<int>(handle))) {
+        if (!register_visual_effect(handle)) {
             return false;
         }
-        GRAPHICS::_SET_PARTICLE_FX_LOOPED_RANGE(
-            handle,
-            kVisualFireRangeMeters);
-        visual_fire_handles_.push_back(handle);
+        if (dark_smoke) {
+            GRAPHICS::SET_PARTICLE_FX_LOOPED_COLOUR(
+                handle,
+                0.12f,
+                0.12f,
+                0.12f,
+                FALSE);
+            GRAPHICS::SET_PARTICLE_FX_LOOPED_ALPHA(
+                handle,
+                1.0f);
+        }
         return true;
     };
-    if (!start_visual_effect(kFirePtfxEffect, 0.3f, 1.0f) ||
-        !start_visual_effect(kLargeFirePtfxEffect, 0.3f, 1.0f)) {
+    if (!start_vehicle_visual_effect(
+            kVehicleFirePtfxEffect,
+            0.25f,
+            2.0f) ||
+        !start_world_visual_effect(
+            kWideFirePtfxEffect,
+            0.35f,
+            2.5f,
+            false) ||
+        !start_world_visual_effect(
+            kTallFirePtfxEffect,
+            0.5f,
+            2.25f,
+            false) ||
+        !start_world_visual_effect(
+            FireVisualConfig::kSmokePtfxEffect,
+            FireVisualConfig::kSmokeEmitterZOffsetMeters,
+            FireVisualConfig::kSmokeScale,
+            true)) {
         fail(
-            "GTA failed to create the long-range fire and smoke "
-            "particle effects");
+            "GTA failed to create the three fire effects and the "
+            "required smoke effect");
         error = failure_;
         return ScenarioOperationStatus::StartFailed;
     }
@@ -1221,6 +1280,12 @@ void FireScenario::set_lockstep_frozen(bool frozen) {
 }
 
 void FireScenario::update_running() {
+    if (!visual_fire_effects_alive()) {
+        fail(
+            "A required visual fire particle effect stopped while "
+            "the scenario was running");
+        return;
+    }
     if (lockstep_frozen_) {
         return;
     }
@@ -1256,6 +1321,21 @@ void FireScenario::update_running() {
                 vehicle->task_state);
         }
     }
+}
+
+bool FireScenario::visual_fire_effects_alive() const {
+    if (visual_fire_handles_.size() != 4) {
+        return false;
+    }
+    return std::all_of(
+        visual_fire_handles_.begin(),
+        visual_fire_handles_.end(),
+        [](Any handle) {
+            return
+                handle != 0 &&
+                GRAPHICS::DOES_PARTICLE_FX_LOOPED_EXIST(
+                    static_cast<int>(handle));
+        });
 }
 
 ScenarioOperationStatus FireScenario::snapshot(
@@ -1457,7 +1537,7 @@ void FireScenario::cleanup_owned_resources() {
     release_models();
     if (fire_ptfx_asset_requested_) {
         STREAMING::_REMOVE_NAMED_PTFX_ASSET(
-            kFirePtfxAsset);
+            FireVisualConfig::kPtfxAsset);
         fire_ptfx_asset_requested_ = false;
     }
     ambient_suppression_active_ = false;
