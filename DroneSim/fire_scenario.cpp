@@ -43,9 +43,7 @@ constexpr std::uint64_t kPedestrianPositionRandomStreamTag =
     0x5045445F504F5349ULL;  // "PED_POSI"
 constexpr std::uint64_t kPedestrianModelRandomStreamTag =
     0x5045445F4D4F444CULL;  // "PED_MODL"
-char kVehicleFirePtfxEffect[] = "fire_vehicle";
-char kWideFirePtfxEffect[] = "ent_ray_ch2_farm_fire_dble";
-char kTallFirePtfxEffect[] = "ent_ray_ch2_farm_fire_l_l_l";
+char kFirePtfxEffect[] = "ent_ray_ch2_farm_fire_dble";
 
 const std::array<const char*, 4> kCivilianModels = {
     "a_m_y_business_01",
@@ -1082,45 +1080,39 @@ ScenarioOperationStatus FireScenario::start(
         visual_fire_handles_.push_back(handle);
         return true;
     };
-    const auto start_vehicle_visual_effect = [&](
-                                                 char* effect,
-                                                 float z_offset,
-                                                 float scale) {
+    const auto start_fire_visual_effect = [&]() {
         GRAPHICS::_SET_PTFX_ASSET_NEXT_CALL(
             FireVisualConfig::kPtfxAsset);
         const Any handle =
-            GRAPHICS::START_PARTICLE_FX_LOOPED_ON_ENTITY(
-                effect,
-                source_vehicle_,
+            GRAPHICS::START_PARTICLE_FX_LOOPED_AT_COORD(
+                kFirePtfxEffect,
+                event_position_.x,
+                event_position_.y,
+                event_position_.z + 0.35f,
                 0.0f,
                 0.0f,
-                z_offset,
-                0.0f,
-                0.0f,
-                0.0f,
-                scale,
+                event_heading_,
+                2.5f,
+                FALSE,
                 FALSE,
                 FALSE,
                 FALSE);
         return register_visual_effect(handle);
     };
-    const auto start_world_visual_effect = [&](
-                                               char* effect,
-                                               float z_offset,
-                                               float scale,
-                                               bool dark_smoke) {
+    const auto start_smoke_visual_effect = [&]() {
         GRAPHICS::_SET_PTFX_ASSET_NEXT_CALL(
             FireVisualConfig::kPtfxAsset);
         const Any handle =
             GRAPHICS::START_PARTICLE_FX_LOOPED_AT_COORD(
-                effect,
+                FireVisualConfig::kSmokePtfxEffect,
                 event_position_.x,
                 event_position_.y,
-                event_position_.z + z_offset,
+                event_position_.z +
+                    FireVisualConfig::kSmokeEmitterZOffsetMeters,
                 0.0f,
                 0.0f,
                 event_heading_,
-                scale,
+                FireVisualConfig::kSmokeScale,
                 FALSE,
                 FALSE,
                 FALSE,
@@ -1128,41 +1120,22 @@ ScenarioOperationStatus FireScenario::start(
         if (!register_visual_effect(handle)) {
             return false;
         }
-        if (dark_smoke) {
-            GRAPHICS::SET_PARTICLE_FX_LOOPED_COLOUR(
-                handle,
-                0.12f,
-                0.12f,
-                0.12f,
-                FALSE);
-            GRAPHICS::SET_PARTICLE_FX_LOOPED_ALPHA(
-                handle,
-                1.0f);
-        }
+        GRAPHICS::SET_PARTICLE_FX_LOOPED_COLOUR(
+            handle,
+            0.12f,
+            0.12f,
+            0.12f,
+            FALSE);
+        GRAPHICS::SET_PARTICLE_FX_LOOPED_ALPHA(
+            handle,
+            1.0f);
         return true;
     };
-    if (!start_vehicle_visual_effect(
-            kVehicleFirePtfxEffect,
-            0.25f,
-            2.0f) ||
-        !start_world_visual_effect(
-            kWideFirePtfxEffect,
-            0.35f,
-            2.5f,
-            false) ||
-        !start_world_visual_effect(
-            kTallFirePtfxEffect,
-            0.5f,
-            2.25f,
-            false) ||
-        !start_world_visual_effect(
-            FireVisualConfig::kSmokePtfxEffect,
-            FireVisualConfig::kSmokeEmitterZOffsetMeters,
-            FireVisualConfig::kSmokeScale,
-            true)) {
+    if (!start_fire_visual_effect() ||
+        !start_smoke_visual_effect()) {
         fail(
-            "GTA failed to create the three fire effects and the "
-            "required smoke effect");
+            "GTA failed to create the required fire and smoke "
+            "effects");
         error = failure_;
         return ScenarioOperationStatus::StartFailed;
     }
@@ -1324,7 +1297,7 @@ void FireScenario::update_running() {
 }
 
 bool FireScenario::visual_fire_effects_alive() const {
-    if (visual_fire_handles_.size() != 4) {
+    if (visual_fire_handles_.size() != 2) {
         return false;
     }
     return std::all_of(
