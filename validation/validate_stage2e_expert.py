@@ -43,8 +43,11 @@ def _parse_args():
         "--anchor",
         type=float,
         nargs=3,
-        required=True,
         metavar=("X", "Y", "Z"),
+        help=(
+            "Requested event anchor. If omitted, use the current scripted "
+            "camera position and snap horizontally to a road within 30 m."
+        ),
     )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--start-seed", type=int, default=1)
@@ -60,7 +63,9 @@ def _parse_args():
     parser.add_argument("--host", default="127.0.0.5")
     parser.add_argument("--port", type=int, default=23456)
     args = parser.parse_args()
-    if not all(math.isfinite(value) for value in args.anchor):
+    if args.anchor is not None and not all(
+        math.isfinite(value) for value in args.anchor
+    ):
         parser.error("--anchor values must be finite")
     if not 0 <= args.seed <= 0xFFFFFFFFFFFFFFFF:
         parser.error("--seed must fit uint64")
@@ -214,6 +219,15 @@ def main():
     client = DroneSimClient(args.host, args.port)
     client.require_camera_active()
     original_pose = client.get_pose()
+    if args.anchor is None:
+        args.anchor = tuple(float(value) for value in original_pose[:3])
+        print(
+            "using current camera position as requested anchor "
+            f"({args.anchor[0]:.2f}, {args.anchor[1]:.2f}, "
+            f"{args.anchor[2]:.2f}); scenario will snap horizontally "
+            "to the nearest road node",
+            flush=True,
+        )
     started = time.perf_counter()
     scenario_id = None
     session = None

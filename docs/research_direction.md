@@ -144,3 +144,9 @@ the strict search budget is 32 actions, bounded by 12,000 expanded states and
 15 wall-clock seconds. `SEARCH_CUE` and `REACQUIRE_CUE` are distinct: both use
 a finite six-turn scan, and repeated evidence from the same track cannot reset
 the scan into indefinite rotation.
+
+For interactive Stage 2E validation, the requested anchor may be the current
+scripted-camera position. Event placement still resolves to a vehicle node no
+more than 30 horizontal metres away; camera altitude is deliberately excluded
+from this road-proximity check. Explicit world anchors remain the reproducible
+dataset-generation interface.

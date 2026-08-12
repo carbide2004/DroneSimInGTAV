@@ -9,9 +9,13 @@
 struct KeyState {
     bool consume_press();
     void push();
+    bool is_down() const;
+    void set_down(bool down);
+    void reset();
 
 private:
     std::atomic<bool> pending_{false};
+    std::atomic<bool> down_{false};
 };
 
 extern KeyState F9;

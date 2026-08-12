@@ -309,11 +309,11 @@ ScenarioOperationStatus FireScenario::resolve_event(
     }
     event_position_ = to_scenario_vector(event_node);
     event_heading_ = event_heading;
-    if (distance_between(event_position_, config_.anchor) >
+    if (horizontal_distance_between(event_position_, config_.anchor) >
         kMaximumAnchorSnapDistanceMeters) {
         error =
-            "The closest vehicle node is more than 30 meters from "
-            "the requested anchor";
+            "The closest vehicle node is more than 30 horizontal meters "
+            "from the requested anchor";
         return ScenarioOperationStatus::PrepareFailed;
     }
 

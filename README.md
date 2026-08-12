@@ -122,9 +122,14 @@ one bounded altitude change, or HOLD rather than indefinite rotation.
 Run the no-payload online validation with:
 
 ```powershell
-python validation\validate_stage2e_expert.py `
-  --anchor 234 324 100
+python validation\validate_stage2e_expert.py
 ```
+
+When `--anchor X Y Z` is omitted, Stage 2E validation uses the current
+scripted-camera position and resolves the nearest road node within 30
+horizontal metres. This lets an operator fly over a desired street before
+starting validation without first looking up GTA world coordinates. The
+explicit option remains available for repeatable automated runs.
 
 Generate a bounded number of successful episodes with:
 
@@ -305,16 +310,18 @@ The plugin listens on `127.0.0.5:23456` by default.
   bottom-left notification feed.
 - F10 creates the scripted camera.
 - F11 stops the scripted camera and restores the player after validation teleportation.
-- W/S move forward/backward by 1 metre.
-- A/D strafe left/right by 1 metre.
-- Q/E turn left/right by 15 degrees.
-- Z/C move up/down by 1 metre.
+- W/S move forward/backward in 1-metre increments.
+- A/D strafe left/right in 1-metre increments.
+- Q/E turn left/right in 15-degree increments.
+- Z/C move up/down in 1-metre increments.
 
 Manual translation uses the same collision check as the network pose API.
-Each physical key press performs one step; holding a key does not repeatedly
-move the camera. While the scripted camera is active, GTA gameplay controls
-are suppressed so these keys do not also move or operate the player. Pause
-menu controls remain available, and normal player input resumes after F11.
+Pressing a key applies one increment immediately; holding it repeats at a
+fixed 100-ms interval independent of render FPS. Multiple held keys may be
+combined for manual inspection. While the scripted camera is active, GTA
+gameplay controls are suppressed so these keys do not also move or operate the
+player. Manual camera keys remain disabled throughout lockstep. Pause-menu
+controls remain available, and normal player input resumes after F11.
 
 The same camera operations are available through the Python client.
 

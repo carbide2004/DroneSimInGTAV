@@ -24,6 +24,7 @@ namespace {
 constexpr float kManualTranslationStepMeters = 1.0f;
 constexpr float kManualYawStepDegrees = 15.0f;
 constexpr float kDegreesToRadians = 0.01745329251994329577f;
+constexpr auto kManualRepeatInterval = std::chrono::milliseconds(100);
 
 void show_notification(const std::string& text);
 void perform_lockstep_emergency_recovery();
@@ -566,14 +567,14 @@ void show_notification(const std::string& text) {
 }
 
 void discard_manual_camera_presses() {
-    MoveForward.consume_press();
-    MoveBackward.consume_press();
-    StrafeRight.consume_press();
-    StrafeLeft.consume_press();
-    MoveUp.consume_press();
-    MoveDown.consume_press();
-    YawLeft.consume_press();
-    YawRight.consume_press();
+    MoveForward.reset();
+    MoveBackward.reset();
+    StrafeRight.reset();
+    StrafeLeft.reset();
+    MoveUp.reset();
+    MoveDown.reset();
+    YawLeft.reset();
+    YawRight.reset();
 }
 
 void perform_lockstep_emergency_recovery() {
@@ -608,33 +609,54 @@ void perform_lockstep_emergency_recovery() {
 }
 
 void process_manual_camera_controls() {
+    static auto next_repeat = std::chrono::steady_clock::time_point{};
+    if (!CameraController::instance().is_active()) {
+        next_repeat = std::chrono::steady_clock::time_point{};
+        return;
+    }
+    const bool any_down =
+        MoveForward.is_down() || MoveBackward.is_down() ||
+        StrafeRight.is_down() || StrafeLeft.is_down() ||
+        MoveUp.is_down() || MoveDown.is_down() ||
+        YawLeft.is_down() || YawRight.is_down();
+    if (!any_down) {
+        next_repeat = std::chrono::steady_clock::time_point{};
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (next_repeat != std::chrono::steady_clock::time_point{} &&
+        now < next_repeat) {
+        return;
+    }
+    next_repeat = now + kManualRepeatInterval;
+
     float forward_steps = 0.0f;
     float right_steps = 0.0f;
     float vertical_steps = 0.0f;
     float yaw_steps = 0.0f;
 
-    if (MoveForward.consume_press()) {
+    if (MoveForward.is_down()) {
         forward_steps += 1.0f;
     }
-    if (MoveBackward.consume_press()) {
+    if (MoveBackward.is_down()) {
         forward_steps -= 1.0f;
     }
-    if (StrafeRight.consume_press()) {
+    if (StrafeRight.is_down()) {
         right_steps += 1.0f;
     }
-    if (StrafeLeft.consume_press()) {
+    if (StrafeLeft.is_down()) {
         right_steps -= 1.0f;
     }
-    if (MoveUp.consume_press()) {
+    if (MoveUp.is_down()) {
         vertical_steps += 1.0f;
     }
-    if (MoveDown.consume_press()) {
+    if (MoveDown.is_down()) {
         vertical_steps -= 1.0f;
     }
-    if (YawLeft.consume_press()) {
+    if (YawLeft.is_down()) {
         yaw_steps += 1.0f;
     }
-    if (YawRight.consume_press()) {
+    if (YawRight.is_down()) {
         yaw_steps -= 1.0f;
     }
 
