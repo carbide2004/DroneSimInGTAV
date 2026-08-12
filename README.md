@@ -39,6 +39,12 @@ separately:
   envelope is not task-observable, and all affiliated response actors are
   initially not task-observable.
 
+Stage 2E uses the more precise name `POTENTIAL_CUE_VISIBLE`. The camera starts
+40--60 metres from the event, and at least one task-observable responder is
+active or scheduled to activate within two seconds. This condition does not
+itself count as dynamic evidence: the same RGB-D-grounded actor must still be
+observed moving across two adjacent frozen observations.
+
 Each observation contains synchronized metric RGB-D from one frozen simulation
 instant:
 
@@ -86,6 +92,51 @@ AND the fire-source vehicle is task-observable in the final RGB-D observation
 AND the agent provides a finite start-local 3D event coordinate
 AND its world-space 3D Euclidean error is at most 5 m
 ```
+
+## Stage 2E cue-grounded expert
+
+The controlled response field places 32 pedestrians in four event-centric
+distance bands: 8--20, 20--35, 35--50, and 50--65 metres. All actors exist in
+READY, while immutable blueprint activation offsets create an outward
+response wave. Pending actors remain frozen even during a lockstep Advance.
+
+The expert never reads the event location. Visibility truth supplies only
+anonymous track association and visible projected samples; positions and
+motion are recovered from synchronized metric Depth. Broad firetruck and
+pedestrian direction likelihoods update a 4-metre belief grid. The highest
+mass connected mode selects a temporary subgoal, and a collision-only strict
+local A* supplies at most 32 actions. The bounded search also enforces the
+episode activity volume, a 12,000-state expansion limit, and a 15-second wall
+timeout.
+
+The teacher observes after every action. The remaining local action queue is
+reused until the intent, primary belief mode, subgoal, cue availability,
+terminal visibility, or collision state changes.
+
+`SEARCH_CUE` denotes the period before any valid dynamic evidence has been
+obtained; `REACQUIRE_CUE` is reserved for later cue loss or belief ambiguity.
+Both use a finite six-turn scan. Repeated observations of the same track do
+not restart that scan, and completion must transition to belief following,
+one bounded altitude change, or HOLD rather than indefinite rotation.
+
+Run the no-payload online validation with:
+
+```powershell
+python validation\validate_stage2e_expert.py `
+  --anchor 234 324 100
+```
+
+Generate a bounded number of successful episodes with:
+
+```powershell
+python validation\generate_stage2e_experts.py `
+  --anchor 234 324 100 `
+  --max-success-episodes 10 `
+  --output-dir dataset\stage2e_fire
+```
+
+Only successful episodes retain RGB-D. Failed attempts append a compact JSON
+diagnostic and remove their `.partial` payload directory.
 
 The fire must be active at the terminal step. Seeing only a distant smoke
 column is not sufficient terminal confirmation. `task-observable` means that
@@ -213,6 +264,10 @@ agent_control/
   task_starts.py           evaluation-only starts and local task boundary
   research_actions.py      seven fixed research actions
   feasibility.py           Stage 2D bounded joint-witness search
+  expert_starts.py         Stage 2E static start certificates
+  expert_teacher.py        RGB-D-grounded belief and local planner
+  expert_episode.py        strict online expert rollout
+  expert_recording.py      successful-episode dataset writer
   requirements.txt         online validation dependencies
 validation/
   rgbd_geometry.py
@@ -225,6 +280,8 @@ validation/
   validate_fire_scenario.py
   validate_visibility_starts.py
   validate_spatiotemporal_feasibility.py
+  validate_stage2e_expert.py
+  generate_stage2e_experts.py
   trajectory_recording.py
   visualize_spatiotemporal_trajectory.py
 ```

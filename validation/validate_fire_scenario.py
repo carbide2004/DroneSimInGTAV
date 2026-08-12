@@ -505,6 +505,16 @@ def _validate_seed_isolation(client, args):
                 f"{index} model: {left_entity.model_hash} != "
                 f"{right_entity.model_hash}"
             )
+        if (
+            left_entity.planned_activation_offset_ms
+            != right_entity.planned_activation_offset_ms
+        ):
+            raise RuntimeError(
+                "Seed isolation changed pedestrian "
+                f"{index} activation offset: "
+                f"{left_entity.planned_activation_offset_ms} != "
+                f"{right_entity.planned_activation_offset_ms}"
+            )
         if not np.allclose(
             left_entity.position,
             right_entity.position,

@@ -5,6 +5,7 @@
 #include "types.h"
 
 #include <chrono>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <random>
@@ -49,6 +50,7 @@ private:
         ScenarioVector3 position;
         float heading = 0.0f;
         Hash model_hash = 0;
+        std::uint32_t activation_offset_ms = 0;
     };
 
     struct Blueprint {
@@ -85,6 +87,11 @@ private:
     bool spawn_source(std::string& error);
     bool spawn_firetruck(std::size_t index, std::string& error);
     bool spawn_pedestrian(std::size_t index, std::string& error);
+    bool activate_pedestrian(
+        std::size_t index,
+        std::uint32_t game_timer_ms,
+        std::string& error);
+    bool pedestrian_active(std::size_t index) const;
     void complete_prepare();
     void update_running();
     bool visual_fire_effects_alive() const;
@@ -110,10 +117,13 @@ private:
     std::mt19937_64 firetruck_random_;
     std::mt19937_64 pedestrian_position_random_;
     std::mt19937_64 pedestrian_model_random_;
+    std::mt19937_64 pedestrian_activation_random_;
     ScenarioVector3 event_position_;
     float event_heading_ = 0.0f;
     std::vector<SpawnPoint> firetruck_spawns_;
     std::vector<SpawnPoint> pedestrian_spawns_;
+    std::array<std::vector<SpawnPoint>, 4>
+        pedestrian_candidate_spawns_;
     std::vector<Hash> requested_models_;
     std::chrono::steady_clock::time_point model_deadline_;
     bool ambient_suppression_active_ = false;

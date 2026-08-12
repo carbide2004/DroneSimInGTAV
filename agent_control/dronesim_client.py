@@ -172,6 +172,8 @@ class ScenarioEntitySnapshot:
     speed: float
     heading: float
     spawn_game_timer_ms: int
+    planned_activation_offset_ms: int
+    activation_game_timer_ms: int
     task_start_game_timer_ms: int
     response_start_game_timer_ms: int
     task_target: tuple
@@ -557,9 +559,11 @@ def _decode_scenario_snapshot(payload):
             )
         (
             spawn_game_timer_ms,
+            planned_activation_offset_ms,
+            activation_game_timer_ms,
             task_start_game_timer_ms,
             response_start_game_timer_ms,
-        ) = reader.unpack("<3I")
+        ) = reader.unpack("<5I")
         task_target = _finite_tuple(
             "entity task target", reader.unpack("<3f")
         )
@@ -578,6 +582,10 @@ def _decode_scenario_snapshot(payload):
                 speed=float(speed),
                 heading=float(heading),
                 spawn_game_timer_ms=spawn_game_timer_ms,
+                planned_activation_offset_ms=(
+                    planned_activation_offset_ms
+                ),
+                activation_game_timer_ms=activation_game_timer_ms,
                 task_start_game_timer_ms=task_start_game_timer_ms,
                 response_start_game_timer_ms=response_start_game_timer_ms,
                 task_target=task_target,

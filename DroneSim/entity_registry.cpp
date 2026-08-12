@@ -10,7 +10,7 @@ namespace {
 constexpr float kResponseSpeedThreshold = 0.5f;
 constexpr float kProgressThresholdMeters = 0.5f;
 constexpr float kFireTruckStopDistanceMeters = 10.0f;
-constexpr float kPedestrianSuccessDistanceMeters = 60.0f;
+constexpr float kPedestrianAdditionalFleeDistanceMeters = 40.0f;
 constexpr std::uint32_t kStallTimeoutMilliseconds = 15000;
 
 float distance_between(
@@ -84,6 +84,17 @@ bool EntityRegistry::contains_handle(Entity handle) const {
         });
 }
 
+void EntityRegistry::schedule_task(
+    std::uint64_t stable_id,
+    std::uint32_t activation_offset_ms) {
+    Entry* entry = find(stable_id);
+    if (entry == nullptr) {
+        return;
+    }
+    entry->task_state = ScenarioTaskState::Pending;
+    entry->planned_activation_offset_ms = activation_offset_ms;
+}
+
 void EntityRegistry::start_task(
     std::uint64_t stable_id,
     const ScenarioVector3& target,
@@ -94,10 +105,16 @@ void EntityRegistry::start_task(
         return;
     }
     entry->task_state = ScenarioTaskState::Active;
+    entry->activation_game_timer_ms = game_timer_ms;
     entry->task_target = target;
     entry->task_start_game_timer_ms = game_timer_ms;
     entry->last_activity_game_timer_ms = game_timer_ms;
     entry->last_progress_distance = initial_distance;
+    entry->task_success_distance =
+        entry->role == ScenarioEntityRole::FleeingPedestrian
+            ? initial_distance +
+                kPedestrianAdditionalFleeDistanceMeters
+            : kFireTruckStopDistanceMeters;
 }
 
 void EntityRegistry::set_task_state(
@@ -145,7 +162,7 @@ void EntityRegistry::update_tasks(
         } else if (
             entry.role ==
             ScenarioEntityRole::FleeingPedestrian) {
-            if (distance >= kPedestrianSuccessDistanceMeters) {
+            if (distance >= entry.task_success_distance) {
                 entry.task_state = ScenarioTaskState::Succeeded;
                 continue;
             }
@@ -204,6 +221,9 @@ void EntityRegistry::restore_frozen_velocities() {
                 ScenarioEntityRole::FleeingPedestrian) {
             continue;
         }
+        if (entry.task_state != ScenarioTaskState::Active) {
+            continue;
+        }
         ENTITY::SET_ENTITY_VELOCITY(
             entry.handle,
             entry.frozen_velocity.x,
@@ -236,6 +256,10 @@ EntityRegistry::snapshots() const {
         snapshot.task_state = entry.task_state;
         snapshot.spawn_game_timer_ms =
             entry.spawn_game_timer_ms;
+        snapshot.planned_activation_offset_ms =
+            entry.planned_activation_offset_ms;
+        snapshot.activation_game_timer_ms =
+            entry.activation_game_timer_ms;
         snapshot.task_start_game_timer_ms =
             entry.task_start_game_timer_ms;
         snapshot.response_start_game_timer_ms =

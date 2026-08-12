@@ -18,9 +18,12 @@ public:
         std::uint64_t event_id = 0;
         ScenarioTaskState task_state = ScenarioTaskState::None;
         std::uint32_t spawn_game_timer_ms = 0;
+        std::uint32_t planned_activation_offset_ms = 0;
+        std::uint32_t activation_game_timer_ms = 0;
         std::uint32_t task_start_game_timer_ms = 0;
         std::uint32_t response_start_game_timer_ms = 0;
         ScenarioVector3 task_target;
+        float task_success_distance = 0.0f;
         float last_progress_distance = 0.0f;
         std::uint32_t last_activity_game_timer_ms = 0;
         bool kinematics_frozen = false;
@@ -41,6 +44,9 @@ public:
     Entry* find(std::uint64_t stable_id);
     const Entry* find(std::uint64_t stable_id) const;
     bool contains_handle(Entity handle) const;
+    void schedule_task(
+        std::uint64_t stable_id,
+        std::uint32_t activation_offset_ms);
     void start_task(
         std::uint64_t stable_id,
         const ScenarioVector3& target,

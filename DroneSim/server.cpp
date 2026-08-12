@@ -203,7 +203,7 @@ std::vector<unsigned char> scenario_snapshot_bytes(
     data.reserve(
         97 +
         snapshot.protected_entities.size() * 25 +
-        snapshot.entities.size() * 93);
+        snapshot.entities.size() * 101);
     append_scalar(data, snapshot.scenario_id);
     append_scalar(data, snapshot.blueprint_id);
     append_scalar(data, snapshot.seed);
@@ -267,6 +267,12 @@ std::vector<unsigned char> scenario_snapshot_bytes(
         append_scalar(data, entity.speed);
         append_scalar(data, entity.heading);
         append_scalar(data, entity.spawn_game_timer_ms);
+        append_scalar(
+            data,
+            entity.planned_activation_offset_ms);
+        append_scalar(
+            data,
+            entity.activation_game_timer_ms);
         append_scalar(data, entity.task_start_game_timer_ms);
         append_scalar(data, entity.response_start_game_timer_ms);
         append_vector3(data, entity.task_target);

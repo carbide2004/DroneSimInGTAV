@@ -81,6 +81,8 @@ struct ScenarioEntitySnapshot {
     float speed = 0.0f;
     float heading = 0.0f;
     std::uint32_t spawn_game_timer_ms = 0;
+    std::uint32_t planned_activation_offset_ms = 0;
+    std::uint32_t activation_game_timer_ms = 0;
     std::uint32_t task_start_game_timer_ms = 0;
     std::uint32_t response_start_game_timer_ms = 0;
     ScenarioVector3 task_target;

@@ -104,3 +104,43 @@ witness and almost never found even a first task-observable response view.
 This is recorded as a planner/search-coverage TODO, not evidence that the task
 or stratum is mathematically impossible. Its visibility thresholds and cue
 definition must not be silently weakened to manufacture a pass.
+
+## Stage 2E expert-data milestone
+
+Stage 2D is a finite feasibility audit, not the expert used to create the
+learning dataset. Stage 2E replaces joint oracle witness search with an online
+cue-grounded teacher:
+
+```text
+visible RGB-D-grounded response tracks
+  -> broad event-location belief
+  -> temporary subgoal
+  -> collision-only strict local planning
+  -> direct source verification and STOP
+```
+
+Task starts are 40--60 metres from the event and retain a static strict-action
+certificate of 20--44 non-terminal actions to a source-observable view. The
+certificate is evaluation-only. A Stage 2E start is called
+`POTENTIAL_CUE_VISIBLE`: at least one responder is initially task-observable
+and is active or scheduled to activate within two seconds. It is not a valid
+dynamic cue until two adjacent RGB-D observations recover at least 0.4 metres
+of motion.
+
+The controlled pedestrian response field contains eight actors in each
+event-distance band 8--20, 20--35, 35--50, and 50--65 metres. Actors exist
+from Prepare but activate according to a deterministic distance-dependent
+wave stored in the immutable blueprint. This is controlled experimental
+structure, not evidence about GTA's native response ecology.
+
+The teacher receives truth-assisted anonymous association and visible sample
+pixels, but entity positions are recovered from the corresponding metric
+Depth. It cannot read the event coordinate, event affiliation, GTA velocity,
+task state, world view matrices, or the static path certificate. Every action
+produces a new observation and Awareness update. A collision-only local A*
+plan may be reused while intent, belief mode, subgoal, cue availability, and
+collision validity remain unchanged. Its 20-metre subgoal is retained while
+the strict search budget is 32 actions, bounded by 12,000 expanded states and
+15 wall-clock seconds. `SEARCH_CUE` and `REACQUIRE_CUE` are distinct: both use
+a finite six-turn scan, and repeated evidence from the same track cannot reset
+the scan into indefinite rotation.

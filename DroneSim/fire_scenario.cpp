@@ -22,17 +22,21 @@ constexpr float kFireTruckMinimumDistanceMeters = 80.0f;
 constexpr float kFireTruckMaximumDistanceMeters = 120.0f;
 constexpr float kFireTruckMaximumRoadDistanceMeters = 350.0f;
 constexpr float kFireTruckMinimumHeadingCosine = 0.0f;
-constexpr float kPedestrianMinimumDistanceMeters = 12.0f;
-constexpr float kPedestrianMaximumDistanceMeters = 20.0f;
-constexpr float kPedestrianResolvedMinimumDistanceMeters = 10.0f;
-constexpr float kPedestrianResolvedMaximumDistanceMeters = 24.0f;
-constexpr float kPedestrianMaximumVerticalOffsetMeters = 8.0f;
+constexpr std::array<std::array<float, 2>, 4>
+    kPedestrianDistanceBandsMeters = {{
+        {{8.0f, 20.0f}},
+        {{20.0f, 35.0f}},
+        {{35.0f, 50.0f}},
+        {{50.0f, 65.0f}},
+    }};
+constexpr float kPedestrianMaximumVerticalOffsetMeters = 12.0f;
 constexpr float kFireTruckSpeedMetersPerSecond = 12.0f;
 constexpr float kFireTruckStopRangeMeters = 10.0f;
-constexpr float kPedestrianFleeDistanceMeters = 60.0f;
+constexpr float kPedestrianFleeDistanceMeters = 120.0f;
 constexpr int kDrivingStyle = 786603;
-constexpr std::size_t kMaximumPlacementAttempts = 128;
+constexpr std::size_t kMaximumPlacementAttempts = 2048;
 constexpr std::size_t kPlacementAttemptsPerFrame = 16;
+constexpr std::size_t kPedestrianCandidateMultiplier = 3;
 constexpr std::size_t kMaximumWorldEntities = 2048;
 constexpr std::uint32_t kFireActivationTimeoutMilliseconds = 3000;
 constexpr auto kModelLoadTimeout = std::chrono::seconds(10);
@@ -43,6 +47,8 @@ constexpr std::uint64_t kPedestrianPositionRandomStreamTag =
     0x5045445F504F5349ULL;  // "PED_POSI"
 constexpr std::uint64_t kPedestrianModelRandomStreamTag =
     0x5045445F4D4F444CULL;  // "PED_MODL"
+constexpr std::uint64_t kPedestrianActivationRandomStreamTag =
+    0x5045445F41435449ULL;  // "PED_ACTI"
 char kFirePtfxEffect[] = "ent_ray_ch2_farm_fire_dble";
 
 const std::array<const char*, 4> kCivilianModels = {
@@ -85,6 +91,47 @@ float distance_between(
     const ScenarioVector3& left,
     const ScenarioVector3& right) {
     return std::sqrt(distance_squared(left, right));
+}
+
+float horizontal_distance_between(
+    const ScenarioVector3& left,
+    const ScenarioVector3& right) {
+    const float dx = left.x - right.x;
+    const float dy = left.y - right.y;
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+float event_angle(
+    const ScenarioVector3& event_position,
+    const ScenarioVector3& position) {
+    return std::atan2(
+        position.y - event_position.y,
+        position.x - event_position.x);
+}
+
+float wrapped_angle_distance(float left, float right) {
+    float difference = std::fmod(
+        std::abs(left - right),
+        2.0f * kPi);
+    if (difference > kPi) {
+        difference = 2.0f * kPi - difference;
+    }
+    return difference;
+}
+
+std::uint32_t activation_offset_ms(
+    float event_distance,
+    std::mt19937_64& random) {
+    std::uniform_real_distribution<float> jitter(-0.5f, 0.5f);
+    const float seconds = std::clamp(
+        (std::max)(
+            0.0f,
+            (event_distance - 20.0f) / 10.0f +
+                jitter(random)),
+        0.0f,
+        12.0f);
+    return static_cast<std::uint32_t>(
+        std::lround(seconds * 4.0f)) * 250U;
 }
 
 ScenarioVector3 to_scenario_vector(const Vector3& value) {
@@ -157,6 +204,9 @@ ScenarioOperationStatus FireScenario::prepare(
     pedestrian_model_random_.seed(derive_random_stream_seed(
         config.seed,
         kPedestrianModelRandomStreamTag));
+    pedestrian_activation_random_.seed(derive_random_stream_seed(
+        config.seed,
+        kPedestrianActivationRandomStreamTag));
     failure_.clear();
     removed_pedestrians_ = 0;
     removed_vehicles_ = 0;
@@ -185,6 +235,9 @@ ScenarioOperationStatus FireScenario::prepare(
         building_blueprint_ = true;
         firetruck_spawns_.clear();
         pedestrian_spawns_.clear();
+        for (auto& candidates : pedestrian_candidate_spawns_) {
+            candidates.clear();
+        }
     }
     placement_attempts_ = 0;
     pedestrian_query_failures_ = 0;
@@ -416,12 +469,135 @@ bool FireScenario::resolve_pedestrian_spawns(
         placement_attempts_ = 0;
         return true;
     }
+    if (config_.pedestrian_count == 0) {
+        placement_attempts_ = 0;
+        return true;
+    }
+
+    std::array<std::size_t, 4> required_per_band{};
+    for (std::size_t index = 0;
+         index < config_.pedestrian_count;
+         ++index) {
+        ++required_per_band[index % required_per_band.size()];
+    }
+    std::array<std::size_t, 4> candidate_targets{};
+    bool candidates_complete = true;
+    for (std::size_t band = 0;
+         band < required_per_band.size();
+         ++band) {
+        candidate_targets[band] =
+            required_per_band[band] *
+            kPedestrianCandidateMultiplier;
+        if (pedestrian_candidate_spawns_[band].size() <
+            candidate_targets[band]) {
+            candidates_complete = false;
+        }
+    }
+
+    if (candidates_complete) {
+        std::array<std::vector<SpawnPoint>, 4> selected;
+        for (std::size_t band = 0;
+             band < required_per_band.size();
+             ++band) {
+            const auto& candidates =
+                pedestrian_candidate_spawns_[band];
+            if (required_per_band[band] == 0) {
+                continue;
+            }
+            std::vector<bool> used(candidates.size(), false);
+            selected[band].reserve(required_per_band[band]);
+            for (std::size_t selection = 0;
+                 selection < required_per_band[band];
+                 ++selection) {
+                std::size_t best_index = candidates.size();
+                float best_separation = -1.0f;
+                for (std::size_t candidate_index = 0;
+                     candidate_index < candidates.size();
+                     ++candidate_index) {
+                    if (used[candidate_index]) {
+                        continue;
+                    }
+                    const float angle = event_angle(
+                        event_position_,
+                        candidates[candidate_index].position);
+                    float minimum_separation = 2.0f * kPi;
+                    for (const SpawnPoint& chosen :
+                         selected[band]) {
+                        minimum_separation = (std::min)(
+                            minimum_separation,
+                            wrapped_angle_distance(
+                                angle,
+                                event_angle(
+                                    event_position_,
+                                    chosen.position)));
+                    }
+                    if (selected[band].empty()) {
+                        minimum_separation = 2.0f * kPi;
+                    }
+                    if (minimum_separation > best_separation) {
+                        best_separation = minimum_separation;
+                        best_index = candidate_index;
+                    }
+                }
+                if (best_index == candidates.size()) {
+                    error =
+                        "Pedestrian angular selection exhausted a "
+                        "distance-band candidate pool";
+                    return false;
+                }
+                used[best_index] = true;
+                SpawnPoint chosen = candidates[best_index];
+                chosen.activation_offset_ms = activation_offset_ms(
+                    horizontal_distance_between(
+                        chosen.position,
+                        event_position_),
+                    pedestrian_activation_random_);
+                selected[band].push_back(chosen);
+            }
+        }
+
+        std::array<std::size_t, 4> next_in_band{};
+        pedestrian_spawns_.clear();
+        pedestrian_spawns_.reserve(config_.pedestrian_count);
+        for (std::size_t index = 0;
+             index < config_.pedestrian_count;
+             ++index) {
+            const std::size_t band =
+                index % selected.size();
+            pedestrian_spawns_.push_back(
+                selected[band][next_in_band[band]++]);
+        }
+        placement_attempts_ = 0;
+        return true;
+    }
+
+    std::size_t target_band = 0;
+    bool found_target_band = false;
+    for (std::size_t offset = 0;
+         offset < required_per_band.size();
+         ++offset) {
+        const std::size_t band =
+            (placement_attempts_ + offset) %
+            required_per_band.size();
+        if (pedestrian_candidate_spawns_[band].size() <
+            candidate_targets[band]) {
+            target_band = band;
+            found_target_band = true;
+            break;
+        }
+    }
+    if (!found_target_band) {
+        error =
+            "Pedestrian candidate pool bookkeeping became inconsistent";
+        return false;
+    }
+
     std::uniform_real_distribution<float> angle_distribution(
         0.0f,
         2.0f * kPi);
-    std::uniform_real_distribution<float> pedestrian_radius_distribution(
-        kPedestrianMinimumDistanceMeters,
-        kPedestrianMaximumDistanceMeters);
+    std::uniform_real_distribution<float> radius_distribution(
+        kPedestrianDistanceBandsMeters[target_band][0],
+        kPedestrianDistanceBandsMeters[target_band][1]);
     std::uniform_int_distribution<std::size_t> model_distribution(
         0,
         kCivilianModels.size() - 1);
@@ -431,9 +607,18 @@ bool FireScenario::resolve_pedestrian_spawns(
         if (placement_attempts_++ >= kMaximumPlacementAttempts) {
             error =
                 "Could not resolve enough unique pedestrian safe coordinates; "
-                "resolved=" +
-                std::to_string(pedestrian_spawns_.size()) +
-                "/" + std::to_string(config_.pedestrian_count) +
+                "candidate_counts=" +
+                std::to_string(
+                    pedestrian_candidate_spawns_[0].size()) +
+                "," +
+                std::to_string(
+                    pedestrian_candidate_spawns_[1].size()) +
+                "," +
+                std::to_string(
+                    pedestrian_candidate_spawns_[2].size()) +
+                "," +
+                std::to_string(
+                    pedestrian_candidate_spawns_[3].size()) +
                 ", native_query_failures=" +
                 std::to_string(pedestrian_query_failures_) +
                 ", bounds_rejections=" +
@@ -445,8 +630,7 @@ bool FireScenario::resolve_pedestrian_spawns(
         const float angle =
             angle_distribution(pedestrian_position_random_);
         const float radius =
-            pedestrian_radius_distribution(
-                pedestrian_position_random_);
+            radius_distribution(pedestrian_position_random_);
         const float candidate_x =
             event_position_.x + std::cos(angle) * radius;
         const float candidate_y =
@@ -473,22 +657,27 @@ bool FireScenario::resolve_pedestrian_spawns(
             const float vertical_offset =
                 std::abs(position.z - event_position_.z);
             if (horizontal_distance <
-                    kPedestrianResolvedMinimumDistanceMeters ||
+                    kPedestrianDistanceBandsMeters[target_band][0] ||
                 horizontal_distance >
-                    kPedestrianResolvedMaximumDistanceMeters ||
+                    kPedestrianDistanceBandsMeters[target_band][1] ||
                 vertical_offset >
                     kPedestrianMaximumVerticalOffsetMeters) {
                 ++pedestrian_bounds_rejections_;
                 continue;
             }
-            const bool duplicate = std::any_of(
-                pedestrian_spawns_.begin(),
-                pedestrian_spawns_.end(),
-                [&](const SpawnPoint& point) {
-                    return distance_between(
-                               position,
-                               point.position) < 2.0f;
-                });
+            bool duplicate = false;
+            for (const auto& candidates :
+                 pedestrian_candidate_spawns_) {
+                duplicate = duplicate ||
+                    std::any_of(
+                        candidates.begin(),
+                        candidates.end(),
+                        [&](const SpawnPoint& point) {
+                            return distance_between(
+                                       position,
+                                       point.position) < 2.0f;
+                        });
+            }
             if (duplicate) {
                 ++pedestrian_duplicate_rejections_;
                 continue;
@@ -498,7 +687,7 @@ bool FireScenario::resolve_pedestrian_spawns(
                     kCivilianModels[
                         model_distribution(
                             pedestrian_model_random_)]));
-            pedestrian_spawns_.push_back(
+            pedestrian_candidate_spawns_[target_band].push_back(
                 {
                     position,
                     heading_away_from(
@@ -511,8 +700,8 @@ bool FireScenario::resolve_pedestrian_spawns(
             break;
         }
         if (placed &&
-            pedestrian_spawns_.size() >=
-                config_.pedestrian_count) {
+            pedestrian_candidate_spawns_[target_band].size() >=
+                candidate_targets[target_band]) {
             return true;
         }
     }
@@ -942,12 +1131,8 @@ bool FireScenario::spawn_firetruck(
         ScenarioEntityRole::FirefighterDriver,
         event_id_,
         spawn_time);
-    registry_.set_task_state(
-        actor.vehicle_id,
-        ScenarioTaskState::Pending);
-    registry_.set_task_state(
-        actor.driver_id,
-        ScenarioTaskState::Pending);
+    registry_.schedule_task(actor.vehicle_id, 0);
+    registry_.schedule_task(actor.driver_id, 0);
     firetrucks_.push_back(actor);
     return true;
 }
@@ -982,10 +1167,69 @@ bool FireScenario::spawn_pedestrian(
         ScenarioEntityRole::FleeingPedestrian,
         event_id_,
         static_cast<std::uint32_t>(GAMEPLAY::GET_GAME_TIMER()));
-    registry_.set_task_state(
+    registry_.schedule_task(
         pedestrian_id,
-        ScenarioTaskState::Pending);
+        spawn.activation_offset_ms);
     pedestrian_ids_.push_back(pedestrian_id);
+    return true;
+}
+
+bool FireScenario::pedestrian_active(std::size_t index) const {
+    if (index >= pedestrian_ids_.size()) {
+        return false;
+    }
+    const EntityRegistry::Entry* entry =
+        registry_.find(pedestrian_ids_[index]);
+    return entry != nullptr &&
+        entry->task_state == ScenarioTaskState::Active;
+}
+
+bool FireScenario::activate_pedestrian(
+    std::size_t index,
+    std::uint32_t game_timer_ms,
+    std::string& error) {
+    if (index >= pedestrians_.size() ||
+        index >= pedestrian_ids_.size() ||
+        index >= pedestrian_spawns_.size()) {
+        error = "Pedestrian activation index is out of range";
+        return false;
+    }
+    const Ped pedestrian = pedestrians_[index];
+    if (pedestrian == 0 ||
+        !ENTITY::DOES_ENTITY_EXIST(pedestrian)) {
+        error = "A scheduled fleeing pedestrian was lost";
+        return false;
+    }
+    EntityRegistry::Entry* entry =
+        registry_.find(pedestrian_ids_[index]);
+    if (entry == nullptr) {
+        error = "A scheduled pedestrian is absent from the registry";
+        return false;
+    }
+    if (entry->task_state != ScenarioTaskState::Pending) {
+        return entry->task_state == ScenarioTaskState::Active;
+    }
+
+    AI::TASK_SMART_FLEE_COORD(
+        pedestrian,
+        event_position_.x,
+        event_position_.y,
+        event_position_.z,
+        kPedestrianFleeDistanceMeters,
+        -1,
+        FALSE,
+        FALSE);
+    PED::SET_PED_KEEP_TASK(pedestrian, TRUE);
+    const ScenarioVector3 position = to_scenario_vector(
+        ENTITY::GET_ENTITY_COORDS(pedestrian, TRUE));
+    registry_.start_task(
+        pedestrian_ids_[index],
+        event_position_,
+        game_timer_ms,
+        distance_between(position, event_position_));
+    if (!lockstep_frozen_) {
+        ENTITY::FREEZE_ENTITY_POSITION(pedestrian, FALSE);
+    }
     return true;
 }
 
@@ -1187,26 +1431,20 @@ ScenarioOperationStatus FireScenario::start(
     for (std::size_t index = 0;
          index < pedestrians_.size();
          ++index) {
-        const Ped pedestrian = pedestrians_[index];
-        ENTITY::FREEZE_ENTITY_POSITION(
-            pedestrian,
-            lockstep_frozen_ ? TRUE : FALSE);
-        AI::TASK_SMART_FLEE_COORD(
-            pedestrian,
-            event_position_.x,
-            event_position_.y,
-            event_position_.z,
-            kPedestrianFleeDistanceMeters,
-            -1,
-            FALSE,
-            FALSE);
-        const ScenarioVector3 position = to_scenario_vector(
-            ENTITY::GET_ENTITY_COORDS(pedestrian, TRUE));
-        registry_.start_task(
-            pedestrian_ids_[index],
-            event_position_,
-            start_game_timer_ms_,
-            distance_between(position, event_position_));
+        const SpawnPoint& spawn = pedestrian_spawns_[index];
+        if (spawn.activation_offset_ms == 0 &&
+            !activate_pedestrian(
+                index,
+                start_game_timer_ms_,
+                error)) {
+            fail(error);
+            return ScenarioOperationStatus::StartFailed;
+        }
+        if (!pedestrian_active(index)) {
+            ENTITY::FREEZE_ENTITY_POSITION(
+                pedestrians_[index],
+                TRUE);
+        }
     }
 
     lifecycle_ = ScenarioLifecycle::Running;
@@ -1238,12 +1476,17 @@ void FireScenario::set_lockstep_frozen(bool frozen) {
                 frozen ? TRUE : FALSE);
         }
     }
-    for (const Ped pedestrian : pedestrians_) {
+    for (std::size_t index = 0;
+         index < pedestrians_.size();
+         ++index) {
+        const Ped pedestrian = pedestrians_[index];
         if (pedestrian != 0 &&
             ENTITY::DOES_ENTITY_EXIST(pedestrian)) {
             ENTITY::FREEZE_ENTITY_POSITION(
                 pedestrian,
-                frozen ? TRUE : FALSE);
+                frozen || !pedestrian_active(index)
+                    ? TRUE
+                    : FALSE);
         }
     }
     if (!frozen) {
@@ -1269,6 +1512,26 @@ void FireScenario::update_running() {
     }
     const std::uint32_t now =
         static_cast<std::uint32_t>(GAMEPLAY::GET_GAME_TIMER());
+    const std::uint32_t elapsed =
+        now - start_game_timer_ms_;
+    for (std::size_t index = 0;
+         index < pedestrian_ids_.size();
+         ++index) {
+        const EntityRegistry::Entry* entry =
+            registry_.find(pedestrian_ids_[index]);
+        if (entry != nullptr &&
+            entry->task_state == ScenarioTaskState::Pending &&
+            elapsed >= entry->planned_activation_offset_ms) {
+            std::string activation_error;
+            if (!activate_pedestrian(
+                    index,
+                    now,
+                    activation_error)) {
+                fail(activation_error);
+                return;
+            }
+        }
+    }
     if (now - start_game_timer_ms_ >=
             kFireActivationTimeoutMilliseconds &&
         !FIRE::IS_ENTITY_ON_FIRE(source_vehicle_) &&
@@ -1541,6 +1804,9 @@ void FireScenario::reset() {
     event_heading_ = 0.0f;
     firetruck_spawns_.clear();
     pedestrian_spawns_.clear();
+    for (auto& candidates : pedestrian_candidate_spawns_) {
+        candidates.clear();
+    }
     removed_pedestrians_ = 0;
     removed_vehicles_ = 0;
     start_game_timer_ms_ = 0;

@@ -283,6 +283,12 @@ LockstepOperationStatus SimulationClock::advance(
             elapsed_ms(epoch_game_timer_ms_, game_timer_ms());
     }
 
+    // WAIT(0) above is what advances GTA's timer.  The final WAIT can cross
+    // the cumulative target after the preceding scenario tick, so commit all
+    // time-triggered scenario transitions at the reached boundary before the
+    // world is frozen.  This tick does not yield and therefore cannot advance
+    // simulation time or physics beyond the reported lockstep instant.
+    ScenarioManager::instance().tick();
     freeze_world();
     guard.dismiss();
     actual_elapsed_ms_ = observed_elapsed;

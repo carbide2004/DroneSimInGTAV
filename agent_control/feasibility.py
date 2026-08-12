@@ -31,6 +31,7 @@ from .research_actions import (
 )
 from .task_starts import (
     TASK_FORWARD_STEP_METERS,
+    TASK_GOAL_VIEW_HEIGHTS_METERS,
     TASK_MIN_CUE_HORIZONTAL_DISPLACEMENT_METERS,
     TASK_VERTICAL_STEP_METERS,
     TASK_YAW_STEP_DEGREES,
@@ -50,12 +51,20 @@ SEARCH_RESULTS_PER_CUE_TARGET = 2
 VIEW_QUERY_MAX_HEURISTIC_ACTIONS = 3
 CUE_RESPONDERS_PER_SEARCH = 8
 CUE_SEARCH_STEP_STRIDE = 4
-SEARCH_FORWARD_DETOUR_DEGREES = 60.0
 REQUIRED_ACTION_MARGIN = 5
 _POSITION_KEY_METERS = 0.5
 _VIEW_MIN_DISTANCE_METERS = 6.0
 _VIEW_MAX_DISTANCE_METERS = 80.0
-_IDEAL_HEIGHTS_METERS = (20.0, 30.0, 40.0)
+_IDEAL_HEIGHTS_METERS = TASK_GOAL_VIEW_HEIGHTS_METERS
+_IDEAL_OBLIQUE_OFFSETS_METERS = (
+    (10.0, 10.0),
+    (20.0, 10.0),
+    (30.0, 15.0),
+    (40.0, 20.0),
+    (50.0, 25.0),
+    (60.0, 30.0),
+    (70.0, 30.0),
+)
 
 
 class FeasibilityStatus(IntEnum):
@@ -117,6 +126,16 @@ class SpatiotemporalFeasibilityReport:
     phase_seconds: tuple
     witness: JointPathWitness | None
     message: str
+
+
+@dataclass(frozen=True)
+class StaticPathCertificate:
+    actions: tuple
+    goal_pose: tuple
+    path_cost: int
+    searched_states: int
+    checked_motion_edges: int
+    search_digest: str
 
 
 @dataclass(frozen=True)
@@ -327,6 +346,9 @@ class SpatiotemporalFeasibilityAuditor:
         self._searched_keys = set()
         self._motion_cache = {}
         self._checked_motion_edges = 0
+        self._empty_ideal_phases = []
+        self._goal_ideals = ()
+        self._goal_candidate_counts = (0, 0, 0)
         self._cue_diagnostics = {
             "first_view_proposed": 0,
             "first_view_observable": 0,
@@ -339,7 +361,7 @@ class SpatiotemporalFeasibilityAuditor:
             "valid_transition": 0,
         }
         digest = hashlib.blake2b(digest_size=16)
-        digest.update(b"fixed-action-lattice-v1")
+        digest.update(b"fixed-action-lattice-v4")
         digest.update(
             np.asarray(
                 self.blueprint.absolute_pose[:3],
@@ -358,6 +380,85 @@ class SpatiotemporalFeasibilityAuditor:
             ).tobytes()
         )
         self._search_digest = digest.hexdigest()
+
+    def certify_static_goal_path(
+        self,
+        minimum_actions=20,
+        maximum_actions=44,
+        max_expanded=SEARCH_MAX_EXPANDED_GOAL,
+    ):
+        minimum_actions = int(minimum_actions)
+        maximum_actions = int(maximum_actions)
+        max_expanded = int(max_expanded)
+        if (
+            minimum_actions < 0
+            or maximum_actions < minimum_actions
+            or max_expanded <= 0
+        ):
+            raise ValueError(
+                "Invalid static path-certificate limits"
+            )
+        self._search_started = time.perf_counter()
+        self._last_progress = self._search_started
+        clock = self.lockstep.refresh()
+        scenario = self.client.get_scenario_state(
+            self.scenario_id
+        )
+        source = _source_entity(scenario)
+        self._goal_ideals = self._observable_goal_ideals(
+            source,
+            clock,
+        )
+        if not self._goal_ideals:
+            raise RuntimeError(
+                "STATIC_GOAL_NOT_FOUND: no verified source-observable "
+                "goal state lies inside the activity bounds"
+            )
+        paths = self._search_observation_paths(
+            (source,),
+            self.blueprint.absolute_pose[:3],
+            self.blueprint.absolute_pose[5],
+            maximum_actions,
+            clock,
+            max_expanded,
+            "static-goal-certificate",
+            candidate_ideals=self._goal_ideals,
+        )
+        if not paths:
+            raise RuntimeError(
+                "STATIC_GOAL_NOT_FOUND: strict static search found no "
+                f"source-observable path within {maximum_actions} actions"
+            )
+        path = min(
+            paths,
+            key=lambda item: (
+                len(item.actions),
+                item.position,
+                item.yaw,
+            ),
+        )
+        cost = len(path.actions)
+        if cost < minimum_actions:
+            raise RuntimeError(
+                "STATIC_GOAL_TOO_CLOSE: shortest enumerated path uses "
+                f"{cost} actions; minimum is {minimum_actions}"
+            )
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(self._search_digest.encode("ascii"))
+        digest.update(b"static-goal-certificate")
+        for action in path.actions:
+            digest.update(type(action).__name__.encode("ascii"))
+        return StaticPathCertificate(
+            actions=tuple(path.actions),
+            goal_pose=(
+                *tuple(float(value) for value in path.position),
+                float(path.yaw),
+            ),
+            path_cost=cost,
+            searched_states=len(self._searched_keys),
+            checked_motion_edges=self._checked_motion_edges,
+            search_digest=digest.hexdigest(),
+        )
 
     def _check_search_time(self, phase, expanded=0, queued=0):
         now = time.perf_counter()
@@ -453,10 +554,14 @@ class SpatiotemporalFeasibilityAuditor:
                 forward = np.asarray(
                     (-math.sin(radians), math.cos(radians))
                 )
-                for height in _IDEAL_HEIGHTS_METERS:
+                for horizontal_offset, height in (
+                    _IDEAL_OBLIQUE_OFFSETS_METERS
+                ):
                     center = (
-                        point[0] - forward[0] * height,
-                        point[1] - forward[1] * height,
+                        point[0]
+                        - forward[0] * horizontal_offset,
+                        point[1]
+                        - forward[1] * horizontal_offset,
                         point[2] + height,
                     )
                     if self.blueprint.contains_world_position(center):
@@ -487,6 +592,60 @@ class SpatiotemporalFeasibilityAuditor:
                         )
                     )
         return tuple(ideals)
+
+    def _observable_goal_ideals(self, source, clock):
+        ideals = self._ideal_poses((source,))
+        if not ideals:
+            self._goal_candidate_counts = (0, 0, 0)
+            return ()
+        self._check_search_time("goal-candidate-geometry")
+        geometry = self.client.probe_camera_geometry_batch(
+            self.lockstep.session_id,
+            points=[ideal[2] for ideal in ideals],
+            timeout=30.0,
+        )
+        self._require_instant(geometry, clock)
+        self._check_search_time("goal-candidate-geometry")
+        clear_ideals = tuple(
+            ideal
+            for ideal, point_clear in zip(
+                ideals,
+                geometry.point_clear,
+            )
+            if point_clear
+        )
+        observable = []
+        for offset in range(0, len(clear_ideals), 64):
+            batch = clear_ideals[offset : offset + 64]
+            snapshots = self._query_cases(
+                [
+                    TargetVisibilityCase(
+                        ideal[0],
+                        ideal[2],
+                    )
+                    for ideal in batch
+                ],
+                clock,
+            )
+            for ideal, snapshot in zip(batch, snapshots):
+                if _target_observable(
+                    snapshot.target,
+                    ideal[2],
+                    ideal[3],
+                    self.spec,
+                ):
+                    observable.append(ideal)
+            self._check_search_time(
+                "goal-candidate-visibility",
+                expanded=offset + len(batch),
+                queued=len(clear_ideals),
+            )
+        self._goal_candidate_counts = (
+            len(ideals),
+            len(clear_ideals),
+            len(observable),
+        )
+        return tuple(observable)
 
     @staticmethod
     def _heuristic(position, yaw, ideals):
@@ -586,14 +745,26 @@ class SpatiotemporalFeasibilityAuditor:
         clock,
         max_expanded,
         phase,
+        candidate_ideals=None,
     ):
         targets = tuple(
             sorted(targets, key=lambda item: (item.role, item.stable_id))
         )
         if not targets or max_actions < 0:
             return ()
-        ideals = self._ideal_poses(targets)
+        initial_key = self._state_key(start_position, start_yaw)
+        if initial_key not in self._searched_keys:
+            self._searched_keys.add(initial_key)
+            self.search_positions.append(
+                tuple(float(value) for value in start_position)
+            )
+        ideals = (
+            self._ideal_poses(targets)
+            if candidate_ideals is None
+            else tuple(candidate_ideals)
+        )
         if not ideals:
+            self._empty_ideal_phases.append(str(phase))
             return ()
         target_map = {
             target.stable_id: target
@@ -612,6 +783,15 @@ class SpatiotemporalFeasibilityAuditor:
             self._state_key(start_position, start_yaw): 0
         }
         heuristic = self._heuristic(start_position, start_yaw, ideals)
+        if (
+            max(
+                0,
+                heuristic[0][0]
+                - VIEW_QUERY_MAX_HEURISTIC_ACTIONS,
+            )
+            > max_actions
+        ):
+            return ()
         queue = [(heuristic[0][0], 0, 0)]
         expanded = 0
         results = []
@@ -624,6 +804,13 @@ class SpatiotemporalFeasibilityAuditor:
                 return
             estimate = self._heuristic(position, yaw, ideals)
             if estimate is None:
+                return
+            remaining_lower_bound = max(
+                0,
+                estimate[0][0]
+                - VIEW_QUERY_MAX_HEURISTIC_ACTIONS,
+            )
+            if cost + remaining_lower_bound > max_actions:
                 return
             best_cost[key] = cost
             node_index = len(nodes)
@@ -757,27 +944,11 @@ class SpatiotemporalFeasibilityAuditor:
                         node_index,
                         action,
                     )
-                movement_actions = []
-                ideal_center = estimate[3]
-                travel_yaw = _yaw_toward(
-                    node.position,
-                    ideal_center,
+                movement_actions = (
+                    ForwardAction(),
+                    AscendAction(),
+                    DescendAction(),
                 )
-                if (
-                    abs(_angle_delta(travel_yaw, node.yaw))
-                    <= SEARCH_FORWARD_DETOUR_DEGREES
-                ):
-                    movement_actions.append(ForwardAction())
-                vertical_delta = (
-                    ideal_center[2] - node.position[2]
-                )
-                if vertical_delta >= TASK_VERTICAL_STEP_METERS * 0.5:
-                    movement_actions.append(AscendAction())
-                elif (
-                    vertical_delta
-                    <= -TASK_VERTICAL_STEP_METERS * 0.5
-                ):
-                    movement_actions.append(DescendAction())
                 for action in movement_actions:
                     position, yaw = _apply_action_pose(
                         node.position,
@@ -1232,6 +1403,7 @@ class SpatiotemporalFeasibilityAuditor:
             clock,
             SEARCH_MAX_EXPANDED_GOAL,
             f"cue-to-goal-step-{task_step}",
+            candidate_ideals=self._goal_ideals,
         )
         if not goal_paths:
             return None
@@ -1299,6 +1471,10 @@ class SpatiotemporalFeasibilityAuditor:
             )
             phase_started = time.perf_counter()
             source = _source_entity(previous_scenario)
+            self._goal_ideals = self._observable_goal_ideals(
+                source,
+                initial_clock,
+            )
             goal_paths = self._search_observation_paths(
                 (source,),
                 self.blueprint.absolute_pose[:3],
@@ -1307,6 +1483,7 @@ class SpatiotemporalFeasibilityAuditor:
                 initial_clock,
                 SEARCH_MAX_EXPANDED_GOAL,
                 "initial-goal",
+                candidate_ideals=self._goal_ideals,
             )
             goal_seconds = time.perf_counter() - phase_started
             goal_path_found = bool(goal_paths)
@@ -1362,7 +1539,52 @@ class SpatiotemporalFeasibilityAuditor:
                 queried_steps = task_step + 1
                 if transitions:
                     cue_path_found = True
+                unique_transitions = {}
                 for transition in transitions:
+                    path = transition[0]
+                    key = (
+                        *(
+                            round(float(value), 4)
+                            for value in transition[2]
+                        ),
+                        round(float(transition[3]), 4),
+                    )
+                    rank = (
+                        len(path.actions),
+                        int(path.role),
+                        path.stable_id,
+                        type(transition[1]).__name__,
+                    )
+                    previous = unique_transitions.get(key)
+                    if previous is None or rank < previous[0]:
+                        unique_transitions[key] = (rank, transition)
+                goal_ideals = self._goal_ideals
+
+                def transition_goal_rank(item):
+                    path = item[0]
+                    estimate = self._heuristic(
+                        item[2],
+                        item[3],
+                        goal_ideals,
+                    )
+                    return (
+                        math.inf
+                        if estimate is None
+                        else estimate[0][0],
+                        len(path.actions),
+                        int(path.role),
+                        path.stable_id,
+                        type(item[1]).__name__,
+                    )
+
+                ordered_transitions = sorted(
+                    (
+                        value[1]
+                        for value in unique_transitions.values()
+                    ),
+                    key=transition_goal_rank,
+                )
+                for transition in ordered_transitions:
                     witness = self._joint_witness(
                         transition,
                         task_step,
@@ -1386,6 +1608,12 @@ class SpatiotemporalFeasibilityAuditor:
                         )
                     ):
                         best_witness = witness
+                    if (
+                        best_witness is not None
+                        and best_witness.remaining_actions
+                        >= REQUIRED_ACTION_MARGIN
+                    ):
+                        break
                 if (
                     best_witness is not None
                     and best_witness.remaining_actions
@@ -1414,6 +1642,20 @@ class SpatiotemporalFeasibilityAuditor:
                     "Joint witness exists but retains fewer than "
                     "five actions"
                 )
+            if self._empty_ideal_phases:
+                message += (
+                    "; no in-bounds observation ideals during "
+                    + ",".join(self._empty_ideal_phases[:4])
+                )
+            in_bounds, clear, observable = (
+                self._goal_candidate_counts
+            )
+            message += (
+                "; goal_candidates["
+                f"in_bounds={in_bounds},"
+                f"clear={clear},"
+                f"observable={observable}]"
+            )
             return SpatiotemporalFeasibilityReport(
                 start_id=self.blueprint.start_id,
                 visibility_stratum=self.blueprint.visibility_stratum,
@@ -1444,6 +1686,9 @@ class SpatiotemporalFeasibilityAuditor:
             )
         except Exception as error:
             graph_seconds = time.perf_counter() - run_started
+            in_bounds, clear, observable = (
+                self._goal_candidate_counts
+            )
             return SpatiotemporalFeasibilityReport(
                 start_id=self.blueprint.start_id,
                 visibility_stratum=self.blueprint.visibility_stratum,
@@ -1466,5 +1711,10 @@ class SpatiotemporalFeasibilityAuditor:
                     ("auditor_total", time.perf_counter() - run_started),
                 ),
                 witness=None,
-                message=str(error),
+                message=(
+                    f"{error}; goal_candidates["
+                    f"in_bounds={in_bounds},"
+                    f"clear={clear},"
+                    f"observable={observable}]"
+                ),
             )

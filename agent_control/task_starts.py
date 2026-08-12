@@ -18,6 +18,7 @@ from .dronesim_client import (
     LockstepSession,
     NADIR_PITCH_DEGREES,
     OBLIQUE_PITCH_DEGREES,
+    ScenarioEntityRole,
     ScenarioLifecycle,
     VisibilitySnapshot,
     VisibilityTargetRole,
@@ -31,8 +32,15 @@ TASK_STEP_MILLISECONDS = 250
 TASK_HORIZON_STEPS = 65
 TASK_ACTIVITY_RADIUS_METERS = 120.0
 TASK_ACTIVITY_VERTICAL_METERS = 40.0
-TASK_MIN_EVENT_DISTANCE_METERS = 60.0
-TASK_MAX_EVENT_DISTANCE_METERS = 100.0
+TASK_GOAL_VIEW_HEIGHTS_METERS = (
+    10.0,
+    15.0,
+    20.0,
+    30.0,
+    40.0,
+)
+TASK_MIN_EVENT_DISTANCE_METERS = 40.0
+TASK_MAX_EVENT_DISTANCE_METERS = 60.0
 TASK_MIN_ALTITUDE_AGL_METERS = 25.0
 TASK_MAX_ALTITUDE_AGL_METERS = 60.0
 TASK_MIN_PROJECTED_SPAN_PIXELS = 24.0
@@ -44,7 +52,9 @@ TASK_MAX_START_CANDIDATES = 256
 
 
 class StartVisibilityStratum(IntEnum):
-    CUE_VISIBLE = 1
+    POTENTIAL_CUE_VISIBLE = 1
+    # Historical Stage 2C/2D spelling. New code must use the explicit name.
+    CUE_VISIBLE = POTENTIAL_CUE_VISIBLE
     CUE_HIDDEN = 2
 
 
@@ -709,11 +719,50 @@ def _require_observation_spec(pair, spec):
 def _stratum_matches(stratum, assessment):
     if not assessment.event_initially_hidden:
         return False
-    if stratum == StartVisibilityStratum.CUE_VISIBLE:
+    if stratum == StartVisibilityStratum.POTENTIAL_CUE_VISIBLE:
         return assessment.cue_task_observable
     if stratum == StartVisibilityStratum.CUE_HIDDEN:
         return not assessment.cue_task_observable
     raise ValueError(f"Unknown visibility stratum {stratum!r}")
+
+
+def potential_cue_visible(
+    assessment,
+    scenario,
+    maximum_activation_offset_ms=2000,
+):
+    maximum_activation_offset_ms = int(
+        maximum_activation_offset_ms
+    )
+    if maximum_activation_offset_ms < 0:
+        raise ValueError(
+            "maximum_activation_offset_ms cannot be negative"
+        )
+    entities = {
+        entity.stable_id: entity
+        for entity in scenario.entities
+        if entity.exists
+    }
+    for target in assessment.targets:
+        if target.role not in (
+            VisibilityTargetRole.FIRE_TRUCK,
+            VisibilityTargetRole.FLEEING_PEDESTRIAN,
+        ):
+            continue
+        if not (
+            target.oblique.task_observable
+            or target.nadir.task_observable
+        ):
+            continue
+        entity = entities.get(target.stable_id)
+        if entity is None:
+            continue
+        if (
+            entity.planned_activation_offset_ms
+            <= maximum_activation_offset_ms
+        ):
+            return True
+    return False
 
 
 def _start_id(blueprint_id, start_seed, stratum, candidate_index):
@@ -741,6 +790,12 @@ def _event_bearing_body(start_position, yaw, event_position):
             float(np.dot(delta, forward)),
         )
     )
+
+
+def _world_yaw_toward(origin, target):
+    dx = float(target[0]) - float(origin[0])
+    dy = float(target[1]) - float(origin[1])
+    return math.degrees(math.atan2(-dx, dy))
 
 
 def generate_task_start(
@@ -786,6 +841,7 @@ def generate_task_start(
     rejection_counts = {
         "ground_not_found": 0,
         "space_blocked": 0,
+        "goal_view_outside_activity": 0,
         "source_vehicle_visible": 0,
         "fire_envelope_observable": 0,
         "stratum_mismatch": 0,
@@ -796,6 +852,26 @@ def generate_task_start(
         scenario.event_position,
         dtype=np.float64,
     )
+    potential_responders = tuple(
+        entity
+        for entity in scenario.entities
+        if entity.exists
+        and entity.role
+        in (
+            ScenarioEntityRole.FIRE_TRUCK,
+            ScenarioEntityRole.FLEEING_PEDESTRIAN,
+        )
+        and entity.planned_activation_offset_ms <= 2000
+    )
+    if (
+        visibility_stratum
+        == StartVisibilityStratum.POTENTIAL_CUE_VISIBLE
+        and not potential_responders
+    ):
+        raise TaskStartGenerationError(
+            "No responder is scheduled inside the two-second "
+            "potential-cue window"
+        )
     for candidate_index in range(max_candidates):
         radius_squared = rng.uniform(
             TASK_MIN_EVENT_DISTANCE_METERS**2,
@@ -824,6 +900,43 @@ def generate_task_start(
                 rejection_counts["space_blocked"] += 1
                 continue
             raise
+        event_horizontal_distance = math.hypot(
+            float(position[0] - event[0]),
+            float(position[1] - event[1]),
+        )
+        has_in_bounds_goal_height = (
+            event_horizontal_distance
+            <= TASK_ACTIVITY_RADIUS_METERS
+            and any(
+                abs(
+                    float(event[2])
+                    + height
+                    - float(position[2])
+                )
+                <= TASK_ACTIVITY_VERTICAL_METERS
+                for height in TASK_GOAL_VIEW_HEIGHTS_METERS
+            )
+        )
+        if not has_in_bounds_goal_height:
+            rejection_counts[
+                "goal_view_outside_activity"
+            ] += 1
+            continue
+        if (
+            visibility_stratum
+            == StartVisibilityStratum.POTENTIAL_CUE_VISIBLE
+        ):
+            responder = potential_responders[
+                rng.randrange(len(potential_responders))
+            ]
+            yaw = (
+                _world_yaw_toward(
+                    position,
+                    responder.position,
+                )
+                + rng.uniform(-15.0, 15.0)
+                + 180.0
+            ) % 360.0 - 180.0
 
         visibility = client.query_visibility(
             scenario.scenario_id,
@@ -850,6 +963,16 @@ def generate_task_start(
         if not _stratum_matches(
             visibility_stratum,
             assessment,
+        ):
+            rejection_counts["stratum_mismatch"] += 1
+            continue
+        if (
+            visibility_stratum
+            == StartVisibilityStratum.POTENTIAL_CUE_VISIBLE
+            and not potential_cue_visible(
+                assessment,
+                scenario,
+            )
         ):
             rejection_counts["stratum_mismatch"] += 1
             continue
@@ -883,6 +1006,16 @@ def generate_task_start(
         if not _stratum_matches(
             visibility_stratum,
             actual_assessment,
+        ):
+            rejection_counts["real_camera_mismatch"] += 1
+            continue
+        if (
+            visibility_stratum
+            == StartVisibilityStratum.POTENTIAL_CUE_VISIBLE
+            and not potential_cue_visible(
+                actual_assessment,
+                scenario,
+            )
         ):
             rejection_counts["real_camera_mismatch"] += 1
             continue
