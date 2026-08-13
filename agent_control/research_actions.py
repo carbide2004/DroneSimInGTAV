@@ -6,6 +6,7 @@ forward, ascend, descend, turn left, turn right, hold, and stop.
 """
 
 import math
+import time
 from dataclasses import dataclass
 
 from .dronesim_client import (
@@ -112,6 +113,15 @@ class TaskStepResult:
     clock: object
     agent_observation: object | None
     stopped: bool
+    timing: object
+
+
+@dataclass(frozen=True)
+class ActionExecutionTiming:
+    pose_seconds: float
+    advance_seconds: float
+    capture_seconds: float
+    total_seconds: float
 
 
 class ResearchActionExecutor:
@@ -182,10 +192,20 @@ class ResearchActionExecutor:
                 "is exhausted"
             )
 
-    def _advance_and_capture(self, action, timeout_ms):
+    def _advance_and_capture(
+        self,
+        action,
+        timeout_ms,
+        execution_started,
+        pose_seconds,
+    ):
         try:
+            phase_started = time.perf_counter()
             clock = self.lockstep.advance()
+            advance_seconds = time.perf_counter() - phase_started
+            phase_started = time.perf_counter()
             pair = self.lockstep.capture_rgbd_pair(timeout_ms)
+            capture_seconds = time.perf_counter() - phase_started
         except Exception:
             self._failed = True
             raise
@@ -206,9 +226,16 @@ class ResearchActionExecutor:
                 self.controller.odometry,
             ),
             stopped=False,
+            timing=ActionExecutionTiming(
+                pose_seconds=pose_seconds,
+                advance_seconds=advance_seconds,
+                capture_seconds=capture_seconds,
+                total_seconds=time.perf_counter() - execution_started,
+            ),
         )
 
     def execute(self, action, timeout_ms=5000):
+        execution_started = time.perf_counter()
         self._require_active()
         if not isinstance(
             action,
@@ -241,6 +268,12 @@ class ResearchActionExecutor:
                 clock=self.lockstep.snapshot,
                 agent_observation=None,
                 stopped=True,
+                timing=ActionExecutionTiming(
+                    pose_seconds=time.perf_counter() - execution_started,
+                    advance_seconds=0.0,
+                    capture_seconds=0.0,
+                    total_seconds=time.perf_counter() - execution_started,
+                ),
             )
         if self._action_count >= self._horizon_steps - 1:
             raise InvalidTaskAction(
@@ -376,9 +409,12 @@ class ResearchActionExecutor:
                 self.controller.synchronize()
             raise
 
+        pose_seconds = time.perf_counter() - execution_started
         result = self._advance_and_capture(
             action,
             timeout_ms,
+            execution_started,
+            pose_seconds,
         )
         if isinstance(action, HoldAction):
             after_pose = self.client.get_pose()
@@ -403,5 +439,11 @@ class ResearchActionExecutor:
                 clock=result.clock,
                 agent_observation=result.agent_observation,
                 stopped=False,
+                timing=ActionExecutionTiming(
+                    pose_seconds=result.timing.pose_seconds,
+                    advance_seconds=result.timing.advance_seconds,
+                    capture_seconds=result.timing.capture_seconds,
+                    total_seconds=time.perf_counter() - execution_started,
+                ),
             )
         return result

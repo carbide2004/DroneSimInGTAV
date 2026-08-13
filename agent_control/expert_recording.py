@@ -225,11 +225,11 @@ class ExpertEpisodeRecorder:
         self._closed = True
 
 
-def append_failure(output_root, payload):
+def _append_jsonl(output_root, filename, payload):
     output_root = Path(output_root).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     with open(
-        output_root / "failures.jsonl",
+        output_root / filename,
         "a",
         encoding="utf-8",
     ) as stream:
@@ -241,3 +241,11 @@ def append_failure(output_root, payload):
             )
             + "\n"
         )
+
+
+def append_failure(output_root, payload):
+    _append_jsonl(output_root, "failures.jsonl", payload)
+
+
+def append_attempt_timing(output_root, payload):
+    _append_jsonl(output_root, "timings.jsonl", payload)

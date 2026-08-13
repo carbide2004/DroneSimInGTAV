@@ -1,6 +1,7 @@
 """Online Stage 2E expert rollout and strict acceptance checks."""
 
 import math
+import time
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -35,6 +36,29 @@ class ExpertEpisodeResult:
     valid_dynamic_cue_observed: bool
     cue_sensitivity: CueSensitivityResult
     message: str
+    timing: object
+
+
+@dataclass(frozen=True)
+class ExpertEpisodeTiming:
+    observed_steps: int
+    setup_seconds: float
+    visibility_seconds: float
+    scenario_snapshot_seconds: float
+    grounding_seconds: float
+    teacher_seconds: float
+    recording_seconds: float
+    action_pose_seconds: float
+    action_advance_seconds: float
+    action_capture_seconds: float
+    action_total_seconds: float
+    cue_sensitivity_seconds: float
+    geometry_requested_segments: int
+    geometry_queried_segments: int
+    geometry_cache_hits: int
+    geometry_batch_queries: int
+    geometry_query_seconds: float
+    total_seconds: float
 
 
 def _entity_map(snapshot):
@@ -200,11 +224,12 @@ def run_expert_episode(
     client,
     session,
     scenario_id,
-    certified_start,
+    audited_start,
     recorder=None,
     capture_timeout_ms=5000,
 ):
-    generated = certified_start.generated
+    run_started = time.perf_counter()
+    generated = audited_start.generated
     blueprint = generated.blueprint
     episode_spec = AgentEpisodeSpec.from_blueprint(blueprint)
     executor = ResearchActionExecutor(
@@ -226,6 +251,17 @@ def run_expert_episode(
     history = []
     previous_scenario = None
     valid_dynamic_cue = False
+    observed_steps = 0
+    visibility_seconds = 0.0
+    scenario_snapshot_seconds = 0.0
+    grounding_seconds = 0.0
+    teacher_seconds = 0.0
+    recording_seconds = 0.0
+    action_pose_seconds = 0.0
+    action_advance_seconds = 0.0
+    action_capture_seconds = 0.0
+    action_total_seconds = 0.0
+    cue_sensitivity_seconds = 0.0
 
     if recorder is not None:
         recorder.write_metadata(
@@ -240,16 +276,51 @@ def run_expert_episode(
             },
             evaluation_truth={
                 "start_blueprint": blueprint,
-                "static_path_certificate": certified_start.certificate,
+                "goal_budget_audit": audited_start.goal_budget_audit,
             },
         )
+    setup_seconds = time.perf_counter() - run_started
+
+    def timing_snapshot():
+        return ExpertEpisodeTiming(
+            observed_steps=observed_steps,
+            setup_seconds=setup_seconds,
+            visibility_seconds=visibility_seconds,
+            scenario_snapshot_seconds=scenario_snapshot_seconds,
+            grounding_seconds=grounding_seconds,
+            teacher_seconds=teacher_seconds,
+            recording_seconds=recording_seconds,
+            action_pose_seconds=action_pose_seconds,
+            action_advance_seconds=action_advance_seconds,
+            action_capture_seconds=action_capture_seconds,
+            action_total_seconds=action_total_seconds,
+            cue_sensitivity_seconds=cue_sensitivity_seconds,
+            geometry_requested_segments=geometry.requested_segments,
+            geometry_queried_segments=geometry.queried_segments,
+            geometry_cache_hits=geometry.cache_hits,
+            geometry_batch_queries=geometry.batch_queries,
+            geometry_query_seconds=geometry.query_seconds,
+            total_seconds=time.perf_counter() - run_started,
+        )
+
+    def accumulate_action_timing(step_result):
+        nonlocal action_pose_seconds
+        nonlocal action_advance_seconds
+        nonlocal action_capture_seconds
+        nonlocal action_total_seconds
+        action_pose_seconds += step_result.timing.pose_seconds
+        action_advance_seconds += step_result.timing.advance_seconds
+        action_capture_seconds += step_result.timing.capture_seconds
+        action_total_seconds += step_result.timing.total_seconds
 
     while executor.action_count < episode_spec.horizon_steps:
+        observed_steps += 1
         pair = executor.current_pair
         observation = make_agent_observation(
             pair,
             executor.odometry,
         )
+        phase_started = time.perf_counter()
         pose = client.get_pose()
         visibility = client.query_visibility(
             scenario_id,
@@ -257,6 +328,7 @@ def run_expert_episode(
             pose[:3],
             timeout=30.0,
         )
+        visibility_seconds += time.perf_counter() - phase_started
         if (
             visibility.step_index != pair.clock.step_index
             or visibility.game_timer_ms != pair.clock.game_timer_ms
@@ -264,9 +336,15 @@ def run_expert_episode(
             raise ExpertGenerationError(
                 "Visibility and RGB-D do not belong to one frozen instant"
             )
+        phase_started = time.perf_counter()
         scenario = client.get_scenario_state(scenario_id)
+        scenario_snapshot_seconds += time.perf_counter() - phase_started
+        phase_started = time.perf_counter()
         grounded = grounder.ground(pair, visibility)
+        grounding_seconds += time.perf_counter() - phase_started
+        phase_started = time.perf_counter()
         decision = teacher.decide(observation, grounded)
+        teacher_seconds += time.perf_counter() - phase_started
         history.append((observation, grounded, decision))
         valid_dynamic_cue = valid_dynamic_cue or _valid_evidence(
             decision.awareness,
@@ -283,6 +361,7 @@ def run_expert_episode(
             "valid_dynamic_cue_so_far": valid_dynamic_cue,
         }
         if recorder is not None:
+            phase_started = time.perf_counter()
             recorder.record_step(
                 grounded.step_index,
                 pair,
@@ -291,9 +370,14 @@ def run_expert_episode(
                 decision,
                 truth_record,
             )
+            recording_seconds += time.perf_counter() - phase_started
 
         if isinstance(decision.action, StopAction):
-            executor.execute(decision.action, capture_timeout_ms)
+            step_result = executor.execute(
+                decision.action,
+                capture_timeout_ms,
+            )
+            accumulate_action_timing(step_result)
             if recorder is not None and hasattr(
                 recorder,
                 "mark_last_action_executed",
@@ -306,10 +390,14 @@ def run_expert_episode(
                 estimate_world,
                 scenario.event_position,
             )
+            phase_started = time.perf_counter()
             sensitivity = _cue_sensitivity(
                 history,
                 episode_spec,
                 geometry,
+            )
+            cue_sensitivity_seconds += (
+                time.perf_counter() - phase_started
             )
             success = (
                 scenario.event_active
@@ -333,6 +421,7 @@ def run_expert_episode(
                     else "Terminal checks, dynamic-cue validity, or "
                     "cue sensitivity failed"
                 ),
+                timing=timing_snapshot(),
             )
 
         if executor.action_count >= episode_spec.horizon_steps - 1:
@@ -357,9 +446,14 @@ def run_expert_episode(
                     f"proposed {type(decision.action).__name__} when "
                     "the final action was reserved for STOP"
                 ),
+                timing=timing_snapshot(),
             )
 
-        executor.execute(decision.action, capture_timeout_ms)
+        step_result = executor.execute(
+            decision.action,
+            capture_timeout_ms,
+        )
+        accumulate_action_timing(step_result)
         if recorder is not None and hasattr(
             recorder,
             "mark_last_action_executed",
@@ -384,4 +478,5 @@ def run_expert_episode(
             None,
         ),
         message="TASK_HORIZON_EXHAUSTED without STOP",
+        timing=timing_snapshot(),
     )

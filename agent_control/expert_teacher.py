@@ -204,40 +204,78 @@ class LocalGeometryFacade:
         self._client = client
         self._lockstep = lockstep
         self._blueprint = blueprint
+        self._cache_instant = None
+        self._segment_cache = {}
+        self.requested_segments = 0
+        self.queried_segments = 0
+        self.cache_hits = 0
+        self.batch_queries = 0
+        self.query_seconds = 0.0
+
+    @staticmethod
+    def _segment_key(start, end):
+        return tuple(
+            round(float(value), 3)
+            for point in (start, end)
+            for value in point
+        )
 
     def segments_clear(self, local_segments):
         local_segments = tuple(local_segments)
         if not local_segments:
             return ()
-        world_segments = [
-            (
-                self._blueprint.local_to_world(start),
-                self._blueprint.local_to_world(end),
-            )
-            for start, end in local_segments
-        ]
-        result = self._client.probe_camera_geometry_batch(
-            self._lockstep.session_id,
-            points=[segment[1] for segment in world_segments],
-            segments=world_segments,
-            timeout=30.0,
-        )
         clock = self._lockstep.snapshot
-        if (
-            result.lockstep_session_id != clock.session_id
-            or result.step_index != clock.step_index
-            or result.game_timer_ms != clock.game_timer_ms
-        ):
-            raise ExpertGenerationError(
-                "Collision geometry does not belong to the frozen instant"
+        instant = (
+            int(clock.session_id),
+            int(clock.step_index),
+            int(clock.game_timer_ms),
+        )
+        if instant != self._cache_instant:
+            self._cache_instant = instant
+            self._segment_cache.clear()
+
+        keys = []
+        missing = {}
+        for start, end in local_segments:
+            key = self._segment_key(start, end)
+            keys.append(key)
+            if key not in self._segment_cache and key not in missing:
+                missing[key] = (
+                    self._blueprint.local_to_world(start),
+                    self._blueprint.local_to_world(end),
+                )
+        self.requested_segments += len(keys)
+        self.queried_segments += len(missing)
+        self.cache_hits += len(keys) - len(missing)
+        if missing:
+            missing_keys = tuple(missing)
+            world_segments = tuple(missing.values())
+            query_started = time.perf_counter()
+            result = self._client.probe_camera_geometry_batch(
+                self._lockstep.session_id,
+                points=[segment[1] for segment in world_segments],
+                segments=world_segments,
+                timeout=30.0,
             )
-        return tuple(
-            bool(point_clear and segment_clear)
-            for point_clear, segment_clear in zip(
+            self.query_seconds += time.perf_counter() - query_started
+            self.batch_queries += 1
+            if (
+                result.lockstep_session_id != clock.session_id
+                or result.step_index != clock.step_index
+                or result.game_timer_ms != clock.game_timer_ms
+            ):
+                raise ExpertGenerationError(
+                    "Collision geometry does not belong to the frozen instant"
+                )
+            for key, point_clear, segment_clear in zip(
+                missing_keys,
                 result.point_clear,
                 result.segment_clear,
-            )
-        )
+            ):
+                self._segment_cache[key] = bool(
+                    point_clear and segment_clear
+                )
+        return tuple(self._segment_cache[key] for key in keys)
 
     def action_clear(self, position, yaw, action):
         if isinstance(action, (TurnLeftAction, TurnRightAction)):
@@ -279,6 +317,13 @@ class StrictLocalAStar:
         return int(math.ceil(horizontal / TASK_FORWARD_STEP_METERS)) + int(
             math.ceil(vertical / TASK_VERTICAL_STEP_METERS)
         )
+
+    @staticmethod
+    def _heading_tiebreak(position, yaw, target):
+        if math.dist(position[:2], target[:2]) <= 1.0e-9:
+            return 0.0
+        target_yaw = _yaw_toward_local(position, target)
+        return abs(_angle_delta_degrees(target_yaw, yaw))
 
     @staticmethod
     def _goal(position, target):
@@ -325,6 +370,7 @@ class StrictLocalAStar:
         queue = [
             (
                 self._heuristic(position, target),
+                self._heading_tiebreak(position, yaw, target),
                 0,
                 0,
             )
@@ -361,7 +407,12 @@ class StrictLocalAStar:
                 self.maximum_expanded_states - expanded,
             )
             while queue and len(expansion_batch) < batch_limit:
-                _estimate, _order, node_index = heapq.heappop(queue)
+                (
+                    _estimate,
+                    _heading_error,
+                    _order,
+                    node_index,
+                ) = heapq.heappop(queue)
                 node_position, node_yaw, _parent, _action, cost = nodes[
                     node_index
                 ]
@@ -490,7 +541,16 @@ class StrictLocalAStar:
                 )
                 heapq.heappush(
                     queue,
-                    (estimate, serial, child_index),
+                    (
+                        estimate,
+                        self._heading_tiebreak(
+                            child_position,
+                            child_yaw,
+                            target,
+                        ),
+                        serial,
+                        child_index,
+                    ),
                 )
                 serial += 1
         raise LocalPlanNotFound(
@@ -1239,8 +1299,6 @@ class CueGroundedExpert:
                 needs_replan = (
                     not self._cached_actions
                     or self._cached_intent != intent
-                    or self._cached_mode_id != mode_id
-                    or new_evidence
                     or self._cached_subgoal is None
                     or math.dist(
                         self._cached_subgoal,

@@ -129,13 +129,16 @@ class SpatiotemporalFeasibilityReport:
 
 
 @dataclass(frozen=True)
-class StaticPathCertificate:
-    actions: tuple
+class StaticGoalBudgetAudit:
     goal_pose: tuple
-    path_cost: int
-    searched_states: int
-    checked_motion_edges: int
-    search_digest: str
+    lower_bound_nonterminal_actions: int
+    stop_actions: int
+    lower_bound_total_actions: int
+    required_reserve_actions: int
+    remaining_actions: int
+    candidate_ideals: int
+    clear_ideals: int
+    observable_ideals: int
 
 
 @dataclass(frozen=True)
@@ -381,83 +384,71 @@ class SpatiotemporalFeasibilityAuditor:
         )
         self._search_digest = digest.hexdigest()
 
-    def certify_static_goal_path(
-        self,
-        minimum_actions=20,
-        maximum_actions=44,
-        max_expanded=SEARCH_MAX_EXPANDED_GOAL,
-    ):
-        minimum_actions = int(minimum_actions)
-        maximum_actions = int(maximum_actions)
-        max_expanded = int(max_expanded)
-        if (
-            minimum_actions < 0
-            or maximum_actions < minimum_actions
-            or max_expanded <= 0
-        ):
-            raise ValueError(
-                "Invalid static path-certificate limits"
-            )
+    def audit_static_goal_budget(self, required_reserve_actions=15):
+        required_reserve_actions = int(required_reserve_actions)
+        if required_reserve_actions < 0:
+            raise ValueError("required_reserve_actions cannot be negative")
         self._search_started = time.perf_counter()
         self._last_progress = self._search_started
         clock = self.lockstep.refresh()
-        scenario = self.client.get_scenario_state(
-            self.scenario_id
-        )
+        scenario = self.client.get_scenario_state(self.scenario_id)
         source = _source_entity(scenario)
-        self._goal_ideals = self._observable_goal_ideals(
-            source,
-            clock,
-        )
-        if not self._goal_ideals:
+        observable_ideals = self._observable_goal_ideals(source, clock)
+        if not observable_ideals:
             raise RuntimeError(
-                "STATIC_GOAL_NOT_FOUND: no verified source-observable "
-                "goal state lies inside the activity bounds"
+                "STATIC_GOAL_VIEW_NOT_FOUND: no clear source-observable "
+                "goal view lies inside the activity bounds"
             )
-        paths = self._search_observation_paths(
-            (source,),
+        start_position = np.asarray(
             self.blueprint.absolute_pose[:3],
-            self.blueprint.absolute_pose[5],
-            maximum_actions,
-            clock,
-            max_expanded,
-            "static-goal-certificate",
-            candidate_ideals=self._goal_ideals,
+            dtype=np.float64,
         )
-        if not paths:
-            raise RuntimeError(
-                "STATIC_GOAL_NOT_FOUND: strict static search found no "
-                f"source-observable path within {maximum_actions} actions"
+        start_yaw = float(self.blueprint.absolute_pose[5])
+
+        def lower_bound(ideal):
+            center = np.asarray(ideal[2], dtype=np.float64)
+            delta = center - start_position
+            horizontal = math.ceil(
+                float(np.linalg.norm(delta[:2]))
+                / TASK_FORWARD_STEP_METERS
+                - 1.0e-12
             )
-        path = min(
-            paths,
-            key=lambda item: (
-                len(item.actions),
-                item.position,
-                item.yaw,
-            ),
-        )
-        cost = len(path.actions)
-        if cost < minimum_actions:
-            raise RuntimeError(
-                "STATIC_GOAL_TOO_CLOSE: shortest enumerated path uses "
-                f"{cost} actions; minimum is {minimum_actions}"
+            vertical = math.ceil(
+                abs(float(delta[2])) / TASK_VERTICAL_STEP_METERS
+                - 1.0e-12
             )
-        digest = hashlib.blake2b(digest_size=16)
-        digest.update(self._search_digest.encode("ascii"))
-        digest.update(b"static-goal-certificate")
-        for action in path.actions:
-            digest.update(type(action).__name__.encode("ascii"))
-        return StaticPathCertificate(
-            actions=tuple(path.actions),
-            goal_pose=(
-                *tuple(float(value) for value in path.position),
-                float(path.yaw),
-            ),
-            path_cost=cost,
-            searched_states=len(self._searched_keys),
-            checked_motion_edges=self._checked_motion_edges,
-            search_digest=digest.hexdigest(),
+            turns = math.ceil(
+                abs(_angle_delta(ideal[3], start_yaw))
+                / TASK_YAW_STEP_DEGREES
+                - 1.0e-12
+            )
+            return (
+                int(horizontal + vertical + turns),
+                ideal[2],
+                ideal[3],
+            )
+
+        estimate = min(lower_bound(ideal) for ideal in observable_ideals)
+        lower_bound_nonterminal = estimate[0]
+        lower_bound_total = lower_bound_nonterminal + 1
+        remaining = self.horizon_steps - lower_bound_total
+        if remaining < required_reserve_actions:
+            raise RuntimeError(
+                "STATIC_GOAL_BUDGET_TOO_TIGHT: optimistic lower bound "
+                f"requires {lower_bound_total} actions including STOP, "
+                f"leaving {remaining}; required reserve is "
+                f"{required_reserve_actions}"
+            )
+        return StaticGoalBudgetAudit(
+            goal_pose=(*estimate[1], estimate[2]),
+            lower_bound_nonterminal_actions=lower_bound_nonterminal,
+            stop_actions=1,
+            lower_bound_total_actions=lower_bound_total,
+            required_reserve_actions=required_reserve_actions,
+            remaining_actions=remaining,
+            candidate_ideals=self._goal_candidate_counts[0],
+            clear_ideals=self._goal_candidate_counts[1],
+            observable_ideals=self._goal_candidate_counts[2],
         )
 
     def _check_search_time(self, phase, expanded=0, queued=0):

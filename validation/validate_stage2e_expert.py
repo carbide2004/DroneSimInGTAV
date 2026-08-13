@@ -19,7 +19,7 @@ from agent_control.dronesim_client import (  # noqa: E402
 )
 from agent_control.expert_episode import run_expert_episode  # noqa: E402
 from agent_control.expert_starts import (  # noqa: E402
-    generate_certified_task_start,
+    generate_audited_task_start,
 )
 from agent_control.task_starts import (  # noqa: E402
     ObservationSpec,
@@ -41,7 +41,7 @@ PEDESTRIAN_BANDS = (
 def _parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Validate Stage 2E response timing, certified starts, and "
+            "Validate Stage 2E response timing, audited starts, and "
             "one cue-grounded expert episode. Payload recording is "
             "disabled unless --record-dir is supplied."
         )
@@ -59,7 +59,12 @@ def _parse_args():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--start-seed", type=int, default=1)
     parser.add_argument("--prepare-timeout", type=float, default=30.0)
-    parser.add_argument("--search-timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--start-audit-timeout",
+        type=float,
+        default=120.0,
+        help="Wall-clock limit for one lightweight start goal audit",
+    )
     parser.add_argument("--start-attempts", type=int, default=16)
     parser.add_argument(
         "--max-steps",
@@ -319,14 +324,14 @@ def main():
         session.advance()
         calibration = session.capture_rgbd_pair()
         scenario = client.get_scenario_state(scenario_id)
-        certified = generate_certified_task_start(
+        audited_start = generate_audited_task_start(
             client,
             session,
             scenario,
             ObservationSpec.from_pair(calibration),
             args.start_seed,
             maximum_attempts=args.start_attempts,
-            search_timeout_seconds=args.search_timeout,
+            audit_timeout_seconds=args.start_audit_timeout,
             horizon_steps=args.max_steps,
             progress_callback=lambda message: print(
                 message,
@@ -343,7 +348,7 @@ def main():
                 client,
                 session,
                 scenario_id,
-                certified,
+                audited_start,
                 recorder=recorder,
             )
         except BaseException as error:
@@ -386,15 +391,48 @@ def main():
         session = None
         print(
             "PASS "
-            f"path_cost={certified.certificate.path_cost} "
+            "goal_lower_bound="
+            f"{audited_start.goal_budget_audit.lower_bound_total_actions} "
+            "goal_budget_remaining="
+            f"{audited_start.goal_budget_audit.remaining_actions} "
             "initial_grounded_responses="
-            f"{certified.initial_grounded_response_count} "
+            f"{audited_start.initial_grounded_response_count} "
             f"actions={result.actions} "
             f"plans={result.planner_calls} "
             f"error={result.localization_error_m:.3f}m "
             "sensitivity="
             f"{result.cue_sensitivity.divergence_kind} "
             f"wall={time.perf_counter() - started:.1f}s",
+            flush=True,
+        )
+        start_timing = audited_start.timing
+        rollout_timing = result.timing
+        print(
+            "TIMING_DETAIL start[attempts="
+            f"{start_timing.attempts} generate="
+            f"{start_timing.task_start_generation_seconds:.1f}s "
+            f"ground={start_timing.rgbd_grounding_seconds:.1f}s "
+            f"budget_audit="
+            f"{start_timing.static_goal_budget_audit_seconds:.1f}s "
+            f"total={start_timing.total_seconds:.1f}s] "
+            "rollout[steps="
+            f"{rollout_timing.observed_steps} visibility="
+            f"{rollout_timing.visibility_seconds:.1f}s scenario="
+            f"{rollout_timing.scenario_snapshot_seconds:.1f}s ground="
+            f"{rollout_timing.grounding_seconds:.1f}s teacher="
+            f"{rollout_timing.teacher_seconds:.1f}s record="
+            f"{rollout_timing.recording_seconds:.1f}s pose="
+            f"{rollout_timing.action_pose_seconds:.1f}s advance="
+            f"{rollout_timing.action_advance_seconds:.1f}s capture="
+            f"{rollout_timing.action_capture_seconds:.1f}s sensitivity="
+            f"{rollout_timing.cue_sensitivity_seconds:.1f}s geometry_query="
+            f"{rollout_timing.geometry_query_seconds:.1f}s "
+            "geometry_segments="
+            f"{rollout_timing.geometry_queried_segments}/"
+            f"{rollout_timing.geometry_requested_segments} cache_hits="
+            f"{rollout_timing.geometry_cache_hits} batches="
+            f"{rollout_timing.geometry_batch_queries} total="
+            f"{rollout_timing.total_seconds:.1f}s]",
             flush=True,
         )
         if recording_path is None:

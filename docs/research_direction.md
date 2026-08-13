@@ -119,9 +119,12 @@ visible RGB-D-grounded response tracks
   -> direct source verification and STOP
 ```
 
-Task starts are 40--60 metres from the event and retain a static strict-action
-certificate of 20--44 non-terminal actions to a source-observable view. The
-certificate is evaluation-only. A Stage 2E start is called
+Task starts are 40--60 metres from the event. Dataset generation verifies at
+least one clear source-observable goal view and applies an optimistic strict
+action lower bound that must retain 15 actions for evidence collection and
+obstacle detours. This budget audit is not a reachability proof; the actual
+cue-grounded rollout decides whether the episode is retained.
+`--start-audit-timeout` bounds only this lightweight check. A Stage 2E start is called
 `POTENTIAL_CUE_VISIBLE`: at least one responder is initially task-observable
 and is active or scheduled to activate within two seconds. It is not a valid
 dynamic cue until two adjacent RGB-D observations recover at least 0.4 metres
@@ -136,7 +139,7 @@ structure, not evidence about GTA's native response ecology.
 The teacher receives truth-assisted anonymous association and visible sample
 pixels, but entity positions are recovered from the corresponding metric
 Depth. It cannot read the event coordinate, event affiliation, GTA velocity,
-task state, world view matrices, or the static path certificate. Every action
+task state, world view matrices, or the static goal budget audit. Every action
 produces a new observation and Awareness update. A collision-only local A*
 plan may be reused while intent, belief mode, subgoal, cue availability, and
 collision validity remain unchanged. Its 20-metre subgoal is retained while
@@ -145,7 +148,7 @@ the strict search budget is 32 actions, bounded by 12,000 expanded states and
 a finite six-turn scan, and repeated evidence from the same track cannot reset
 the scan into indefinite rotation.
 
-Start certification now applies that same RGB-D grounder to the initial
+Start filtering applies that same RGB-D grounder to the initial
 observation and rejects raycast-visible candidates that cannot yield a real
 response track scheduled to activate within two seconds. The camera faces the
 selected responder. A SEARCH_CUE or REACQUIRE_CUE context permits at most two
@@ -164,7 +167,7 @@ dataset-generation interface.
 The 65-action horizon is the canonical benchmark default rather than a hidden
 runtime constant. Stage 2E validation and bounded dataset generation expose
 `--max-steps`; the value is carried in the task blueprint so start
-certification, teacher rollout, and action execution use one budget. An
+budget audit, teacher rollout, and action execution use one budget. An
 episode that reaches its STOP-reserved final action without direct source
 confirmation is recorded as a horizon-exhaustion failure.
 

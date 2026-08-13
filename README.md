@@ -125,7 +125,7 @@ with at most one altitude change or HOLD between them. If neither scan yields
 an RGB-D-grounded response track, the rollout fails explicitly with
 `CUE_SEARCH_EXHAUSTED`; it cannot restart the same scan indefinitely.
 
-`POTENTIAL_CUE_VISIBLE` certification uses the exact episode
+`POTENTIAL_CUE_VISIBLE` start filtering uses the exact episode
 `VisibleTrackGrounder`, not only raycast/projected-box truth. The initial pair
 must contain at least one responder scheduled to activate within two seconds
 whose metric Depth supports the same grounded track representation consumed
@@ -153,8 +153,8 @@ python validation\validate_stage2e_expert.py --max-steps 100
 ```
 
 The selected value is embedded in the generated start blueprint and is shared
-by the static certificate, teacher episode specification, and strict action
-executor. Reaching the last reserved action without `STOP` returns
+by the lightweight start-budget audit, teacher episode specification, and
+strict action executor. Reaching the last reserved action without `STOP` returns
 `TASK_HORIZON_EXHAUSTED_WITHOUT_STOP`; it is an episode failure, not a GTA or
 protocol exception. `generate_stage2e_experts.py` exposes the same option.
 
@@ -196,6 +196,67 @@ python validation\generate_stage2e_experts.py `
 
 Only successful episodes retain RGB-D. Failed attempts append a compact JSON
 diagnostic and remove their `.partial` payload directory.
+
+Replay one retained dataset episode offline with:
+
+```powershell
+python validation\visualize_stage2e_dataset.py `
+  dataset\stage2e_fire\episode_000000_scenario_1_start_<start_id>
+```
+
+Or pass the batch directory to play every completed episode in sorted order:
+
+```powershell
+python validation\visualize_stage2e_dataset.py `
+  dataset\stage2e_fire --loop
+```
+
+The dataset player directly joins `agent/steps.jsonl`,
+`teacher/awareness.jsonl`, `evaluation_truth/steps.jsonl`, the belief archive,
+and the two RGB streams. It shows the same grounded cue/source boxes, local
+trajectory, belief, truth, Awareness and action panels as the compact
+validation player. It does not load the stored metric Depth arrays or write
+converted payloads. Space pauses, Left/Right steps, Home/End jumps, and Q
+closes the window. At an episode boundary, playback continues into the next
+episode while resetting the local trajectory and belief; Up/Down switches
+episodes directly. `--loop`, `--start-paused` and `--interval-ms` are also
+available.
+
+Every batch attempt also appends one compact record to `timings.jsonl` and
+prints `TIMING`/`TIMING_DETAIL`. The measurements split scene preparation,
+lockstep setup, audited-start generation/grounding/budget checking, rollout
+visibility/grounding/teacher/action/capture/recording, finalization, and
+cleanup. Timing is observational and does not alter candidate ordering or task
+semantics. Summarize a run without connecting to GTA or writing more files:
+
+```powershell
+python validation\summarize_stage2e_timings.py dataset\stage2e_fire
+```
+
+The expert keeps a collision-result cache only within one frozen lockstep
+instant; it is discarded after every `Advance`, so moving responders cannot
+make an old result valid. A cached local plan is retained while its intent,
+temporary subgoal and next-action collision status remain valid. Newly seen
+track IDs alone do not force an identical plan to be recomputed. Equal-cost A*
+states prefer headings toward the temporary subgoal, without changing path
+cost, pruning, action legality or collision checks.
+
+Potential-cue-visible start generation first checks only responders scheduled
+inside the two-second cue window. Candidates with no task-observable early
+responder skip the expensive full-scene visibility query. Any accepted start
+still passes the unchanged full source, fire-envelope, responder and real RGB-D
+grounding checks.
+
+Dataset generation does not run the evaluation-only strict A* path search for
+every start. It instead verifies that at least one clear,
+task-observable fire-source view exists inside the activity volume and computes
+an optimistic strict-action lower bound to that view. The lower bound includes
+separate turns, horizontal translation, vertical translation and `STOP`, and
+must leave at least 15 actions for cue observation and obstacle detours. It
+does not claim collision-free reachability. The actual cue-grounded rollout is
+the authoritative test: only a successful rollout retains its episode payload.
+`--start-audit-timeout` bounds this lightweight goal-view audit; it is not a
+local-planner or full-path-search time limit.
 
 The fire must be active at the terminal step. Seeing only a distant smoke
 column is not sufficient terminal confirmation. `task-observable` means that
@@ -323,7 +384,7 @@ agent_control/
   task_starts.py           evaluation-only starts and local task boundary
   research_actions.py      seven fixed research actions
   feasibility.py           Stage 2D bounded joint-witness search
-  expert_starts.py         Stage 2E static start certificates
+  expert_starts.py         Stage 2E grounded starts and budget audits
   expert_teacher.py        RGB-D-grounded belief and local planner
   expert_episode.py        strict online expert rollout
   expert_recording.py      successful-episode dataset writer

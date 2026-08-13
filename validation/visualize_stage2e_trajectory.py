@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import textwrap
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -11,6 +12,25 @@ from matplotlib.patches import Rectangle
 
 
 RESPONSE_CLASSES = {"FIRE_TRUCK", "PEDESTRIAN"}
+INFO_TEXT_WIDTH = 72
+
+
+def _wrap_info_lines(lines):
+    wrapped = []
+    for line in lines:
+        if not line:
+            wrapped.append("")
+            continue
+        wrapped.extend(
+            textwrap.wrap(
+                line,
+                width=INFO_TEXT_WIDTH,
+                subsequent_indent="  ",
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        )
+    return wrapped
 
 
 def _parse_args():
@@ -291,16 +311,18 @@ class Stage2EPlayer:
             "",
             "Controls: Space pause/play | Left/Right step | Home/End | Q close",
         ]
-        axis.text(
+        information_text = axis.text(
             0.01,
             0.98,
-            "\n".join(lines),
+            "\n".join(_wrap_info_lines(lines)),
             transform=axis.transAxes,
             va="top",
             ha="left",
             fontsize=10.5,
             family="monospace",
+            clip_on=True,
         )
+        information_text.set_in_layout(False)
 
     def _render(self):
         frame = self.frames[self.index]

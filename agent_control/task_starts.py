@@ -20,6 +20,7 @@ from .dronesim_client import (
     OBLIQUE_PITCH_DEGREES,
     ScenarioEntityRole,
     ScenarioLifecycle,
+    TargetVisibilityCase,
     VisibilitySnapshot,
     VisibilityTargetRole,
 )
@@ -936,6 +937,40 @@ def generate_task_start(
                 )
                 + rng.uniform(-15.0, 15.0)
             ) % 360.0 - 180.0
+
+            matrices = virtual_view_matrices(
+                position,
+                yaw,
+                observation_spec,
+            )
+            early_batch = client.query_target_visibility_batch(
+                scenario.scenario_id,
+                session.session_id,
+                [
+                    TargetVisibilityCase(
+                        int(entity.stable_id),
+                        position,
+                    )
+                    for entity in potential_responders
+                ],
+                timeout=30.0,
+            )
+            _require_visibility_instant(early_batch, clock)
+            if not any(
+                _assess_target_view(
+                    case.target,
+                    matrices["oblique"],
+                    observation_spec,
+                ).task_observable
+                or _assess_target_view(
+                    case.target,
+                    matrices["nadir"],
+                    observation_spec,
+                ).task_observable
+                for case in early_batch.cases
+            ):
+                rejection_counts["stratum_mismatch"] += 1
+                continue
 
         visibility = client.query_visibility(
             scenario.scenario_id,
