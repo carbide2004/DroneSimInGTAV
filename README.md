@@ -264,6 +264,24 @@ the target has at least four unoccluded in-frustum geometry samples, a
 projected bounding span of at least 24 pixels, and a projected clear-sample
 box at least 12 pixels inside every image border in either named view.
 
+Rendered particle coverage can be audited separately from task success:
+
+```powershell
+python validation\validate_fire_visual_coverage.py `
+  --anchor 234 324 100 `
+  --show
+```
+
+The online diagnostic starts one fire, freezes simulation after a fixed
+warmup, and samples a deterministic grid of camera radii, heights and
+azimuths. Each viewpoint captures several render frames at the same GTA time.
+The interactive window shows both RGB views, the projected fire envelope and
+temporal RGB activity inside that region. Activity is reported only as a
+diagnostic: the script does not convert a colour or motion heuristic into
+fire-visibility truth, does not change `TaskSuccess`, and writes no RGB-D,
+images or reports. Use `--radii`, `--heights`, `--azimuths` and `--repeats` to
+make a smaller or denser probe.
+
 The following terms are deliberately distinct:
 
 - `InitialVisibility`: what is observable at the first frozen observation;
