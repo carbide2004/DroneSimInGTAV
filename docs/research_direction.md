@@ -145,6 +145,16 @@ the strict search budget is 32 actions, bounded by 12,000 expanded states and
 a finite six-turn scan, and repeated evidence from the same track cannot reset
 the scan into indefinite rotation.
 
+Start certification now applies that same RGB-D grounder to the initial
+observation and rejects raycast-visible candidates that cannot yield a real
+response track scheduled to activate within two seconds. The camera faces the
+selected responder. A SEARCH_CUE or REACQUIRE_CUE context permits at most two
+finite scans with one intervening altitude change or HOLD; exhausting them
+produces an explicit failure rather than resetting the completion state and
+rotating forever.
+Fire-source confirmation is likewise bounded: two failed consecutive-view
+confirmation attempts produce `SOURCE_CONFIRMATION_UNSTABLE`.
+
 For interactive Stage 2E validation, the requested anchor may be the current
 scripted-camera position. Event placement still resolves to a vehicle node no
 more than 30 horizontal metres away; camera altitude is deliberately excluded

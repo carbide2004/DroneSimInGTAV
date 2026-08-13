@@ -226,6 +226,9 @@ def main():
                             "path_cost_bin": certified.path_cost_bin,
                             "bearing_bin": certified.bearing_bin,
                             "altitude_bin": certified.altitude_bin,
+                            "initial_grounded_response_count": (
+                                certified.initial_grounded_response_count
+                            ),
                         }
                     )
                     recorder = None
@@ -234,6 +237,8 @@ def main():
                         f"PASS {successes}/"
                         f"{args.max_success_episodes} "
                         f"actions={result.actions} "
+                        "initial_grounded_responses="
+                        f"{certified.initial_grounded_response_count} "
                         f"plans={result.planner_calls} "
                         f"error={result.localization_error_m:.3f}m "
                         "sensitivity="

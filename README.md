@@ -120,9 +120,23 @@ terminal visibility, or collision state changes.
 
 `SEARCH_CUE` denotes the period before any valid dynamic evidence has been
 obtained; `REACQUIRE_CUE` is reserved for later cue loss or belief ambiguity.
-Both use a finite six-turn scan. Repeated observations of the same track do
-not restart that scan, and completion must transition to belief following,
-one bounded altitude change, or HOLD rather than indefinite rotation.
+Both use bounded scans. A scan context may perform two finite six-turn scans,
+with at most one altitude change or HOLD between them. If neither scan yields
+an RGB-D-grounded response track, the rollout fails explicitly with
+`CUE_SEARCH_EXHAUSTED`; it cannot restart the same scan indefinitely.
+
+`POTENTIAL_CUE_VISIBLE` certification uses the exact episode
+`VisibleTrackGrounder`, not only raycast/projected-box truth. The initial pair
+must contain at least one responder scheduled to activate within two seconds
+whose metric Depth supports the same grounded track representation consumed
+by the teacher. The initial oblique camera is aimed toward the selected
+responder, with no 180-degree reversal. The validator reports
+`initial_grounded_responses` for this invariant.
+
+Direct fire-source verification still requires two adjacent grounded
+observations. If a candidate source disappears after two separate confirmation
+HOLDs, the rollout fails as `SOURCE_CONFIRMATION_UNSTABLE` rather than
+repeating a discover/lose cycle until the horizon.
 
 Run the no-payload online validation with:
 
@@ -166,7 +180,10 @@ Awareness, the spatial belief grid, and compact evaluation truth. It never
 writes Depth. A failed or exceptional rollout retains the frames recorded up
 to failure and marks the trajectory `FAILED` or `ERROR`. The offline player
 connects to no GTA process; Space pauses, Left/Right steps, Home/End jumps,
-and Q closes it. Without `--record-dir`, validation still writes nothing.
+and Q closes it. Each frame labels an action as `PROPOSED` or `EXECUTED`, so a
+horizon-rejected final proposal is not mistaken for movement that produced
+the displayed observation. Without `--record-dir`, validation still writes
+nothing.
 
 Generate a bounded number of successful episodes with:
 

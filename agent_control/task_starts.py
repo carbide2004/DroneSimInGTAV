@@ -935,7 +935,6 @@ def generate_task_start(
                     responder.position,
                 )
                 + rng.uniform(-15.0, 15.0)
-                + 180.0
             ) % 360.0 - 180.0
 
         visibility = client.query_visibility(

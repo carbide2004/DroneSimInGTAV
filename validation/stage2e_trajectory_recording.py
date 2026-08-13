@@ -166,6 +166,7 @@ class Stage2EValidationRecorder:
                 "observation_step": int(step_index),
                 "action_index": index + 1,
                 "action": _action_record(decision.action),
+                "action_execution": "PROPOSED",
                 "clock": _clock_record(pair.clock),
                 "rgb": rgb,
                 "camera_pose_world": [
@@ -195,6 +196,16 @@ class Stage2EValidationRecorder:
         self._beliefs.append(
             np.asarray(decision.belief, dtype=np.float32).copy()
         )
+
+    def mark_last_action_executed(self):
+        if self._finished:
+            raise RuntimeError("Stage 2E trajectory recorder is closed")
+        if not self._frames:
+            raise RuntimeError("No Stage 2E action is available to mark")
+        frame = self._frames[-1]
+        if frame["action_execution"] != "PROPOSED":
+            raise RuntimeError("Stage 2E action was already marked executed")
+        frame["action_execution"] = "EXECUTED"
 
     def finish(self, status, result=None, error=None):
         if self._finished:

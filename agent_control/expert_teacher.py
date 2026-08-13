@@ -47,6 +47,7 @@ PEDESTRIAN_GROUP_HEADING_DEGREES = 20.0
 REACQUIRE_AFTER_STEPS = 4
 STATIC_CONFIRM_STEPS = 8
 SCAN_MAX_ACTIONS = 6
+SOURCE_CONFIRMATION_MAX_FAILURES = 2
 
 
 class ExpertIntent(str, Enum):
@@ -151,6 +152,7 @@ class StructuredAwareness:
     planner_replanned: bool
     planner_remaining_actions: int
     planner_failure: str | None
+    source_confirmation_failures: int
     action_name: str
 
 
@@ -854,9 +856,11 @@ class CueGroundedExpert:
         self._scan_aligned = False
         self._completed_scan = None
         self._consecutive_scan_turns = 0
-        self._search_exit_pending = False
+        self._scan_transition_used = set()
+        self._search_altitude_change_used = False
         self._planner_retry_signature = None
         self._source_confirmation_track = None
+        self._source_confirmation_failures = 0
 
     @staticmethod
     def _action_name(action):
@@ -1094,8 +1098,20 @@ class CueGroundedExpert:
         if new_evidence:
             self._scan_intent = None
             self._completed_scan = None
+            self._scan_transition_used.clear()
 
         source = self._source_track(grounded)
+        if source is None and self._source_confirmation_track is not None:
+            self._source_confirmation_track = None
+            self._source_confirmation_failures += 1
+            if (
+                self._source_confirmation_failures
+                >= SOURCE_CONFIRMATION_MAX_FAILURES
+            ):
+                raise ExpertGenerationError(
+                    "SOURCE_CONFIRMATION_UNSTABLE: the grounded fire "
+                    "source disappeared after two confirmation HOLDs"
+                )
         mode_id, mode_mass, hypothesis = self.belief.primary_mode()
         supporting_track_ids = []
         contradicting_track_ids = []
@@ -1148,7 +1164,6 @@ class CueGroundedExpert:
             intent = ExpertIntent.FOLLOW_BELIEF
 
         if source is None:
-            self._source_confirmation_track = None
             if intent == ExpertIntent.CONFIRM_MOTION:
                 action = HoldAction()
                 self._cached_actions.clear()
@@ -1169,13 +1184,19 @@ class CueGroundedExpert:
                         intent = ExpertIntent.FOLLOW_BELIEF
                         scan_exit_reason = "FINITE_SCAN_COMPLETE_FOLLOW_BELIEF"
                     else:
+                        if signature in self._scan_transition_used:
+                            raise ExpertGenerationError(
+                                "CUE_SEARCH_EXHAUSTED: no RGB-D-grounded "
+                                "response track was found after two finite "
+                                f"scans for {intent.value} mode={mode_id}"
+                            )
                         candidate, _candidate_yaw = _action_pose_local(
                             position,
                             yaw,
                             AscendAction(),
                         )
                         if (
-                            not self._search_exit_pending
+                            not self._search_altitude_change_used
                             and self._estimated_agl(observation) < 45.0
                             and self._inside_activity(candidate)
                             and self.geometry.action_clear(
@@ -1186,10 +1207,11 @@ class CueGroundedExpert:
                         ):
                             action = AscendAction()
                             scan_exit_reason = "FINITE_SCAN_COMPLETE_ASCEND"
+                            self._search_altitude_change_used = True
                         else:
                             action = HoldAction()
                             scan_exit_reason = "FINITE_SCAN_COMPLETE_HOLD"
-                        self._search_exit_pending = True
+                        self._scan_transition_used.add(signature)
                         self._scan_intent = None
                         self._completed_scan = None
                         self._consecutive_scan_turns = 0
@@ -1330,6 +1352,9 @@ class CueGroundedExpert:
             planner_replanned=replanned,
             planner_remaining_actions=len(self._cached_actions),
             planner_failure=planner_failure,
+            source_confirmation_failures=(
+                self._source_confirmation_failures
+            ),
             action_name=self._action_name(action),
         )
         return ExpertDecision(

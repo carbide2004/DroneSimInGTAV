@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+from .dronesim_client import ScenarioEntityRole
+from .expert_teacher import VisibleTrackGrounder
 from .feasibility import SpatiotemporalFeasibilityAuditor
 from .task_starts import (
     StartVisibilityStratum,
@@ -19,6 +21,7 @@ class CertifiedTaskStart:
     path_cost_bin: str
     bearing_bin: int
     altitude_bin: str
+    initial_grounded_response_count: int
 
 
 def _path_cost_bin(cost):
@@ -75,6 +78,38 @@ def generate_certified_task_start(
                 max_candidates=maximum_candidates_per_attempt,
                 horizon_steps=horizon_steps,
             )
+            grounded = VisibleTrackGrounder(
+                generated.blueprint,
+                observation_spec,
+            )
+            grounded_frame = grounded.ground(
+                generated.rgbd_pair,
+                generated.visibility,
+            )
+            early_responder_ids = {
+                int(entity.stable_id)
+                for entity in scenario.entities
+                if entity.exists
+                and entity.role
+                in (
+                    ScenarioEntityRole.FIRE_TRUCK,
+                    ScenarioEntityRole.FLEEING_PEDESTRIAN,
+                )
+                and entity.planned_activation_offset_ms <= 2000
+            }
+            response_tracks = tuple(
+                track
+                for track in grounded_frame.tracks
+                if track.semantic_class
+                in ("FIRE_TRUCK", "PEDESTRIAN")
+                and grounded.evaluation_stable_id(track.track_id)
+                in early_responder_ids
+            )
+            if not response_tracks:
+                raise TaskStartGenerationError(
+                    "POTENTIAL_CUE_VISIBLE start has no early response "
+                    "track recoverable by the episode RGB-D grounder"
+                )
             auditor = SpatiotemporalFeasibilityAuditor(
                 client,
                 session,
@@ -100,6 +135,7 @@ def generate_certified_task_start(
                 altitude_bin=_altitude_bin(
                     generated.blueprint.altitude_agl
                 ),
+                initial_grounded_response_count=len(response_tracks),
             )
         except (RuntimeError, TaskStartGenerationError) as error:
             failures.append(

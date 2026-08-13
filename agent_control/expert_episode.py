@@ -294,6 +294,11 @@ def run_expert_episode(
 
         if isinstance(decision.action, StopAction):
             executor.execute(decision.action, capture_timeout_ms)
+            if recorder is not None and hasattr(
+                recorder,
+                "mark_last_action_executed",
+            ):
+                recorder.mark_last_action_executed()
             estimate_world = blueprint.local_to_world(
                 decision.action.event_estimate_local
             )
@@ -355,6 +360,11 @@ def run_expert_episode(
             )
 
         executor.execute(decision.action, capture_timeout_ms)
+        if recorder is not None and hasattr(
+            recorder,
+            "mark_last_action_executed",
+        ):
+            recorder.mark_last_action_executed()
         previous_scenario = scenario
 
     return ExpertEpisodeResult(

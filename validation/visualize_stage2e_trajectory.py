@@ -245,7 +245,9 @@ class Stage2EPlayer:
             (
                 f"Frame {self.index + 1}/{len(self.frames)} | "
                 f"step={frame['observation_step']} | "
-                f"action={_action_text(frame['action'])}"
+                f"proposed_action={_action_text(frame['action'])} | "
+                "execution="
+                f"{frame.get('action_execution', 'UNKNOWN')}"
             ),
             "",
             (
@@ -271,6 +273,10 @@ class Stage2EPlayer:
                 f"Planner: replanned={awareness['planner_replanned']}, "
                 f"remaining={awareness['planner_remaining_actions']}, "
                 f"failure={awareness['planner_failure']}"
+            ),
+            (
+                "Source confirmation failures="
+                f"{awareness.get('source_confirmation_failures', 0)}"
             ),
             (
                 f"Tracks: visible={len(visible)}, "

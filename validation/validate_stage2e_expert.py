@@ -387,6 +387,8 @@ def main():
         print(
             "PASS "
             f"path_cost={certified.certificate.path_cost} "
+            "initial_grounded_responses="
+            f"{certified.initial_grounded_response_count} "
             f"actions={result.actions} "
             f"plans={result.planner_calls} "
             f"error={result.localization_error_m:.3f}m "
