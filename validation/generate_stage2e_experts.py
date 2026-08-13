@@ -22,7 +22,10 @@ from agent_control.expert_recording import (  # noqa: E402
 from agent_control.expert_starts import (  # noqa: E402
     generate_certified_task_start,
 )
-from agent_control.task_starts import ObservationSpec  # noqa: E402
+from agent_control.task_starts import (  # noqa: E402
+    ObservationSpec,
+    TASK_HORIZON_STEPS,
+)
 
 
 def _parse_args():
@@ -46,6 +49,15 @@ def _parse_args():
     parser.add_argument("--prepare-timeout", type=float, default=30.0)
     parser.add_argument("--search-timeout", type=float, default=120.0)
     parser.add_argument("--start-attempts", type=int, default=16)
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=TASK_HORIZON_STEPS,
+        help=(
+            "Maximum Agent actions including STOP; canonical default is "
+            f"{TASK_HORIZON_STEPS}"
+        ),
+    )
     parser.add_argument("--max-attempts", type=int, default=20)
     parser.add_argument(
         "--max-success-episodes",
@@ -75,6 +87,8 @@ def _parse_args():
         parser.error("At least one response actor is required")
     if not 1 <= args.start_attempts <= 256:
         parser.error("--start-attempts must be in [1, 256]")
+    if not 21 <= args.max_steps <= 256:
+        parser.error("--max-steps must be in [21, 256]")
     if args.max_attempts <= 0:
         parser.error("--max-attempts must be positive")
     if args.max_success_episodes <= 0:
@@ -165,6 +179,7 @@ def main():
                     start_seed,
                     maximum_attempts=args.start_attempts,
                     search_timeout_seconds=args.search_timeout,
+                    horizon_steps=args.max_steps,
                     progress_callback=_progress,
                 )
                 episode_name = (

@@ -21,7 +21,13 @@ from agent_control.expert_episode import run_expert_episode  # noqa: E402
 from agent_control.expert_starts import (  # noqa: E402
     generate_certified_task_start,
 )
-from agent_control.task_starts import ObservationSpec  # noqa: E402
+from agent_control.task_starts import (  # noqa: E402
+    ObservationSpec,
+    TASK_HORIZON_STEPS,
+)
+from validation.stage2e_trajectory_recording import (  # noqa: E402
+    Stage2EValidationRecorder,
+)
 
 
 PEDESTRIAN_BANDS = (
@@ -36,7 +42,8 @@ def _parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Validate Stage 2E response timing, certified starts, and "
-            "one cue-grounded expert episode without writing payloads."
+            "one cue-grounded expert episode. Payload recording is "
+            "disabled unless --record-dir is supplied."
         )
     )
     parser.add_argument(
@@ -55,6 +62,15 @@ def _parse_args():
     parser.add_argument("--search-timeout", type=float, default=120.0)
     parser.add_argument("--start-attempts", type=int, default=16)
     parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=TASK_HORIZON_STEPS,
+        help=(
+            "Maximum Agent actions including STOP; canonical default is "
+            f"{TASK_HORIZON_STEPS}"
+        ),
+    )
+    parser.add_argument(
         "--response-steps",
         type=int,
         default=48,
@@ -62,6 +78,16 @@ def _parse_args():
     )
     parser.add_argument("--host", default="127.0.0.5")
     parser.add_argument("--port", type=int, default=23456)
+    parser.add_argument(
+        "--record-dir",
+        type=Path,
+        help=(
+            "Write a compact replayable trajectory to this new directory. "
+            "Stores JPEG RGB, structured state, belief, and compact truth; "
+            "never stores Depth."
+        ),
+    )
+    parser.add_argument("--jpeg-quality", type=int, default=85)
     args = parser.parse_args()
     if args.anchor is not None and not all(
         math.isfinite(value) for value in args.anchor
@@ -73,6 +99,21 @@ def _parse_args():
         parser.error("--start-seed must fit uint64")
     if not 1 <= args.response_steps <= 64:
         parser.error("--response-steps must be in [1, 64]")
+    if not 21 <= args.max_steps <= 256:
+        parser.error("--max-steps must be in [21, 256]")
+    if not 1 <= args.jpeg_quality <= 95:
+        parser.error("--jpeg-quality must be in [1, 95]")
+    if args.record_dir is not None:
+        args.record_dir = args.record_dir.resolve()
+        partial = args.record_dir.with_name(
+            args.record_dir.name + ".partial"
+        )
+        if args.record_dir.exists() or partial.exists():
+            parser.error(
+                "--record-dir and its .partial path must not already "
+                f"exist: {args.record_dir}"
+            )
+        Stage2EValidationRecorder.require_dependencies()
     return args
 
 
@@ -231,6 +272,7 @@ def main():
     started = time.perf_counter()
     scenario_id = None
     session = None
+    recorder = None
     try:
         client.set_time(12, 0, 0)
         client.set_weather("EXTRASUNNY")
@@ -285,19 +327,47 @@ def main():
             args.start_seed,
             maximum_attempts=args.start_attempts,
             search_timeout_seconds=args.search_timeout,
+            horizon_steps=args.max_steps,
             progress_callback=lambda message: print(
                 message,
                 flush=True,
             ),
         )
-        result = run_expert_episode(
-            client,
-            session,
-            scenario_id,
-            certified,
-            recorder=None,
-        )
+        if args.record_dir is not None:
+            recorder = Stage2EValidationRecorder(
+                args.record_dir,
+                jpeg_quality=args.jpeg_quality,
+            )
+        try:
+            result = run_expert_episode(
+                client,
+                session,
+                scenario_id,
+                certified,
+                recorder=recorder,
+            )
+        except BaseException as error:
+            if recorder is not None:
+                path = recorder.finish(
+                    "ERROR",
+                    error=(
+                        f"{type(error).__name__}: {error}"
+                    ),
+                )
+                print(
+                    f"Stage 2E partial trajectory recorded at {path}",
+                    flush=True,
+                )
+                recorder = None
+            raise
         if not result.success:
+            if recorder is not None:
+                path = recorder.finish("FAILED", result=result)
+                print(
+                    f"Stage 2E failed trajectory recorded at {path}",
+                    flush=True,
+                )
+                recorder = None
             raise RuntimeError(
                 f"Expert episode failed: {result.message}; "
                 f"actions={result.actions}, "
@@ -305,6 +375,12 @@ def main():
                 f"valid_cue={result.valid_dynamic_cue_observed}, "
                 f"sensitivity={result.cue_sensitivity}"
             )
+        recording_path = None
+        recording_size = None
+        if recorder is not None:
+            recording_path = recorder.finish("PASS", result=result)
+            recording_size = recorder.size_bytes()
+            recorder = None
         _reset_then_close(client, scenario_id, session)
         scenario_id = None
         session = None
@@ -319,10 +395,19 @@ def main():
             f"wall={time.perf_counter() - started:.1f}s",
             flush=True,
         )
-        print(
-            "No RGB-D, trajectory, or belief payload was written to disk.",
-            flush=True,
-        )
+        if recording_path is None:
+            print(
+                "No RGB-D, trajectory, or belief payload was written "
+                "to disk.",
+                flush=True,
+            )
+        else:
+            print(
+                f"Stage 2E trajectory path={recording_path} "
+                f"size={recording_size / (1024 * 1024):.1f}MiB; "
+                "no Depth payload was written.",
+                flush=True,
+            )
     finally:
         if scenario_id is not None:
             try:

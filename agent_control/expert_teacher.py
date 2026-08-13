@@ -168,7 +168,10 @@ def _angle_delta_degrees(target, source):
 def _yaw_toward_local(origin, target):
     delta_forward = float(target[0]) - float(origin[0])
     delta_right = float(target[1]) - float(origin[1])
-    return math.degrees(math.atan2(delta_right, delta_forward))
+    # GTA positive yaw turns left. In the start-local frame, whose positive
+    # Y axis points right, a yaw delta therefore has heading
+    # (cos(yaw), -sin(yaw)).
+    return math.degrees(math.atan2(-delta_right, delta_forward))
 
 
 def _action_pose_local(position, yaw_degrees, action):
@@ -177,7 +180,7 @@ def _action_pose_local(position, yaw_degrees, action):
     if isinstance(action, ForwardAction):
         radians = math.radians(yaw)
         position[0] += math.cos(radians) * TASK_FORWARD_STEP_METERS
-        position[1] += math.sin(radians) * TASK_FORWARD_STEP_METERS
+        position[1] -= math.sin(radians) * TASK_FORWARD_STEP_METERS
     elif isinstance(action, AscendAction):
         position[2] += TASK_VERTICAL_STEP_METERS
     elif isinstance(action, DescendAction):

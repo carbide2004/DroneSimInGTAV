@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from .feasibility import SpatiotemporalFeasibilityAuditor
 from .task_starts import (
     StartVisibilityStratum,
+    TASK_HORIZON_STEPS,
     TaskStartGenerationError,
     generate_task_start,
 )
@@ -49,10 +50,15 @@ def generate_certified_task_start(
     maximum_candidates_per_attempt=64,
     search_timeout_seconds=120.0,
     progress_callback=None,
+    horizon_steps=TASK_HORIZON_STEPS,
 ):
     maximum_attempts = int(maximum_attempts)
     if not 1 <= maximum_attempts <= 256:
         raise ValueError("maximum_attempts must be in [1, 256]")
+    horizon_steps = int(horizon_steps)
+    if not 21 <= horizon_steps <= 256:
+        raise ValueError("horizon_steps must be in [21, 256]")
+    maximum_certificate_actions = min(44, horizon_steps - 1)
     failures = []
     for attempt_index in range(maximum_attempts):
         attempt_seed = (
@@ -67,6 +73,7 @@ def generate_certified_task_start(
                 StartVisibilityStratum.POTENTIAL_CUE_VISIBLE,
                 attempt_seed,
                 max_candidates=maximum_candidates_per_attempt,
+                horizon_steps=horizon_steps,
             )
             auditor = SpatiotemporalFeasibilityAuditor(
                 client,
@@ -78,7 +85,7 @@ def generate_certified_task_start(
             )
             certificate = auditor.certify_static_goal_path(
                 minimum_actions=20,
-                maximum_actions=44,
+                maximum_actions=maximum_certificate_actions,
             )
             return CertifiedTaskStart(
                 generated=generated,

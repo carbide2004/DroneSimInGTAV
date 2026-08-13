@@ -230,6 +230,7 @@ class ResearchActionExecutor:
 
         before_pose = self.client.get_pose()
         self.controller.synchronize()
+        before_odometry = self.controller.odometry
         if isinstance(action, StopAction):
             self._action_count += 1
             self._stopped = True
@@ -248,7 +249,7 @@ class ResearchActionExecutor:
 
         try:
             if isinstance(action, ForwardAction):
-                self.controller.step_relative(
+                after_odometry = self.controller.step_relative(
                     TASK_FORWARD_STEP_METERS,
                     0.0,
                     0.0,
@@ -262,6 +263,32 @@ class ResearchActionExecutor:
                     self._failed = True
                     raise RuntimeError(
                         "FORWARD changed camera yaw"
+                    )
+                yaw_radians = math.radians(
+                    before_odometry.yaw_from_start_degrees
+                )
+                expected_delta = (
+                    math.cos(yaw_radians)
+                    * TASK_FORWARD_STEP_METERS,
+                    -math.sin(yaw_radians)
+                    * TASK_FORWARD_STEP_METERS,
+                    0.0,
+                )
+                actual_delta = tuple(
+                    float(after) - float(before)
+                    for after, before in zip(
+                        after_odometry.position_local,
+                        before_odometry.position_local,
+                    )
+                )
+                if math.dist(actual_delta, expected_delta) > (
+                    _POSE_POSITION_TOLERANCE_METERS
+                ):
+                    self._failed = True
+                    raise RuntimeError(
+                        "FORWARD actual start-local displacement does "
+                        "not match GTA yaw convention; "
+                        f"actual={actual_delta}, expected={expected_delta}"
                     )
             elif isinstance(action, AscendAction):
                 self.controller.step_relative(

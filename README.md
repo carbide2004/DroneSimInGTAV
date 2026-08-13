@@ -24,6 +24,11 @@ An episode starts from a scripted-camera pose whose local coordinate frame is:
 - positive Y along the initial body-right direction;
 - positive Z along GTA world up.
 
+GTA positive yaw turns left. Consequently, a yaw delta `theta` has the
+start-local horizontal heading `(cos(theta), -sin(theta))`; at `+90 degrees`,
+`FORWARD` moves along negative local-right. The Stage 2E local planner,
+executor invariant checks, and trajectory player all use this convention.
+
 The first observation is acquired at `t = 250 ms` after the controlled
 responses start. At the start, every geometry sample on the fire-source
 vehicle must be physically occluded from the camera center. The fixed
@@ -125,11 +130,43 @@ Run the no-payload online validation with:
 python validation\validate_stage2e_expert.py
 ```
 
+The canonical horizon remains 65 actions including `STOP`, but online
+validation can explicitly audit a different budget instead of changing source
+constants:
+
+```powershell
+python validation\validate_stage2e_expert.py --max-steps 100
+```
+
+The selected value is embedded in the generated start blueprint and is shared
+by the static certificate, teacher episode specification, and strict action
+executor. Reaching the last reserved action without `STOP` returns
+`TASK_HORIZON_EXHAUSTED_WITHOUT_STOP`; it is an episode failure, not a GTA or
+protocol exception. `generate_stage2e_experts.py` exposes the same option.
+
 When `--anchor X Y Z` is omitted, Stage 2E validation uses the current
 scripted-camera position and resolves the nearest road node within 30
 horizontal metres. This lets an operator fly over a desired street before
 starting validation without first looking up GTA world coordinates. The
 explicit option remains available for repeatable automated runs.
+
+Trajectory recording is opt-in and the destination must not already exist:
+
+```powershell
+python validation\validate_stage2e_expert.py `
+  --record-dir recordings\stage2e_validation
+
+python validation\visualize_stage2e_trajectory.py `
+  recordings\stage2e_validation
+```
+
+The compact validation recording retains both RGB streams as JPEGs, each
+selected action, start-local odometry, grounded cue/source boxes, structured
+Awareness, the spatial belief grid, and compact evaluation truth. It never
+writes Depth. A failed or exceptional rollout retains the frames recorded up
+to failure and marks the trajectory `FAILED` or `ERROR`. The offline player
+connects to no GTA process; Space pauses, Left/Right steps, Home/End jumps,
+and Q closes it. Without `--record-dir`, validation still writes nothing.
 
 Generate a bounded number of successful episodes with:
 
@@ -287,6 +324,8 @@ validation/
   validate_spatiotemporal_feasibility.py
   validate_stage2e_expert.py
   generate_stage2e_experts.py
+  stage2e_trajectory_recording.py
+  visualize_stage2e_trajectory.py
   trajectory_recording.py
   visualize_spatiotemporal_trajectory.py
 ```

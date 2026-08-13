@@ -330,6 +330,30 @@ def run_expert_episode(
                 ),
             )
 
+        if executor.action_count >= episode_spec.horizon_steps - 1:
+            return ExpertEpisodeResult(
+                success=False,
+                actions=executor.action_count,
+                planner_calls=sum(
+                    item[2].awareness.planner_replanned
+                    for item in history
+                ),
+                localization_error_m=None,
+                valid_dynamic_cue_observed=valid_dynamic_cue,
+                cue_sensitivity=CueSensitivityResult(
+                    False,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                message=(
+                    "TASK_HORIZON_EXHAUSTED_WITHOUT_STOP: teacher "
+                    f"proposed {type(decision.action).__name__} when "
+                    "the final action was reserved for STOP"
+                ),
+            )
+
         executor.execute(decision.action, capture_timeout_ms)
         previous_scenario = scenario
 

@@ -150,3 +150,22 @@ scripted-camera position. Event placement still resolves to a vehicle node no
 more than 30 horizontal metres away; camera altitude is deliberately excluded
 from this road-proximity check. Explicit world anchors remain the reproducible
 dataset-generation interface.
+
+The 65-action horizon is the canonical benchmark default rather than a hidden
+runtime constant. Stage 2E validation and bounded dataset generation expose
+`--max-steps`; the value is carried in the task blueprint so start
+certification, teacher rollout, and action execution use one budget. An
+episode that reaches its STOP-reserved final action without direct source
+confirmation is recorded as a horizon-exhaustion failure.
+
+The Stage 2E planner uses GTA's positive-yaw-is-left convention. In the
+start-local `(forward, right)` plane its heading is
+`(cos(yaw_delta), -sin(yaw_delta))`. Online FORWARD execution checks the
+observed local displacement against this relation, so planner/runtime sign
+disagreement fails immediately instead of producing a mirrored expert path.
+
+`validate_stage2e_expert.py --record-dir PATH` is an explicit visual-audit
+mode. It records compressed oblique/nadir RGB, actions, odometry, grounded
+boxes, structured Awareness, belief maps, and compact evaluation truth, but no
+Depth. Partial failed rollouts are retained for diagnosis. The default remains
+strictly in-memory so repeated validation cannot silently fill the disk.
