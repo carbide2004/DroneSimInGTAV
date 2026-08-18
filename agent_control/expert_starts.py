@@ -81,6 +81,7 @@ def generate_audited_task_start(
             "required_reserve_actions must be in [0, horizon_steps)"
         )
     failures = []
+    rejection_totals = {}
     timing_started = time.perf_counter()
     generation_seconds = 0.0
     grounding_seconds = 0.0
@@ -194,18 +195,53 @@ def generate_audited_task_start(
             failures.append(
                 f"seed={attempt_seed}:{type(error).__name__}:{error}"
             )
+            for name, count in getattr(
+                error,
+                "rejection_counts",
+                {},
+            ).items():
+                rejection_totals[name] = (
+                    rejection_totals.get(name, 0) + int(count)
+                )
             if progress_callback is not None:
                 progress_callback(
                     "audited start attempt FAIL "
                     f"attempt={attempt_index + 1} "
                     f"wall={time.perf_counter() - attempt_started:.1f}s "
-                    f"phase={phase} error={type(error).__name__}"
+                    f"phase={phase} error={type(error).__name__}: {error}"
                 )
+    candidate_total = sum(rejection_totals.values())
+    rejection_summary = ", ".join(
+        f"{name}={count}"
+        f"({100.0 * count / candidate_total:.0f}%)"
+        for name, count in sorted(
+            rejection_totals.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+        if count
+    )
+    if progress_callback is not None and rejection_summary:
+        progress_callback(
+            "audited start EXHAUSTED "
+            f"attempts={maximum_attempts} "
+            f"candidates_rejected={candidate_total} "
+            f"time[generate={generation_seconds:.1f}s "
+            f"ground={grounding_seconds:.1f}s "
+            f"budget_audit={audit_seconds:.1f}s] "
+            f"rejections[{rejection_summary}]"
+        )
     error = TaskStartGenerationError(
         "AUDITED_TASK_START_NOT_FOUND after "
-        f"{maximum_attempts} attempts; "
+        f"{maximum_attempts} attempts"
+        + (
+            f"; rejections[{rejection_summary}]"
+            if rejection_summary
+            else ""
+        )
+        + "; "
         + " | ".join(failures[-4:])
     )
+    error.rejection_counts = dict(rejection_totals)
     error.timing = AuditedStartTiming(
         attempts=maximum_attempts,
         task_start_generation_seconds=generation_seconds,

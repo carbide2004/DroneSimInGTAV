@@ -1069,12 +1069,18 @@ def generate_task_start(
     if selected is None:
         summary = ", ".join(
             f"{name}={count}"
-            for name, count in rejection_counts.items()
+            for name, count in sorted(
+                rejection_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+            if count
         )
-        raise TaskStartGenerationError(
+        error = TaskStartGenerationError(
             f"TASK_START_NOT_FOUND after {max_candidates} "
             f"candidates: {summary}"
         )
+        error.rejection_counts = dict(rejection_counts)
+        raise error
 
     (
         candidate_index,
