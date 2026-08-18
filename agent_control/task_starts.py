@@ -727,6 +727,72 @@ def _stratum_matches(stratum, assessment):
     raise ValueError(f"Unknown visibility stratum {stratum!r}")
 
 
+TASK_START_YAW_SWEEP_STEPS = 24
+
+
+def _select_cue_visible_yaw(
+    position,
+    early_batch,
+    observation_spec,
+    potential_responders,
+    rng,
+    sweep_steps=TASK_START_YAW_SWEEP_STEPS,
+):
+    """Pick a heading that makes an early responder task-observable.
+
+    The occlusion samples in ``early_batch`` were captured for this
+    position and carry no yaw dependence, so every heading can be scored
+    locally without another GTA round trip. Headings anchored on the
+    responders are tried first, then a uniform sweep fills the gaps.
+    Returns ``None`` when no heading exposes any early responder, which
+    means the position itself is unusable rather than merely misaimed.
+    """
+    sweep_steps = int(sweep_steps)
+    if sweep_steps < 1:
+        raise ValueError("sweep_steps must be positive")
+    candidates = []
+    for entity in potential_responders:
+        bearing = _world_yaw_toward(position, entity.position)
+        for offset in (0.0, -20.0, 20.0):
+            candidates.append((bearing + offset + 180.0) % 360.0 - 180.0)
+    step = 360.0 / sweep_steps
+    phase = rng.uniform(0.0, step)
+    for index in range(sweep_steps):
+        candidates.append(
+            (phase + index * step + 180.0) % 360.0 - 180.0
+        )
+    # Preserve first-seen order while dropping near-duplicate headings so
+    # the responder-anchored candidates keep their priority.
+    unique = []
+    for yaw in candidates:
+        if all(
+            abs((yaw - kept + 180.0) % 360.0 - 180.0) > 1.0e-6
+            for kept in unique
+        ):
+            unique.append(yaw)
+    for yaw in unique:
+        matrices = virtual_view_matrices(
+            position,
+            yaw,
+            observation_spec,
+        )
+        if any(
+            _assess_target_view(
+                case.target,
+                matrices["oblique"],
+                observation_spec,
+            ).task_observable
+            or _assess_target_view(
+                case.target,
+                matrices["nadir"],
+                observation_spec,
+            ).task_observable
+            for case in early_batch.cases
+        ):
+            return yaw
+    return None
+
+
 def potential_cue_visible(
     assessment,
     scenario,
@@ -927,22 +993,6 @@ def generate_task_start(
             visibility_stratum
             == StartVisibilityStratum.POTENTIAL_CUE_VISIBLE
         ):
-            responder = potential_responders[
-                rng.randrange(len(potential_responders))
-            ]
-            yaw = (
-                _world_yaw_toward(
-                    position,
-                    responder.position,
-                )
-                + rng.uniform(-15.0, 15.0)
-            ) % 360.0 - 180.0
-
-            matrices = virtual_view_matrices(
-                position,
-                yaw,
-                observation_spec,
-            )
             early_batch = client.query_target_visibility_batch(
                 scenario.scenario_id,
                 session.session_id,
@@ -956,19 +1006,24 @@ def generate_task_start(
                 timeout=30.0,
             )
             _require_visibility_instant(early_batch, clock)
-            if not any(
-                _assess_target_view(
-                    case.target,
-                    matrices["oblique"],
-                    observation_spec,
-                ).task_observable
-                or _assess_target_view(
-                    case.target,
-                    matrices["nadir"],
-                    observation_spec,
-                ).task_observable
-                for case in early_batch.cases
-            ):
+            # The batch above already paid one GTA round trip for the
+            # occlusion samples of every potential responder at this
+            # position, and those samples do not depend on yaw. Yaw is a
+            # free variable here, so evaluate a deterministic sweep of
+            # headings against the batch we already hold instead of
+            # committing to a single randomly chosen responder. Every
+            # candidate heading is scored by pure projection maths in
+            # _assess_target_view, costing no further round trip, so a
+            # position that is geometrically fine but was merely facing
+            # the wrong way is rescued rather than discarded.
+            yaw = _select_cue_visible_yaw(
+                position,
+                early_batch,
+                observation_spec,
+                potential_responders,
+                rng,
+            )
+            if yaw is None:
                 rejection_counts["stratum_mismatch"] += 1
                 continue
 
