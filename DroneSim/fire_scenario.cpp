@@ -121,13 +121,12 @@ float wrapped_angle_distance(float left, float right) {
 
 std::uint32_t activation_offset_ms(
     float event_distance,
-    std::mt19937_64& random) {
-    std::uniform_real_distribution<float> jitter(-0.5f, 0.5f);
+    float jitter_seconds) {
     const float seconds = std::clamp(
         (std::max)(
             0.0f,
             (event_distance - 20.0f) / 10.0f +
-                jitter(random)),
+                jitter_seconds),
         0.0f,
         12.0f);
     return static_cast<std::uint32_t>(
@@ -238,6 +237,15 @@ ScenarioOperationStatus FireScenario::prepare(
         for (auto& candidates : pedestrian_candidate_spawns_) {
             candidates.clear();
         }
+        // A fresh blueprint must redraw its slot tables from the newly
+        // seeded generators rather than inherit the previous blueprint's.
+        for (auto& models : pedestrian_slot_models_) {
+            models.clear();
+        }
+        for (auto& jitter : pedestrian_slot_jitter_) {
+            jitter.clear();
+        }
+        pedestrian_slots_drawn_ = false;
     }
     placement_attempts_ = 0;
     pedestrian_query_failures_ = 0;
@@ -480,6 +488,51 @@ bool FireScenario::resolve_pedestrian_spawns(
          ++index) {
         ++required_per_band[index % required_per_band.size()];
     }
+
+    // Draw appearance and activation jitter for every band slot exactly
+    // once, before the candidate search runs. These draws previously
+    // happened inside the search loop, at the moment a candidate was
+    // accepted, so they were consumed once per accepted candidate. The
+    // number of accepted candidates depends on GET_SAFE_COORD_FOR_PED,
+    // whose success rate varies with navmesh streaming state, so the same
+    // seed consumed a different number of draws on each Prepare and the
+    // whole model/activation sequence shifted by one or more slots. That
+    // broke the Stage 2E.1 guarantee that one blueprint reproduces the same
+    // models and activation times. Drawing per slot up front makes the
+    // sequence depend only on the seed and the configured actor counts.
+    if (!pedestrian_slots_drawn_) {
+        std::uniform_int_distribution<std::size_t> model_distribution(
+            0,
+            kCivilianModels.size() - 1);
+        std::uniform_real_distribution<float> jitter_distribution(
+            -0.5f,
+            0.5f);
+        for (std::size_t band = 0;
+             band < required_per_band.size();
+             ++band) {
+            pedestrian_slot_models_[band].clear();
+            pedestrian_slot_jitter_[band].clear();
+            pedestrian_slot_models_[band].reserve(
+                required_per_band[band]);
+            pedestrian_slot_jitter_[band].reserve(
+                required_per_band[band]);
+            for (std::size_t slot = 0;
+                 slot < required_per_band[band];
+                 ++slot) {
+                pedestrian_slot_models_[band].push_back(
+                    GAMEPLAY::GET_HASH_KEY(
+                        const_cast<char*>(
+                            kCivilianModels[
+                                model_distribution(
+                                    pedestrian_model_random_)])));
+                pedestrian_slot_jitter_[band].push_back(
+                    jitter_distribution(
+                        pedestrian_activation_random_));
+            }
+        }
+        pedestrian_slots_drawn_ = true;
+    }
+
     std::array<std::size_t, 4> candidate_targets{};
     bool candidates_complete = true;
     for (std::size_t band = 0;
@@ -547,11 +600,15 @@ bool FireScenario::resolve_pedestrian_spawns(
                 }
                 used[best_index] = true;
                 SpawnPoint chosen = candidates[best_index];
+                // Appearance and jitter follow the selection slot, not the
+                // order in which GTA happened to accept safe coordinates.
+                chosen.model_hash =
+                    pedestrian_slot_models_[band][selection];
                 chosen.activation_offset_ms = activation_offset_ms(
                     horizontal_distance_between(
                         chosen.position,
                         event_position_),
-                    pedestrian_activation_random_);
+                    pedestrian_slot_jitter_[band][selection]);
                 selected[band].push_back(chosen);
             }
         }
@@ -598,9 +655,6 @@ bool FireScenario::resolve_pedestrian_spawns(
     std::uniform_real_distribution<float> radius_distribution(
         kPedestrianDistanceBandsMeters[target_band][0],
         kPedestrianDistanceBandsMeters[target_band][1]);
-    std::uniform_int_distribution<std::size_t> model_distribution(
-        0,
-        kCivilianModels.size() - 1);
     for (std::size_t budget = 0;
          budget < kPlacementAttemptsPerFrame;
          ++budget) {
@@ -682,18 +736,16 @@ bool FireScenario::resolve_pedestrian_spawns(
                 ++pedestrian_duplicate_rejections_;
                 continue;
             }
-            const Hash model = GAMEPLAY::GET_HASH_KEY(
-                const_cast<char*>(
-                    kCivilianModels[
-                        model_distribution(
-                            pedestrian_model_random_)]));
+            // The model is assigned from the pre-drawn slot table once this
+            // candidate is actually selected, so accepting a candidate
+            // consumes no randomness here.
             pedestrian_candidate_spawns_[target_band].push_back(
                 {
                     position,
                     heading_away_from(
                         event_position_,
                         position),
-                    model,
+                    0,
                 });
             placement_attempts_ = 0;
             placed = true;
@@ -1807,6 +1859,13 @@ void FireScenario::reset() {
     for (auto& candidates : pedestrian_candidate_spawns_) {
         candidates.clear();
     }
+    for (auto& models : pedestrian_slot_models_) {
+        models.clear();
+    }
+    for (auto& jitter : pedestrian_slot_jitter_) {
+        jitter.clear();
+    }
+    pedestrian_slots_drawn_ = false;
     removed_pedestrians_ = 0;
     removed_vehicles_ = 0;
     start_game_timer_ms_ = 0;

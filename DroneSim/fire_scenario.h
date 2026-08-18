@@ -124,6 +124,11 @@ private:
     std::vector<SpawnPoint> pedestrian_spawns_;
     std::array<std::vector<SpawnPoint>, 4>
         pedestrian_candidate_spawns_;
+    // Per-band appearance and activation jitter drawn up front, before any
+    // GTA pathfinding query can influence how many random draws occur.
+    std::array<std::vector<Hash>, 4> pedestrian_slot_models_;
+    std::array<std::vector<float>, 4> pedestrian_slot_jitter_;
+    bool pedestrian_slots_drawn_ = false;
     std::vector<Hash> requested_models_;
     std::chrono::steady_clock::time_point model_deadline_;
     bool ambient_suppression_active_ = false;
