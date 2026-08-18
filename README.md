@@ -144,21 +144,31 @@ metric depth.
 
 ### 4. Generate a dataset batch
 
-Only successful episodes retain their full RGB-D payloads:
+Only successful episodes retain their RGB-D payloads. Online depth remains
+`float32`; the dataset writer stores metre-valued `float16` depth to reduce
+disk use without cropping or downsampling:
 
 ```powershell
 python validation\generate_stage2e_experts.py `
   --anchor 234 324 100 `
-  --max-attempts 20 `
-  --max-success-episodes 5 `
-  --output-dir dataset\stage2e_fire
+  --scenario-count 5 `
+  --episodes-per-scenario 20 `
+  --max-attempts-per-scenario 40 `
+  --output-dir dataset\stage2e_fire_5x20
 ```
+
+This creates five seed-distinct immutable scenario blueprints and requires 20
+successful episodes from each; a scene that exhausts its own attempt budget is
+not filled with episodes from another scene. Startup prints a conservative
+payload/free-space estimate. Resume an interrupted collection with the exact
+same arguments plus `--resume`; completed episodes and the rebuilt blueprint
+signature are verified before new payload is appended.
 
 Play every retained episode in order:
 
 ```powershell
 python validation\visualize_stage2e_dataset.py `
-  dataset\stage2e_fire --loop
+  dataset\stage2e_fire_5x20 --loop
 ```
 
 The player does not connect to GTA and does not load metric depth. `Space`
@@ -167,7 +177,7 @@ changes episode, and `Q` closes the window. Batch timing can be summarized
 without creating another artifact:
 
 ```powershell
-python validation\summarize_stage2e_timings.py dataset\stage2e_fire
+python validation\summarize_stage2e_timings.py dataset\stage2e_fire_5x20
 ```
 
 Dataset schema and recording behavior are documented in

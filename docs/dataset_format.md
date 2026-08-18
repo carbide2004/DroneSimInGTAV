@@ -13,30 +13,46 @@ its `.partial` directory must be new. Using a fresh root per collection run is
 recommended. Dataset and recording roots are ignored by Git because RGB-D
 collections can grow quickly.
 
+Grouped collection mode stores a `dataset_manifest.json` and one directory per
+fixed scenario blueprint. Each scene has an independent success quota and
+attempt budget. A later `--resume` validates the collection configuration,
+every completed episode, absence of partial payloads, and the blueprint
+signature rebuilt from the same anchor and seed before appending data. Runtime
+blueprint IDs are never trusted across GTA/plugin restarts.
+
 ## Batch layout
 
 ```text
 stage2e_fire/
-  episode_000000_scenario_<id>_start_<id>/
-    agent/
-      episode.json
-      steps.jsonl
-      rgb/
-      depth/
-    teacher/
-      episode.json
-      awareness.jsonl
-      beliefs.npz
-    evaluation_truth/
-      episode.json
-      steps.jsonl
+  dataset_manifest.json
+  scene_000_seed_1/
+    episode_0000_attempt_0000_start_<id>/
+      agent/
+        episode.json
+        steps.jsonl
+        rgb/
+        depth/
+      teacher/
+        episode.json
+        awareness.jsonl
+        beliefs.npz
+      evaluation_truth/
+        episode.json
+        steps.jsonl
+  scene_001_seed_2/
+  ...
   failures.jsonl
   timings.jsonl
 ```
 
-RGB is stored as compressed JPEG. Metric depth is stored per view as NumPy
-compressed arrays. Episode and step metadata use JSON/JSONL; belief grids use
-NPZ.
+RGB is stored as compressed JPEG. Metric depth is stored per view as compressed
+NumPy `float16` arrays in metres. Capture, grounding, planning, and online
+validation continue to use `float32`; the lossy conversion happens only at the
+dataset writer. It is not clipped, normalized, or downsampled. At the current
+depth range, binary16 resolution is approximately 3 cm near 50--60 m, 6 cm at
+120 m, and 0.5 m at 800 m. The dtype and units are declared in
+`agent/episode.json`. Episode and step metadata use JSON/JSONL; belief grids
+use NPZ.
 
 ## Agent stream
 

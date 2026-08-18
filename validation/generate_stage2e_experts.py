@@ -1,5 +1,8 @@
 import argparse
+import json
 import math
+import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -27,6 +30,14 @@ from agent_control.task_starts import (  # noqa: E402
     ObservationSpec,
     TASK_HORIZON_STEPS,
 )
+
+
+COLLECTION_SCHEMA_VERSION = 1
+UINT64_MASK = 0xFFFFFFFFFFFFFFFF
+
+
+class CollectionInvariantError(RuntimeError):
+    pass
 
 
 def _parse_args():
@@ -64,26 +75,62 @@ def _parse_args():
             f"{TASK_HORIZON_STEPS}"
         ),
     )
-    parser.add_argument("--max-attempts", type=int, default=20)
     parser.add_argument(
-        "--max-success-episodes",
+        "--max-attempts",
         type=int,
-        required=True,
+        default=20,
+        help="Attempt budget for legacy flat generation",
+    )
+    parser.add_argument("--max-success-episodes", type=int)
+    parser.add_argument(
+        "--scenario-count",
+        type=int,
+        help=(
+            "Enable grouped collection with this many seed-distinct "
+            "scenario blueprints at one anchor"
+        ),
     )
     parser.add_argument(
-        "--output-dir",
-        type=Path,
-        required=True,
+        "--episodes-per-scenario",
+        type=int,
+        help="Successful episode quota for each grouped scenario",
     )
+    parser.add_argument(
+        "--max-attempts-per-scenario",
+        type=int,
+        default=40,
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume a grouped collection after validating its manifest, "
+            "completed episodes, and rebuilt blueprint signature"
+        ),
+    )
+    parser.add_argument(
+        "--estimated-mib-per-episode",
+        type=float,
+        default=300.0,
+        help="Conservative startup disk estimate for grouped collection",
+    )
+    parser.add_argument(
+        "--minimum-free-gib",
+        type=float,
+        default=5.0,
+        help="Free space retained beyond the grouped payload estimate",
+    )
+    parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--jpeg-quality", type=int, default=95)
     parser.add_argument("--host", default="127.0.0.5")
     parser.add_argument("--port", type=int, default=23456)
     args = parser.parse_args()
+
     if not all(math.isfinite(value) for value in args.anchor):
         parser.error("--anchor values must be finite")
-    if not 0 <= args.seed <= 0xFFFFFFFFFFFFFFFF:
+    if not 0 <= args.seed <= UINT64_MASK:
         parser.error("--seed must fit uint64")
-    if not 0 <= args.start_seed <= 0xFFFFFFFFFFFFFFFF:
+    if not 0 <= args.start_seed <= UINT64_MASK:
         parser.error("--start-seed must fit uint64")
     if not 0 <= args.firetrucks <= 4:
         parser.error("--firetrucks must be in [0, 4]")
@@ -97,10 +144,59 @@ def _parse_args():
         parser.error("--max-steps must be in [21, 256]")
     if args.max_attempts <= 0:
         parser.error("--max-attempts must be positive")
-    if args.max_success_episodes <= 0:
-        parser.error("--max-success-episodes must be positive")
     if not 1 <= args.jpeg_quality <= 95:
         parser.error("--jpeg-quality must be in [1, 95]")
+
+    grouped_values = (
+        args.scenario_count,
+        args.episodes_per_scenario,
+    )
+    if any(value is not None for value in grouped_values) and not all(
+        value is not None for value in grouped_values
+    ):
+        parser.error(
+            "--scenario-count and --episodes-per-scenario must be supplied "
+            "together"
+        )
+    args.grouped = args.scenario_count is not None
+    if args.grouped:
+        if args.max_success_episodes is not None:
+            parser.error(
+                "--max-success-episodes cannot be combined with grouped "
+                "collection"
+            )
+        if args.scenario_count <= 0:
+            parser.error("--scenario-count must be positive")
+        if args.episodes_per_scenario <= 0:
+            parser.error("--episodes-per-scenario must be positive")
+        if args.max_attempts_per_scenario < args.episodes_per_scenario:
+            parser.error(
+                "--max-attempts-per-scenario cannot be smaller than "
+                "--episodes-per-scenario"
+            )
+        if (
+            not math.isfinite(args.estimated_mib_per_episode)
+            or args.estimated_mib_per_episode <= 0.0
+        ):
+            parser.error(
+                "--estimated-mib-per-episode must be finite and positive"
+            )
+        if (
+            not math.isfinite(args.minimum_free_gib)
+            or args.minimum_free_gib < 0.0
+        ):
+            parser.error("--minimum-free-gib must be finite and non-negative")
+    else:
+        if args.max_success_episodes is None:
+            parser.error(
+                "legacy flat generation requires --max-success-episodes; "
+                "or select grouped collection with --scenario-count and "
+                "--episodes-per-scenario"
+            )
+        if args.max_success_episodes <= 0:
+            parser.error("--max-success-episodes must be positive")
+        if args.resume:
+            parser.error("--resume is available only for grouped collection")
     return args
 
 
@@ -125,15 +221,18 @@ def _format_timing(timing):
         "total",
     )
     return " ".join(
-        f"{name}={timing.get(name, 0.0):.1f}s"
-        for name in ordered
+        f"{name}={timing.get(name, 0.0):.1f}s" for name in ordered
     )
 
 
-def _format_detail(audited_start, result):
+def _format_detail(audited_start, result, failed_start_timing):
     fields = []
-    if audited_start is not None:
-        timing = audited_start.timing
+    timing = (
+        audited_start.timing
+        if audited_start is not None
+        else failed_start_timing
+    )
+    if timing is not None:
         fields.append(
             "start[attempts="
             f"{timing.attempts} generate="
@@ -164,6 +263,204 @@ def _format_detail(audited_start, result):
     return " ".join(fields)
 
 
+def _rounded(values):
+    return [round(float(value), 4) for value in values]
+
+
+def _blueprint_signature(snapshot):
+    return {
+        "event_position": _rounded(snapshot.event_position),
+        "entities": [
+            {
+                "stable_id": int(entity.stable_id),
+                "model_hash": int(entity.model_hash),
+                "kind": int(entity.kind),
+                "role": int(entity.role),
+                "event_id": int(entity.event_id),
+                "position": _rounded(entity.position),
+                "heading": round(float(entity.heading), 4),
+                "planned_activation_offset_ms": int(
+                    entity.planned_activation_offset_ms
+                ),
+                "task_target": _rounded(entity.task_target),
+            }
+            for entity in snapshot.entities
+        ],
+    }
+
+
+def _episode_complete(path):
+    required = (
+        "summary.json",
+        "agent/episode.json",
+        "agent/steps.jsonl",
+        "teacher/episode.json",
+        "teacher/awareness.jsonl",
+        "teacher/beliefs.npz",
+        "evaluation_truth/episode.json",
+        "evaluation_truth/steps.jsonl",
+    )
+    return path.is_dir() and all((path / item).is_file() for item in required)
+
+
+def _atomic_json(path, payload):
+    path = Path(path)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+def _manifest_config(args):
+    return {
+        "anchor": [float(value) for value in args.anchor],
+        "scenario_seed_base": int(args.seed),
+        "start_seed_base": int(args.start_seed),
+        "scenario_count": int(args.scenario_count),
+        "episodes_per_scenario": int(args.episodes_per_scenario),
+        "max_attempts_per_scenario": int(args.max_attempts_per_scenario),
+        "start_attempts": int(args.start_attempts),
+        "firetrucks": int(args.firetrucks),
+        "pedestrians": int(args.pedestrians),
+        "max_steps": int(args.max_steps),
+        "jpeg_quality": int(args.jpeg_quality),
+    }
+
+
+def _new_manifest(args):
+    scenes = []
+    for scene_index in range(args.scenario_count):
+        scenario_seed = (int(args.seed) + scene_index) & UINT64_MASK
+        scenes.append(
+            {
+                "scene_index": scene_index,
+                "scenario_seed": scenario_seed,
+                "directory": f"scene_{scene_index:03d}_seed_{scenario_seed}",
+                "status": "PENDING",
+                "attempts_completed": 0,
+                "successes": 0,
+                "episodes": [],
+                "blueprint_signature": None,
+            }
+        )
+    return {
+        "schema_version": COLLECTION_SCHEMA_VERSION,
+        "collection_type": "stage2e_grouped_scenarios",
+        "config": _manifest_config(args),
+        "status": "IN_PROGRESS",
+        "scenes": scenes,
+    }
+
+
+def _load_manifest(path):
+    with Path(path).open("r", encoding="utf-8") as stream:
+        payload = json.load(stream)
+    if payload.get("schema_version") != COLLECTION_SCHEMA_VERSION:
+        raise RuntimeError("Unsupported grouped collection manifest schema")
+    if payload.get("collection_type") != "stage2e_grouped_scenarios":
+        raise RuntimeError("Output manifest is not a Stage 2E grouped collection")
+    return payload
+
+
+def _validate_resume(output_root, manifest, args):
+    expected_config = _manifest_config(args)
+    if manifest.get("config") != expected_config:
+        raise RuntimeError(
+            "Resume configuration does not exactly match dataset_manifest.json"
+        )
+    scenes = manifest.get("scenes")
+    if not isinstance(scenes, list) or len(scenes) != args.scenario_count:
+        raise RuntimeError("Grouped manifest scene table is invalid")
+    partials = sorted(output_root.rglob("*.partial"))
+    if partials:
+        raise RuntimeError(
+            "Resume found incomplete payload directories; inspect or remove "
+            "them explicitly before retrying: "
+            + ", ".join(str(path) for path in partials)
+        )
+    for expected_index, scene in enumerate(scenes):
+        if int(scene.get("scene_index", -1)) != expected_index:
+            raise RuntimeError("Grouped manifest scene indices are invalid")
+        scene_root = output_root / scene["directory"]
+        episode_names = scene.get("episodes")
+        if not isinstance(episode_names, list):
+            raise RuntimeError("Grouped manifest episode list is invalid")
+        if int(scene.get("successes", -1)) != len(episode_names):
+            raise RuntimeError("Grouped manifest success count is inconsistent")
+        if len(set(episode_names)) != len(episode_names):
+            raise RuntimeError("Grouped manifest contains duplicate episodes")
+        for name in episode_names:
+            if not _episode_complete(scene_root / name):
+                raise RuntimeError(
+                    f"Resume found an incomplete recorded episode: "
+                    f"{scene_root / name}"
+                )
+        actual_names = sorted(
+            path.name
+            for path in scene_root.glob("episode_*")
+            if path.is_dir()
+        )
+        if actual_names != sorted(episode_names):
+            raise RuntimeError(
+                f"Scene directory and manifest disagree: {scene_root}"
+            )
+        attempts = int(scene.get("attempts_completed", -1))
+        if not 0 <= attempts <= args.max_attempts_per_scenario:
+            raise RuntimeError("Grouped manifest attempt count is invalid")
+
+
+def _prepare_grouped_output(args):
+    output_root = args.output_dir.resolve()
+    manifest_path = output_root / "dataset_manifest.json"
+    if args.resume:
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"--resume requires {manifest_path}"
+            )
+        manifest = _load_manifest(manifest_path)
+        _validate_resume(output_root, manifest, args)
+    else:
+        if output_root.exists() and any(output_root.iterdir()):
+            raise FileExistsError(
+                "Grouped --output-dir must be absent or empty unless "
+                "--resume is supplied"
+            )
+        output_root.mkdir(parents=True, exist_ok=True)
+        manifest = _new_manifest(args)
+        for scene in manifest["scenes"]:
+            (output_root / scene["directory"]).mkdir()
+        _atomic_json(manifest_path, manifest)
+    return output_root, manifest_path, manifest
+
+
+def _check_disk_budget(output_root, manifest, args):
+    complete = sum(int(scene["successes"]) for scene in manifest["scenes"])
+    requested = args.scenario_count * args.episodes_per_scenario
+    remaining = requested - complete
+    estimated_payload = remaining * args.estimated_mib_per_episode * 1024**2
+    reserve = args.minimum_free_gib * 1024**3
+    free = shutil.disk_usage(output_root).free
+    required = estimated_payload + reserve
+    print(
+        "DISK_ESTIMATE "
+        f"remaining_episodes={remaining} "
+        f"payload={estimated_payload / 1024**3:.1f}GiB "
+        f"reserve={args.minimum_free_gib:.1f}GiB "
+        f"required={required / 1024**3:.1f}GiB "
+        f"free={free / 1024**3:.1f}GiB",
+        flush=True,
+    )
+    if free < required:
+        raise RuntimeError(
+            "Insufficient free space for the configured grouped collection "
+            "estimate; change the destination or explicitly adjust "
+            "--estimated-mib-per-episode/--minimum-free-gib"
+        )
+
+
 def _cleanup_frozen(client, session, scenario_id):
     if scenario_id is not None:
         client.reset_scenario(scenario_id)
@@ -174,8 +471,406 @@ def _cleanup_frozen(client, session, scenario_id):
     return session, scenario_id
 
 
-def main():
-    args = _parse_args()
+def _run_attempt(
+    client,
+    args,
+    original_pose,
+    log_root,
+    episode_root,
+    scenario_seed,
+    start_seed,
+    attempt_index,
+    success_index,
+    runtime_blueprint_id=0,
+    expected_signature=None,
+    scene_index=None,
+):
+    scenario_id = None
+    session = None
+    recorder = None
+    ready = None
+    signature = None
+    audited_start = None
+    failed_start_timing = None
+    result = None
+    recorded_path = None
+    attempt_started = time.perf_counter()
+    attempt_timing = {}
+    outcome = "ERROR"
+    phase = "prepare"
+    phase_started = attempt_started
+    interrupted = False
+    try:
+        try:
+            print(
+                "ATTEMPT "
+                + (
+                    ""
+                    if scene_index is None
+                    else f"scene={scene_index + 1}/{args.scenario_count} "
+                )
+                + f"index={attempt_index + 1} scenario_seed={scenario_seed} "
+                f"start_seed={start_seed} blueprint={runtime_blueprint_id}",
+                flush=True,
+            )
+            ready, attempt_timing["prepare"] = _timed(
+                _prepare_ready,
+                client,
+                args,
+                scenario_seed,
+                runtime_blueprint_id,
+            )
+            scenario_id = ready.scenario_id
+            signature = _blueprint_signature(ready)
+            if expected_signature is not None and signature != expected_signature:
+                raise CollectionInvariantError(
+                    "SCENARIO_BLUEPRINT_SIGNATURE_MISMATCH: rebuilt or reused "
+                    "scene differs from dataset manifest"
+                )
+
+            phase = "lockstep_setup"
+            phase_started = time.perf_counter()
+            client.set_camera_pose(
+                ready.event_position[0],
+                ready.event_position[1] - 40.0,
+                ready.event_position[2] + 40.0,
+                original_pose[5],
+                collision_check=False,
+            )
+            client.set_camera_pitch(OBLIQUE_PITCH_DEGREES)
+            session = LockstepSession(client)
+            session.__enter__()
+            client.start_scenario(scenario_id)
+            session.advance()
+            calibration = session.capture_rgbd_pair()
+            observation_spec = ObservationSpec.from_pair(calibration)
+            scenario = client.get_scenario_state(scenario_id)
+            attempt_timing["lockstep_setup"] = (
+                time.perf_counter() - phase_started
+            )
+
+            phase = "start_audit"
+            phase_started = time.perf_counter()
+            audited_start, attempt_timing["start_audit"] = _timed(
+                generate_audited_task_start,
+                client,
+                session,
+                scenario,
+                observation_spec,
+                start_seed,
+                maximum_attempts=args.start_attempts,
+                audit_timeout_seconds=args.start_audit_timeout,
+                horizon_steps=args.max_steps,
+                progress_callback=_progress,
+            )
+            if scene_index is None:
+                episode_name = (
+                    f"episode_{success_index:06d}_scenario_{scenario_seed}_"
+                    f"start_{audited_start.generated.blueprint.start_id}"
+                )
+            else:
+                episode_name = (
+                    f"episode_{success_index:04d}_attempt_{attempt_index:04d}_"
+                    f"start_{audited_start.generated.blueprint.start_id}"
+                )
+            recorder = ExpertEpisodeRecorder(
+                episode_root,
+                episode_name,
+                jpeg_quality=args.jpeg_quality,
+            )
+
+            phase = "rollout"
+            phase_started = time.perf_counter()
+            result, attempt_timing["rollout"] = _timed(
+                run_expert_episode,
+                client,
+                session,
+                scenario_id,
+                audited_start,
+                recorder=recorder,
+            )
+            phase = "write_finalize"
+            phase_started = time.perf_counter()
+            if result.success:
+                recorded_path = recorder.finish(
+                    {
+                        "result": result,
+                        "scene_index": scene_index,
+                        "scenario_seed": scenario_seed,
+                        "start_seed": start_seed,
+                        "attempt_index": attempt_index,
+                        "goal_budget_audit": audited_start.goal_budget_audit,
+                        "bearing_bin": audited_start.bearing_bin,
+                        "altitude_bin": audited_start.altitude_bin,
+                        "initial_grounded_response_count": (
+                            audited_start.initial_grounded_response_count
+                        ),
+                        "timing": {
+                            "audited_start": audited_start.timing,
+                            "rollout": result.timing,
+                        },
+                    }
+                )
+                recorder = None
+                outcome = "PASS"
+                print(
+                    f"PASS actions={result.actions} "
+                    f"initial_grounded_responses="
+                    f"{audited_start.initial_grounded_response_count} "
+                    f"plans={result.planner_calls} "
+                    f"error={result.localization_error_m:.3f}m "
+                    f"sensitivity={result.cue_sensitivity.divergence_kind} "
+                    f"path={recorded_path}",
+                    flush=True,
+                )
+            else:
+                recorder.abort()
+                recorder = None
+                outcome = "FAILED"
+                append_failure(
+                    log_root,
+                    {
+                        "scene_index": scene_index,
+                        "attempt": attempt_index,
+                        "scenario_seed": scenario_seed,
+                        "start_seed": start_seed,
+                        "result": result,
+                    },
+                )
+                print(
+                    f"FAIL actions={result.actions} "
+                    f"plans={result.planner_calls} message={result.message}",
+                    flush=True,
+                )
+            attempt_timing["write_finalize"] = (
+                time.perf_counter() - phase_started
+            )
+        except KeyboardInterrupt:
+            interrupted = True
+            outcome = "INTERRUPTED"
+        except Exception as error:
+            failed_start_timing = getattr(error, "timing", None)
+            if phase not in attempt_timing:
+                attempt_timing[phase] = time.perf_counter() - phase_started
+            append_failure(
+                log_root,
+                {
+                    "scene_index": scene_index,
+                    "attempt": attempt_index,
+                    "scenario_seed": scenario_seed,
+                    "start_seed": start_seed,
+                    "error_type": type(error).__name__,
+                    "message": str(error),
+                },
+            )
+            print(f"FAIL {type(error).__name__}: {error}", flush=True)
+            if isinstance(error, CollectionInvariantError):
+                raise
+    finally:
+        cleanup_started = time.perf_counter()
+        if recorder is not None:
+            recorder.abort()
+        session, scenario_id = _cleanup_frozen(
+            client,
+            session,
+            scenario_id,
+        )
+        attempt_timing["cleanup"] = time.perf_counter() - cleanup_started
+        attempt_timing["total"] = time.perf_counter() - attempt_started
+        timing_record = {
+            "scene_index": scene_index,
+            "attempt": attempt_index,
+            "scenario_seed": scenario_seed,
+            "start_seed": start_seed,
+            "outcome": outcome,
+            "timing": attempt_timing,
+        }
+        if audited_start is not None:
+            timing_record["audited_start"] = audited_start.timing
+        elif failed_start_timing is not None:
+            timing_record["audited_start"] = failed_start_timing
+        if result is not None:
+            timing_record["rollout"] = result.timing
+        append_attempt_timing(log_root, timing_record)
+        print(
+            f"TIMING outcome={outcome} {_format_timing(attempt_timing)}",
+            flush=True,
+        )
+        detail = _format_detail(audited_start, result, failed_start_timing)
+        if detail:
+            print(f"TIMING_DETAIL {detail}", flush=True)
+    if interrupted:
+        raise KeyboardInterrupt
+    return {
+        "success": outcome == "PASS",
+        "outcome": outcome,
+        "runtime_blueprint_id": (
+            None if ready is None else int(ready.blueprint_id)
+        ),
+        "blueprint_signature": signature,
+        "episode_name": (
+            None if recorded_path is None else recorded_path.name
+        ),
+    }
+
+
+def _prepare_ready(client, args, scenario_seed, blueprint_id):
+    scenario_id = client.prepare_fire_scenario(
+        args.anchor,
+        seed=scenario_seed,
+        firetruck_count=args.firetrucks,
+        pedestrian_count=args.pedestrians,
+        blueprint_id=blueprint_id,
+    )
+    try:
+        return client.wait_scenario_ready(
+            scenario_id,
+            timeout=args.prepare_timeout,
+        )
+    except BaseException:
+        client.reset_scenario(scenario_id)
+        raise
+
+
+def _start_seed_for_grouped_attempt(args, scene_index, attempt_index):
+    # A fixed scene stride keeps start-seed windows disjoint without making
+    # them depend on the configured attempt budget.
+    window_index = (int(scene_index) << 32) + int(attempt_index)
+    return (
+        int(args.start_seed) + window_index * int(args.start_attempts)
+    ) & UINT64_MASK
+
+
+def _run_grouped(args):
+    output_root, manifest_path, manifest = _prepare_grouped_output(args)
+    _check_disk_budget(output_root, manifest, args)
+    if all(
+        int(scene["successes"]) >= args.episodes_per_scenario
+        for scene in manifest["scenes"]
+    ):
+        print("DONE grouped collection is already complete", flush=True)
+        return
+
+    client = DroneSimClient(args.host, args.port)
+    client.require_camera_active()
+    original_pose = client.get_pose()
+    collection_started = time.perf_counter()
+    try:
+        client.set_time(12, 0, 0)
+        client.set_weather("EXTRASUNNY")
+        client.teleport_player(*args.anchor)
+        for scene in manifest["scenes"]:
+            scene_index = int(scene["scene_index"])
+            if int(scene["successes"]) >= args.episodes_per_scenario:
+                scene["status"] = "COMPLETE"
+                continue
+            print(
+                "SCENE_START "
+                f"scene={scene_index + 1}/{args.scenario_count} "
+                f"seed={scene['scenario_seed']} "
+                f"successes={scene['successes']}/"
+                f"{args.episodes_per_scenario} "
+                f"attempts={scene['attempts_completed']}/"
+                f"{args.max_attempts_per_scenario}",
+                flush=True,
+            )
+            scene["status"] = "IN_PROGRESS"
+            _atomic_json(manifest_path, manifest)
+            runtime_blueprint_id = 0
+            expected_signature = scene["blueprint_signature"]
+            while (
+                int(scene["successes"]) < args.episodes_per_scenario
+                and int(scene["attempts_completed"])
+                < args.max_attempts_per_scenario
+            ):
+                attempt_index = int(scene["attempts_completed"])
+                start_seed = _start_seed_for_grouped_attempt(
+                    args,
+                    scene_index,
+                    attempt_index,
+                )
+                result = _run_attempt(
+                    client,
+                    args,
+                    original_pose,
+                    output_root,
+                    output_root / scene["directory"],
+                    int(scene["scenario_seed"]),
+                    start_seed,
+                    attempt_index,
+                    int(scene["successes"]),
+                    runtime_blueprint_id=runtime_blueprint_id,
+                    expected_signature=expected_signature,
+                    scene_index=scene_index,
+                )
+                if result["runtime_blueprint_id"] is not None:
+                    runtime_blueprint_id = result["runtime_blueprint_id"]
+                if expected_signature is None and result["blueprint_signature"]:
+                    expected_signature = result["blueprint_signature"]
+                    scene["blueprint_signature"] = expected_signature
+                scene["attempts_completed"] = attempt_index + 1
+                if result["success"]:
+                    scene["successes"] = int(scene["successes"]) + 1
+                    scene["episodes"].append(result["episode_name"])
+                print(
+                    "SCENE_PROGRESS "
+                    f"scene={scene_index + 1}/{args.scenario_count} "
+                    f"successes={scene['successes']}/"
+                    f"{args.episodes_per_scenario} "
+                    f"attempts={scene['attempts_completed']}/"
+                    f"{args.max_attempts_per_scenario}",
+                    flush=True,
+                )
+                _atomic_json(manifest_path, manifest)
+            if int(scene["successes"]) >= args.episodes_per_scenario:
+                scene["status"] = "COMPLETE"
+            else:
+                scene["status"] = "EXHAUSTED"
+            _atomic_json(manifest_path, manifest)
+
+        incomplete = [
+            scene
+            for scene in manifest["scenes"]
+            if int(scene["successes"]) < args.episodes_per_scenario
+        ]
+        manifest["status"] = "COMPLETE" if not incomplete else "INCOMPLETE"
+        _atomic_json(manifest_path, manifest)
+        total_successes = sum(
+            int(scene["successes"]) for scene in manifest["scenes"]
+        )
+        print(
+            "DONE_GROUPED "
+            f"scenes={args.scenario_count - len(incomplete)}/"
+            f"{args.scenario_count} episodes={total_successes}/"
+            f"{args.scenario_count * args.episodes_per_scenario} "
+            f"wall={time.perf_counter() - collection_started:.1f}s",
+            flush=True,
+        )
+        if incomplete:
+            summary = ", ".join(
+                f"scene {scene['scene_index']}: "
+                f"{scene['successes']}/{args.episodes_per_scenario}"
+                for scene in incomplete
+            )
+            raise RuntimeError(
+                "Grouped collection did not reach every per-scene quota; "
+                + summary
+            )
+    finally:
+        try:
+            client.set_camera_pose(
+                original_pose[0],
+                original_pose[1],
+                original_pose[2],
+                original_pose[5],
+                collision_check=False,
+            )
+            client.set_camera_pitch(original_pose[3])
+        finally:
+            client.restore_player()
+
+
+def _run_flat(args):
     output_root = args.output_dir.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     client = DroneSimClient(args.host, args.port)
@@ -192,258 +887,32 @@ def main():
             if successes >= args.max_success_episodes:
                 break
             attempts_run += 1
-            scenario_id = None
-            session = None
-            recorder = None
-            attempt_started = time.perf_counter()
-            attempt_timing = {}
-            audited_start = None
-            failed_start_timing = None
-            result = None
-            outcome = "ERROR"
-            phase = "prepare"
-            phase_started = attempt_started
-            attempt_seed = (
-                args.seed + attempt
-            ) & 0xFFFFFFFFFFFFFFFF
-            start_seed = (
-                args.start_seed + attempt
-            ) & 0xFFFFFFFFFFFFFFFF
-            try:
+            scenario_seed = (args.seed + attempt) & UINT64_MASK
+            start_seed = (args.start_seed + attempt) & UINT64_MASK
+            result = _run_attempt(
+                client,
+                args,
+                original_pose,
+                output_root,
+                output_root,
+                scenario_seed,
+                start_seed,
+                attempt,
+                successes,
+            )
+            if result["success"]:
+                successes += 1
                 print(
-                    f"attempt {attempt + 1}/{args.max_attempts} "
-                    f"scenario_seed={attempt_seed} "
-                    f"start_seed={start_seed}",
+                    f"FLAT_PROGRESS successes={successes}/"
+                    f"{args.max_success_episodes}",
                     flush=True,
                 )
-                prepare_started = time.perf_counter()
-                scenario_id = client.prepare_fire_scenario(
-                    args.anchor,
-                    seed=attempt_seed,
-                    firetruck_count=args.firetrucks,
-                    pedestrian_count=args.pedestrians,
-                )
-                ready = client.wait_scenario_ready(
-                    scenario_id,
-                    timeout=args.prepare_timeout,
-                )
-                attempt_timing["prepare"] = (
-                    time.perf_counter() - prepare_started
-                )
-                phase = "lockstep_setup"
-                phase_started = time.perf_counter()
-                client.set_camera_pose(
-                    ready.event_position[0],
-                    ready.event_position[1] - 40.0,
-                    ready.event_position[2] + 40.0,
-                    original_pose[5],
-                    collision_check=False,
-                )
-                client.set_camera_pitch(OBLIQUE_PITCH_DEGREES)
-                session = LockstepSession(client)
-                session.__enter__()
-                client.start_scenario(scenario_id)
-                session.advance()
-                calibration = session.capture_rgbd_pair()
-                observation_spec = ObservationSpec.from_pair(
-                    calibration
-                )
-                scenario = client.get_scenario_state(scenario_id)
-                attempt_timing["lockstep_setup"] = (
-                    time.perf_counter() - phase_started
-                )
-                phase = "start_audit"
-                phase_started = time.perf_counter()
-                audited_start, attempt_timing["start_audit"] = _timed(
-                    generate_audited_task_start,
-                    client,
-                    session,
-                    scenario,
-                    observation_spec,
-                    start_seed,
-                    maximum_attempts=args.start_attempts,
-                    audit_timeout_seconds=args.start_audit_timeout,
-                    horizon_steps=args.max_steps,
-                    progress_callback=_progress,
-                )
-                phase = "rollout"
-                phase_started = time.perf_counter()
-                episode_name = (
-                    f"episode_{successes:06d}_"
-                    f"scenario_{attempt_seed}_"
-                    f"start_{audited_start.generated.blueprint.start_id}"
-                )
-                recorder = ExpertEpisodeRecorder(
-                    output_root,
-                    episode_name,
-                    jpeg_quality=args.jpeg_quality,
-                )
-                result, attempt_timing["rollout"] = _timed(
-                    run_expert_episode,
-                    client,
-                    session,
-                    scenario_id,
-                    audited_start,
-                    recorder=recorder,
-                )
-                if not result.success:
-                    phase = "write_finalize"
-                    phase_started = time.perf_counter()
-                    recorder.abort()
-                    recorder = None
-                    append_failure(
-                        output_root,
-                        {
-                            "attempt": attempt,
-                            "scenario_seed": attempt_seed,
-                            "start_seed": start_seed,
-                            "result": result,
-                        },
-                    )
-                    attempt_timing["write_finalize"] = (
-                        time.perf_counter() - phase_started
-                    )
-                    outcome = "FAILED"
-                    print(
-                        f"FAIL actions={result.actions} "
-                        f"plans={result.planner_calls} "
-                        f"message={result.message}",
-                        flush=True,
-                    )
-                else:
-                    phase = "write_finalize"
-                    phase_started = time.perf_counter()
-                    path = recorder.finish(
-                        {
-                            "result": result,
-                            "scenario_seed": attempt_seed,
-                            "start_seed": start_seed,
-                            "goal_budget_audit": (
-                                audited_start.goal_budget_audit
-                            ),
-                            "bearing_bin": audited_start.bearing_bin,
-                            "altitude_bin": audited_start.altitude_bin,
-                            "initial_grounded_response_count": (
-                                audited_start.initial_grounded_response_count
-                            ),
-                            "timing": {
-                                "audited_start": audited_start.timing,
-                                "rollout": result.timing,
-                            },
-                        }
-                    )
-                    attempt_timing["write_finalize"] = (
-                        time.perf_counter() - phase_started
-                    )
-                    recorder = None
-                    successes += 1
-                    outcome = "PASS"
-                    print(
-                        f"PASS {successes}/"
-                        f"{args.max_success_episodes} "
-                        f"actions={result.actions} "
-                        "initial_grounded_responses="
-                        f"{audited_start.initial_grounded_response_count} "
-                        f"plans={result.planner_calls} "
-                        f"error={result.localization_error_m:.3f}m "
-                        "sensitivity="
-                        f"{result.cue_sensitivity.divergence_kind} "
-                        f"path={path}",
-                        flush=True,
-                    )
-                phase_started = time.perf_counter()
-                phase = "cleanup"
-                session, scenario_id = _cleanup_frozen(
-                    client,
-                    session,
-                    scenario_id,
-                )
-                phase = "complete"
-                attempt_timing["cleanup"] = (
-                    time.perf_counter() - phase_started
-                )
-            except Exception as error:
-                failed_start_timing = getattr(error, "timing", None)
-                if phase != "complete" and phase not in attempt_timing:
-                    attempt_timing[phase] = (
-                        time.perf_counter() - phase_started
-                    )
-                cleanup_started = time.perf_counter()
-                if recorder is not None:
-                    recorder.abort()
-                append_failure(
-                    output_root,
-                    {
-                        "attempt": attempt,
-                        "scenario_seed": attempt_seed,
-                        "start_seed": start_seed,
-                        "error_type": type(error).__name__,
-                        "message": str(error),
-                    },
-                )
-                print(
-                    f"FAIL {type(error).__name__}: {error}",
-                    flush=True,
-                )
-                if scenario_id is not None:
-                    try:
-                        client.reset_scenario(scenario_id)
-                        scenario_id = None
-                    except Exception:
-                        print(
-                            "Scenario Reset failed; lockstep remains "
-                            "frozen. Use F11 to recover.",
-                            flush=True,
-                        )
-                        raise
-                if session is not None:
-                    session.close()
-                attempt_timing["cleanup"] = (
-                    time.perf_counter() - cleanup_started
-                )
-            finally:
-                attempt_timing["total"] = (
-                    time.perf_counter() - attempt_started
-                )
-                timing_record = {
-                    "attempt": attempt,
-                    "scenario_seed": attempt_seed,
-                    "start_seed": start_seed,
-                    "outcome": outcome,
-                    "timing": attempt_timing,
-                }
-                if audited_start is not None:
-                    timing_record["audited_start"] = audited_start.timing
-                elif failed_start_timing is not None:
-                    timing_record["audited_start"] = failed_start_timing
-                if result is not None:
-                    timing_record["rollout"] = result.timing
-                append_attempt_timing(output_root, timing_record)
-                print(
-                    f"TIMING outcome={outcome} "
-                    f"{_format_timing(attempt_timing)}",
-                    flush=True,
-                )
-                detail = _format_detail(audited_start, result)
-                if audited_start is None and failed_start_timing is not None:
-                    detail = (
-                        "start[attempts="
-                        f"{failed_start_timing.attempts} generate="
-                        f"{failed_start_timing.task_start_generation_seconds:.1f}s "
-                        "ground="
-                        f"{failed_start_timing.rgbd_grounding_seconds:.1f}s "
-                        "budget_audit="
-                        f"{failed_start_timing.static_goal_budget_audit_seconds:.1f}s]"
-                    )
-                if detail:
-                    print(f"TIMING_DETAIL {detail}", flush=True)
         elapsed = time.perf_counter() - started
         rate = successes / attempts_run
         print(
-            f"DONE successes={successes} "
-            f"attempts_run={attempts_run} "
-            f"attempt_budget={args.max_attempts} "
-            f"rate={rate:.3f} wall={elapsed:.1f}s",
+            f"DONE successes={successes} attempts_run={attempts_run} "
+            f"attempt_budget={args.max_attempts} rate={rate:.3f} "
+            f"wall={elapsed:.1f}s",
             flush=True,
         )
         if successes < args.max_success_episodes:
@@ -462,6 +931,14 @@ def main():
             client.set_camera_pitch(original_pose[3])
         finally:
             client.restore_player()
+
+
+def main():
+    args = _parse_args()
+    if args.grouped:
+        _run_grouped(args)
+    else:
+        _run_flat(args)
 
 
 if __name__ == "__main__":

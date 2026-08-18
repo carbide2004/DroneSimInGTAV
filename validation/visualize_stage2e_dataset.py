@@ -40,7 +40,7 @@ def _parse_args():
         type=Path,
         help=(
             "One successful episode directory or a batch directory "
-            "containing episode_* subdirectories"
+            "containing flat or scene-grouped episode_* subdirectories"
         ),
     )
     parser.add_argument("--interval-ms", type=int, default=250)
@@ -266,12 +266,12 @@ def discover_dataset_episodes(dataset):
     episodes = sorted(
         (
             path
-            for path in root.iterdir()
+            for path in root.rglob("episode_*")
             if path.is_dir()
-            and path.name.startswith("episode_")
             and not path.name.endswith(".partial")
+            and (path / "agent" / "steps.jsonl").is_file()
         ),
-        key=lambda path: path.name,
+        key=lambda path: path.relative_to(root).as_posix(),
     )
     if not episodes:
         raise RuntimeError(

@@ -134,12 +134,13 @@ Generate and replay successful dataset episodes:
 ```powershell
 python validation\generate_stage2e_experts.py `
   --anchor 234 324 100 `
-  --max-attempts 20 `
-  --max-success-episodes 5 `
-  --output-dir dataset\stage2e_fire
+  --scenario-count 5 `
+  --episodes-per-scenario 20 `
+  --max-attempts-per-scenario 40 `
+  --output-dir dataset\stage2e_fire_5x20
 
 python validation\visualize_stage2e_dataset.py `
-  dataset\stage2e_fire --loop
+  dataset\stage2e_fire_5x20 --loop
 ```
 
 `--max-steps` may audit a noncanonical budget explicitly. The chosen value is

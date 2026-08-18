@@ -10,6 +10,9 @@ import numpy as np
 from PIL import Image
 
 
+DEPTH_STORAGE_DTYPE = np.float16
+
+
 def _json_value(value):
     if dataclasses.is_dataclass(value):
         return {
@@ -90,6 +93,13 @@ class ExpertEpisodeRecorder:
         self._closed = False
 
     def write_metadata(self, agent, teacher, evaluation_truth):
+        agent = dict(agent)
+        agent["depth_storage"] = {
+            "dtype": np.dtype(DEPTH_STORAGE_DTYPE).name,
+            "units": "meters",
+            "encoding": "IEEE 754 binary16",
+            "lossy": True,
+        }
         for relative, payload in (
             ("agent/episode.json", agent),
             ("teacher/episode.json", teacher),
@@ -133,15 +143,22 @@ class ExpertEpisodeRecorder:
                 quality=self.jpeg_quality,
                 subsampling=0,
             )
+            depth = frame.depth_array()
+            if (
+                not np.isfinite(depth).all()
+                or np.any(depth < 0.0)
+                or np.any(depth > np.finfo(DEPTH_STORAGE_DTYPE).max)
+            ):
+                raise RuntimeError(
+                    f"{name} depth cannot be represented as finite "
+                    "non-negative float16 metres"
+                )
             np.savez_compressed(
                 self.partial_path
                 / "agent"
                 / "depth"
                 / f"{stem}_{name}.npz",
-                depth=frame.depth_array().astype(
-                    np.float32,
-                    copy=False,
-                ),
+                depth=depth.astype(DEPTH_STORAGE_DTYPE),
             )
         agent_record = {
             "step_index": step_index,
