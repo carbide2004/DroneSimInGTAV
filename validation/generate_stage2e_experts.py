@@ -268,6 +268,21 @@ def _rounded(values):
 
 
 def _blueprint_signature(snapshot):
+    # Only immutable blueprint-determined identity may appear here. A scene is
+    # rebuilt or reused across attempts, and by the time a later attempt runs
+    # its Prepare the responders of the previous attempt have already driven
+    # and fled, so any live kinematic field (position, heading, velocity,
+    # task_target, task_state) differs between two attempts that share the very
+    # same blueprint. Including such a field makes the signature compare the
+    # simulation state instead of the scene identity and turns every attempt
+    # after the first into a spurious SCENARIO_BLUEPRINT_SIGNATURE_MISMATCH.
+    # Spawn layout is already guarded plugin-side by reuse_blueprint(), which
+    # verifies the cached seed, anchor and actor capacity.
+    #
+    # event_id is likewise excluded: fire_scenario.cpp derives it as
+    # (scenario_id << 8) | 1, and scenario_id is a fresh per-Prepare runtime
+    # instance id, so it increments on every attempt even when the very same
+    # cached blueprint is reused. It identifies the run, not the scene.
     return {
         "event_position": _rounded(snapshot.event_position),
         "entities": [
@@ -276,17 +291,75 @@ def _blueprint_signature(snapshot):
                 "model_hash": int(entity.model_hash),
                 "kind": int(entity.kind),
                 "role": int(entity.role),
-                "event_id": int(entity.event_id),
-                "position": _rounded(entity.position),
-                "heading": round(float(entity.heading), 4),
                 "planned_activation_offset_ms": int(
                     entity.planned_activation_offset_ms
                 ),
-                "task_target": _rounded(entity.task_target),
             }
             for entity in snapshot.entities
         ],
     }
+
+
+def _signature_difference(expected, actual, max_reported=6):
+    """Describe why two blueprint signatures differ, for diagnosis."""
+    if not isinstance(expected, dict) or not isinstance(actual, dict):
+        return f"expected type {type(expected).__name__}, got {type(actual).__name__}"
+    notes = []
+    expected_keys = set(expected)
+    actual_keys = set(actual)
+    if expected_keys != actual_keys:
+        missing = sorted(expected_keys - actual_keys)
+        added = sorted(actual_keys - expected_keys)
+        notes.append(
+            "top-level keys differ"
+            + (f" missing={missing}" if missing else "")
+            + (f" unexpected={added}" if added else "")
+            + " (a manifest written by an older signature format cannot be "
+            "compared; restart the collection or migrate the manifest)"
+        )
+        return "; ".join(notes)
+    if expected.get("event_position") != actual.get("event_position"):
+        notes.append(
+            f"event_position expected={expected.get('event_position')} "
+            f"actual={actual.get('event_position')}"
+        )
+    expected_entities = expected.get("entities") or []
+    actual_entities = actual.get("entities") or []
+    if len(expected_entities) != len(actual_entities):
+        notes.append(
+            f"entity count expected={len(expected_entities)} "
+            f"actual={len(actual_entities)}"
+        )
+    field_totals = {}
+    examples = []
+    for index, (left, right) in enumerate(
+        zip(expected_entities, actual_entities)
+    ):
+        for key in sorted(set(left) | set(right)):
+            before = left.get(key)
+            after = right.get(key)
+            if before != after:
+                field_totals[key] = field_totals.get(key, 0) + 1
+                if len(examples) < max_reported:
+                    examples.append(
+                        f"entity[{index}].{key} expected={before} actual={after}"
+                    )
+    if field_totals:
+        notes.append(
+            "differing fields ["
+            + ", ".join(
+                f"{name}x{count}"
+                for name, count in sorted(
+                    field_totals.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
+            )
+            + "]"
+        )
+        notes.extend(examples)
+    if not notes:
+        notes.append("signatures compare unequal but no field difference found")
+    return "; ".join(notes)
 
 
 def _episode_complete(path):
@@ -525,7 +598,8 @@ def _run_attempt(
             if expected_signature is not None and signature != expected_signature:
                 raise CollectionInvariantError(
                     "SCENARIO_BLUEPRINT_SIGNATURE_MISMATCH: rebuilt or reused "
-                    "scene differs from dataset manifest"
+                    "scene differs from dataset manifest; "
+                    + _signature_difference(expected_signature, signature)
                 )
 
             phase = "lockstep_setup"
