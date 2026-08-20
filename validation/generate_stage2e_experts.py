@@ -14,6 +14,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from agent_control.dronesim_client import (  # noqa: E402
     DroneSimClient,
+    DroneSimCommandError,
     LockstepSession,
     OBLIQUE_PITCH_DEGREES,
 )
@@ -416,6 +417,12 @@ def _new_manifest(args):
                 "attempts_completed": 0,
                 "successes": 0,
                 "episodes": [],
+                # This id addresses the plugin's single-slot in-memory
+                # blueprint cache. Persist it so restarting this Python
+                # process can reuse the same cached blueprint instead of
+                # accidentally rebuilding a different set of GTA safe
+                # coordinates with blueprint_id=0.
+                "runtime_blueprint_id": None,
                 "blueprint_signature": None,
             }
         )
@@ -436,6 +443,36 @@ def _load_manifest(path):
     if payload.get("collection_type") != "stage2e_grouped_scenarios":
         raise RuntimeError("Output manifest is not a Stage 2E grouped collection")
     return payload
+
+
+def _recover_runtime_blueprint_id(scene_root, scene):
+    """Recover a pre-fix manifest's cache id from its newest episode."""
+    episode_names = scene.get("episodes") or []
+    if not episode_names:
+        return None
+    truth_path = (
+        Path(scene_root)
+        / episode_names[-1]
+        / "evaluation_truth"
+        / "episode.json"
+    )
+    try:
+        with truth_path.open("r", encoding="utf-8") as stream:
+            truth = json.load(stream)
+        blueprint_id = int(
+            truth["start_blueprint"]["scenario_blueprint_id"]
+        )
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        raise RuntimeError(
+            "Resume cannot recover runtime_blueprint_id from "
+            f"{truth_path}"
+        ) from error
+    if not 1 <= blueprint_id <= UINT64_MASK:
+        raise RuntimeError(
+            f"Resume found invalid runtime blueprint id {blueprint_id} "
+            f"in {truth_path}"
+        )
+    return blueprint_id
 
 
 def _validate_resume(output_root, manifest, args):
@@ -483,6 +520,20 @@ def _validate_resume(output_root, manifest, args):
         attempts = int(scene.get("attempts_completed", -1))
         if not 0 <= attempts <= args.max_attempts_per_scenario:
             raise RuntimeError("Grouped manifest attempt count is invalid")
+        runtime_blueprint_id = scene.get("runtime_blueprint_id")
+        if runtime_blueprint_id is None:
+            # Backward compatibility for manifests created before this field
+            # was persisted. Successful episode truth already contains the
+            # exact plugin cache id that created the scene.
+            runtime_blueprint_id = _recover_runtime_blueprint_id(
+                scene_root,
+                scene,
+            )
+            scene["runtime_blueprint_id"] = runtime_blueprint_id
+        elif not 1 <= int(runtime_blueprint_id) <= UINT64_MASK:
+            raise RuntimeError(
+                "Grouped manifest runtime blueprint id is invalid"
+            )
 
 
 def _prepare_grouped_output(args):
@@ -495,6 +546,9 @@ def _prepare_grouped_output(args):
             )
         manifest = _load_manifest(manifest_path)
         _validate_resume(output_root, manifest, args)
+        # _validate_resume may migrate an older manifest by recovering the
+        # runtime blueprint cache id from its newest completed episode.
+        _atomic_json(manifest_path, manifest)
     else:
         if output_root.exists() and any(output_root.iterdir()):
             raise FileExistsError(
@@ -789,21 +843,42 @@ def _run_attempt(
 
 
 def _prepare_ready(client, args, scenario_seed, blueprint_id):
-    scenario_id = client.prepare_fire_scenario(
-        args.anchor,
-        seed=scenario_seed,
-        firetruck_count=args.firetrucks,
-        pedestrian_count=args.pedestrians,
-        blueprint_id=blueprint_id,
-    )
-    try:
-        return client.wait_scenario_ready(
-            scenario_id,
-            timeout=args.prepare_timeout,
+    def prepare(requested_blueprint_id):
+        scenario_id = client.prepare_fire_scenario(
+            args.anchor,
+            seed=scenario_seed,
+            firetruck_count=args.firetrucks,
+            pedestrian_count=args.pedestrians,
+            blueprint_id=requested_blueprint_id,
         )
-    except BaseException:
-        client.reset_scenario(scenario_id)
-        raise
+        try:
+            return client.wait_scenario_ready(
+                scenario_id,
+                timeout=args.prepare_timeout,
+            )
+        except BaseException:
+            client.reset_scenario(scenario_id)
+            raise
+
+    blueprint_id = int(blueprint_id)
+    if blueprint_id == 0:
+        return prepare(0)
+    try:
+        return prepare(blueprint_id)
+    except DroneSimCommandError as error:
+        if error.status_name != "SCENARIO_PREPARE_FAILED":
+            raise
+        # The plugin cache is deliberately single-slot and does not survive a
+        # GTA/plugin restart. A persisted runtime id therefore accelerates a
+        # Python-only resume but cannot be trusted as durable storage. Rebuild
+        # from the same anchor/seed when the slot is gone; the caller compares
+        # the rebuilt immutable signature before any episode is appended.
+        print(
+            "BLUEPRINT_CACHE_MISS "
+            f"requested={blueprint_id}; rebuilding from anchor and seed",
+            flush=True,
+        )
+        return prepare(0)
 
 
 def _start_seed_for_grouped_attempt(args, scene_index, attempt_index):
@@ -850,7 +925,9 @@ def _run_grouped(args):
             )
             scene["status"] = "IN_PROGRESS"
             _atomic_json(manifest_path, manifest)
-            runtime_blueprint_id = 0
+            runtime_blueprint_id = int(
+                scene.get("runtime_blueprint_id") or 0
+            )
             expected_signature = scene["blueprint_signature"]
             while (
                 int(scene["successes"]) < args.episodes_per_scenario
@@ -879,6 +956,7 @@ def _run_grouped(args):
                 )
                 if result["runtime_blueprint_id"] is not None:
                     runtime_blueprint_id = result["runtime_blueprint_id"]
+                    scene["runtime_blueprint_id"] = runtime_blueprint_id
                 if expected_signature is None and result["blueprint_signature"]:
                     expected_signature = result["blueprint_signature"]
                     scene["blueprint_signature"] = expected_signature
