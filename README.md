@@ -106,7 +106,9 @@ python -m pip install -r agent_control\requirements.txt
 Start GTA V, load Story Mode, and press `F10` to create the scripted camera.
 The plugin listens on `127.0.0.5:23456`. Press `F11` for emergency cleanup and
 return to the player. Manual inspection controls are `W/A/S/D`, `Z/C` for
-vertical motion, `Q/E` for yaw, and `F9` for the current world pose.
+vertical motion, `Q/E` for yaw, and `F9` for the current world pose. While the
+manual camera is active, `F8` appends its current XYZ position to
+`<GTA V>\data\DroneSim_anchors.jsonl` for later multi-location collection.
 
 ### 2. Check the RGB-D runtime
 
@@ -148,27 +150,32 @@ Only successful episodes retain their RGB-D payloads. Online depth remains
 `float32`; the dataset writer stores metre-valued `float16` depth to reduce
 disk use without cropping or downsampling:
 
+First fly the manual camera to each desired location and press `F8` once. Then
+collect, for example, one scene and five successful starts per saved anchor:
+
 ```powershell
 python validation\generate_stage2e_experts.py `
-  --anchor 234 324 100 `
-  --scenario-count 5 `
-  --episodes-per-scenario 20 `
-  --max-attempts-per-scenario 40 `
-  --output-dir dataset\stage2e_fire_5x20
+  --anchor-file "C:\path\to\Grand Theft Auto V\data\DroneSim_anchors.jsonl" `
+  --scenes-per-anchor 1 `
+  --starts-per-scene 5 `
+  --max-attempts-per-scenario 15 `
+  --output-dir dataset\stage2e_multi_anchor
 ```
 
-This creates five seed-distinct immutable scenario blueprints and requires 20
-successful episodes from each; a scene that exhausts its own attempt budget is
-not filled with episodes from another scene. Startup prints a conservative
-payload/free-space estimate. Resume an interrupted collection with the exact
-same arguments plus `--resume`; completed episodes and the rebuilt blueprint
-signature are verified before new payload is appended.
+`--scenario-count` and `--episodes-per-scenario` remain supported aliases for
+`--scenes-per-anchor` and `--starts-per-scene`. Each anchor gets its own
+seed-distinct immutable scenario blueprints and each scene has an independent
+success quota and attempt budget; a scene that exhausts its budget is not filled
+from another location. A single coordinate can still be supplied with
+`--anchor X Y Z`. Startup prints a conservative payload/free-space estimate.
+Resume an interrupted collection with the exact same arguments plus `--resume`;
+completed episodes and the blueprint signature are verified before appending.
 
 Play every retained episode in order:
 
 ```powershell
 python validation\visualize_stage2e_dataset.py `
-  dataset\stage2e_fire_5x20 --loop
+  dataset\stage2e_multi_anchor --loop
 ```
 
 The player does not connect to GTA and does not load metric depth. `Space`
@@ -177,7 +184,7 @@ changes episode, and `Q` closes the window. Batch timing can be summarized
 without creating another artifact:
 
 ```powershell
-python validation\summarize_stage2e_timings.py dataset\stage2e_fire_5x20
+python validation\summarize_stage2e_timings.py dataset\stage2e_multi_anchor
 ```
 
 Dataset schema and recording behavior are documented in

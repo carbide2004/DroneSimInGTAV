@@ -11,6 +11,9 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="anchor_store.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="camera.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -46,6 +49,9 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="anchor_store.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="camera.h">
       <Filter>Header Files</Filter>
     </ClInclude>

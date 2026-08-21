@@ -1,5 +1,6 @@
 #include "script.h"
 
+#include "anchor_store.h"
 #include "camera.h"
 #include "command_queue.h"
 #include "keyboard.h"
@@ -16,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <exception>
+#include <filesystem>
 #include <string>
 #include <utility>
 
@@ -726,6 +728,40 @@ void process_manual_camera_controls() {
 
 void process_keyboard() {
     std::string error;
+    if (F8.consume_press()) {
+        if (SimulationClock::instance().is_active()) {
+            show_notification(
+                "F8 anchor save is disabled while lockstep is active");
+        } else {
+            RuntimePose pose;
+            if (!CameraController::instance().get_pose(pose, error)) {
+                show_notification(
+                    "DroneSim camera is inactive; press F10 first");
+            } else {
+                std::filesystem::path output_path;
+                if (!append_camera_anchor(pose, output_path, error)) {
+                    LOGE("script", "F8 anchor save failed: " + error);
+                    show_notification(
+                        "DroneSim anchor save failed: " + error);
+                } else {
+                    char text[256]{};
+                    std::snprintf(
+                        text,
+                        sizeof(text),
+                        "Saved anchor %.2f %.2f %.2f to "
+                        "data/DroneSim_anchors.jsonl",
+                        pose.x,
+                        pose.y,
+                        pose.z);
+                    show_notification(text);
+                    LOGI(
+                        "script",
+                        std::string(text) + " (" +
+                            output_path.string() + ")");
+                }
+            }
+        }
+    }
     if (F9.consume_press()) {
         RuntimePose pose;
         if (CameraController::instance().get_pose(pose, error)) {

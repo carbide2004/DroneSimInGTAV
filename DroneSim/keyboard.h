@@ -18,6 +18,7 @@ private:
     std::atomic<bool> down_{false};
 };
 
+extern KeyState F8;
 extern KeyState F9;
 extern KeyState F10;
 extern KeyState F11;

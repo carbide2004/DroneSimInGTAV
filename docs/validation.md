@@ -132,15 +132,16 @@ python validation\visualize_stage2e_trajectory.py `
 Generate and replay successful dataset episodes:
 
 ```powershell
+# In manual camera mode, press F8 at each desired location first.
 python validation\generate_stage2e_experts.py `
-  --anchor 234 324 100 `
-  --scenario-count 5 `
-  --episodes-per-scenario 20 `
-  --max-attempts-per-scenario 40 `
-  --output-dir dataset\stage2e_fire_5x20
+  --anchor-file "C:\path\to\Grand Theft Auto V\data\DroneSim_anchors.jsonl" `
+  --scenes-per-anchor 1 `
+  --starts-per-scene 5 `
+  --max-attempts-per-scenario 15 `
+  --output-dir dataset\stage2e_multi_anchor
 
 python validation\visualize_stage2e_dataset.py `
-  dataset\stage2e_fire_5x20 --loop
+  dataset\stage2e_multi_anchor --loop
 ```
 
 `--max-steps` may audit a noncanonical budget explicitly. The chosen value is

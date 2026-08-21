@@ -145,6 +145,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="anchor_store.cpp" />
     <ClCompile Include="camera.cpp" />
     <ClCompile Include="command_queue.cpp" />
     <ClCompile Include="entity_registry.cpp" />
@@ -163,6 +164,7 @@
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="anchor_store.h" />
     <ClInclude Include="camera.h" />
     <ClInclude Include="command_queue.h" />
     <ClInclude Include="entity_registry.h" />

@@ -1,5 +1,6 @@
 #include "keyboard.h"
 
+KeyState F8;
 KeyState F9;
 KeyState F10;
 KeyState F11;
@@ -59,6 +60,8 @@ void OnKeyboardMessage(
         MoveDown.set_down(!is_up_now);
     } else if (was_down_before || is_up_now) {
         return;
+    } else if (key == VK_F8) {
+        F8.push();
     } else if (key == VK_F9) {
         F9.push();
     } else if (key == VK_F10) {

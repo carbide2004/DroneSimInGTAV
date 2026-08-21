@@ -33,12 +33,74 @@ from agent_control.task_starts import (  # noqa: E402
 )
 
 
-COLLECTION_SCHEMA_VERSION = 1
+COLLECTION_SCHEMA_VERSION = 2
 UINT64_MASK = 0xFFFFFFFFFFFFFFFF
 
 
 class CollectionInvariantError(RuntimeError):
     pass
+
+
+def _load_anchor_file(path):
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Anchor file does not exist: {path}")
+    anchors = []
+    with path.open("r", encoding="utf-8") as stream:
+        for line_number, raw_line in enumerate(stream, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"Invalid JSON at {path}:{line_number}: {error.msg}"
+                ) from error
+            if isinstance(record, dict) and all(
+                name in record for name in ("x", "y", "z")
+            ):
+                values = (record["x"], record["y"], record["z"])
+            elif isinstance(record, dict) and "position" in record:
+                values = record["position"]
+            elif isinstance(record, list):
+                values = record
+            else:
+                raise ValueError(
+                    f"Anchor at {path}:{line_number} must contain x/y/z"
+                )
+            if (
+                not isinstance(values, (list, tuple))
+                or len(values) != 3
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    for value in values
+                )
+            ):
+                raise ValueError(
+                    f"Anchor at {path}:{line_number} must contain three "
+                    "JSON numbers"
+                )
+            try:
+                anchor = tuple(float(value) for value in values)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise ValueError(
+                    f"Anchor at {path}:{line_number} is not numeric"
+                ) from error
+            if not all(math.isfinite(value) for value in anchor):
+                raise ValueError(
+                    f"Anchor at {path}:{line_number} must contain three "
+                    "finite coordinates"
+                )
+            if anchor in anchors:
+                raise ValueError(
+                    f"Duplicate anchor at {path}:{line_number}: {anchor}"
+                )
+            anchors.append(anchor)
+    if not anchors:
+        raise ValueError(f"Anchor file contains no coordinates: {path}")
+    return tuple(anchors)
 
 
 def _parse_args():
@@ -48,12 +110,21 @@ def _parse_args():
             "Only successful episodes retain RGB-D payloads."
         )
     )
-    parser.add_argument(
+    anchor_group = parser.add_mutually_exclusive_group(required=True)
+    anchor_group.add_argument(
         "--anchor",
         type=float,
         nargs=3,
-        required=True,
         metavar=("X", "Y", "Z"),
+        help="One anchor coordinate (legacy/single-anchor mode)",
+    )
+    anchor_group.add_argument(
+        "--anchor-file",
+        type=Path,
+        help=(
+            "JSONL anchor list written by the ASI F8 hotkey; each row is "
+            "{\"x\":...,\"y\":...,\"z\":...}"
+        ),
     )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--start-seed", type=int, default=1)
@@ -85,16 +156,23 @@ def _parse_args():
     parser.add_argument("--max-success-episodes", type=int)
     parser.add_argument(
         "--scenario-count",
+        "--scenes-per-anchor",
+        dest="scenario_count",
         type=int,
         help=(
-            "Enable grouped collection with this many seed-distinct "
-            "scenario blueprints at one anchor"
+            "Seed-distinct scenario blueprints created for every anchor "
+            "(--scenes-per-anchor is the clearer alias)"
         ),
     )
     parser.add_argument(
         "--episodes-per-scenario",
+        "--starts-per-scene",
+        dest="episodes_per_scenario",
         type=int,
-        help="Successful episode quota for each grouped scenario",
+        help=(
+            "Successful start/episode quota for every scene "
+            "(--starts-per-scene is the clearer alias)"
+        ),
     )
     parser.add_argument(
         "--max-attempts-per-scenario",
@@ -127,8 +205,15 @@ def _parse_args():
     parser.add_argument("--port", type=int, default=23456)
     args = parser.parse_args()
 
-    if not all(math.isfinite(value) for value in args.anchor):
-        parser.error("--anchor values must be finite")
+    if args.anchor is not None:
+        if not all(math.isfinite(value) for value in args.anchor):
+            parser.error("--anchor values must be finite")
+        args.anchors = (tuple(float(value) for value in args.anchor),)
+    else:
+        try:
+            args.anchors = _load_anchor_file(args.anchor_file)
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
     if not 0 <= args.seed <= UINT64_MASK:
         parser.error("--seed must fit uint64")
     if not 0 <= args.start_seed <= UINT64_MASK:
@@ -160,6 +245,11 @@ def _parse_args():
             "together"
         )
     args.grouped = args.scenario_count is not None
+    if len(args.anchors) > 1 and not args.grouped:
+        parser.error(
+            "--anchor-file with multiple coordinates requires grouped "
+            "--scenario-count/--episodes-per-scenario"
+        )
     if args.grouped:
         if args.max_success_episodes is not None:
             parser.error(
@@ -390,10 +480,13 @@ def _atomic_json(path, payload):
 
 def _manifest_config(args):
     return {
-        "anchor": [float(value) for value in args.anchor],
+        "anchors": [
+            [float(value) for value in anchor]
+            for anchor in args.anchors
+        ],
+        "scenes_per_anchor": int(args.scenario_count),
         "scenario_seed_base": int(args.seed),
         "start_seed_base": int(args.start_seed),
-        "scenario_count": int(args.scenario_count),
         "episodes_per_scenario": int(args.episodes_per_scenario),
         "max_attempts_per_scenario": int(args.max_attempts_per_scenario),
         "start_attempts": int(args.start_attempts),
@@ -406,26 +499,34 @@ def _manifest_config(args):
 
 def _new_manifest(args):
     scenes = []
-    for scene_index in range(args.scenario_count):
-        scenario_seed = (int(args.seed) + scene_index) & UINT64_MASK
-        scenes.append(
-            {
-                "scene_index": scene_index,
-                "scenario_seed": scenario_seed,
-                "directory": f"scene_{scene_index:03d}_seed_{scenario_seed}",
-                "status": "PENDING",
-                "attempts_completed": 0,
-                "successes": 0,
-                "episodes": [],
-                # This id addresses the plugin's single-slot in-memory
-                # blueprint cache. Persist it so restarting this Python
-                # process can reuse the same cached blueprint instead of
-                # accidentally rebuilding a different set of GTA safe
-                # coordinates with blueprint_id=0.
-                "runtime_blueprint_id": None,
-                "blueprint_signature": None,
-            }
-        )
+    for anchor_index, anchor in enumerate(args.anchors):
+        for scene_in_anchor in range(args.scenario_count):
+            scene_index = anchor_index * args.scenario_count + scene_in_anchor
+            scenario_seed = (int(args.seed) + scene_index) & UINT64_MASK
+            scenes.append(
+                {
+                    "scene_index": scene_index,
+                    "anchor_index": anchor_index,
+                    "scene_in_anchor": scene_in_anchor,
+                    "anchor": [float(value) for value in anchor],
+                    "scenario_seed": scenario_seed,
+                    "directory": (
+                        f"anchor_{anchor_index:03d}/"
+                        f"scene_{scene_in_anchor:03d}_seed_{scenario_seed}"
+                    ),
+                    "status": "PENDING",
+                    "attempts_completed": 0,
+                    "successes": 0,
+                    "episodes": [],
+                    # This id addresses the plugin's single-slot in-memory
+                    # blueprint cache. Persist it so restarting this Python
+                    # process can reuse the same cached blueprint instead of
+                    # accidentally rebuilding a different set of GTA safe
+                    # coordinates with blueprint_id=0.
+                    "runtime_blueprint_id": None,
+                    "blueprint_signature": None,
+                }
+            )
     return {
         "schema_version": COLLECTION_SCHEMA_VERSION,
         "collection_type": "stage2e_grouped_scenarios",
@@ -438,7 +539,23 @@ def _new_manifest(args):
 def _load_manifest(path):
     with Path(path).open("r", encoding="utf-8") as stream:
         payload = json.load(stream)
-    if payload.get("schema_version") != COLLECTION_SCHEMA_VERSION:
+    schema_version = payload.get("schema_version")
+    if schema_version == 1:
+        config = payload.get("config") or {}
+        anchor = config.pop("anchor", None)
+        scenes_per_anchor = config.pop("scenario_count", None)
+        if anchor is None or scenes_per_anchor is None:
+            raise RuntimeError(
+                "Legacy grouped manifest lacks anchor/scenario_count"
+            )
+        config["anchors"] = [anchor]
+        config["scenes_per_anchor"] = scenes_per_anchor
+        for scene_index, scene in enumerate(payload.get("scenes") or []):
+            scene["anchor_index"] = 0
+            scene["scene_in_anchor"] = scene_index
+            scene["anchor"] = list(anchor)
+        payload["schema_version"] = COLLECTION_SCHEMA_VERSION
+    elif schema_version != COLLECTION_SCHEMA_VERSION:
         raise RuntimeError("Unsupported grouped collection manifest schema")
     if payload.get("collection_type") != "stage2e_grouped_scenarios":
         raise RuntimeError("Output manifest is not a Stage 2E grouped collection")
@@ -482,8 +599,12 @@ def _validate_resume(output_root, manifest, args):
             "Resume configuration does not exactly match dataset_manifest.json"
         )
     scenes = manifest.get("scenes")
-    if not isinstance(scenes, list) or len(scenes) != args.scenario_count:
-        raise RuntimeError("Grouped manifest scene table is invalid")
+    expected_scene_count = len(args.anchors) * args.scenario_count
+    if not isinstance(scenes, list) or len(scenes) != expected_scene_count:
+        raise RuntimeError(
+            "Grouped manifest scene table does not match "
+            "anchors * scenes_per_anchor"
+        )
     partials = sorted(output_root.rglob("*.partial"))
     if partials:
         raise RuntimeError(
@@ -494,6 +615,19 @@ def _validate_resume(output_root, manifest, args):
     for expected_index, scene in enumerate(scenes):
         if int(scene.get("scene_index", -1)) != expected_index:
             raise RuntimeError("Grouped manifest scene indices are invalid")
+        anchor_index = expected_index // args.scenario_count
+        scene_in_anchor = expected_index % args.scenario_count
+        expected_anchor = [
+            float(value) for value in args.anchors[anchor_index]
+        ]
+        if (
+            int(scene.get("anchor_index", -1)) != anchor_index
+            or int(scene.get("scene_in_anchor", -1)) != scene_in_anchor
+            or scene.get("anchor") != expected_anchor
+        ):
+            raise RuntimeError(
+                "Grouped manifest scene-to-anchor mapping is invalid"
+            )
         scene_root = output_root / scene["directory"]
         episode_names = scene.get("episodes")
         if not isinstance(episode_names, list):
@@ -558,14 +692,17 @@ def _prepare_grouped_output(args):
         output_root.mkdir(parents=True, exist_ok=True)
         manifest = _new_manifest(args)
         for scene in manifest["scenes"]:
-            (output_root / scene["directory"]).mkdir()
+            (output_root / scene["directory"]).mkdir(
+                parents=True,
+                exist_ok=False,
+            )
         _atomic_json(manifest_path, manifest)
     return output_root, manifest_path, manifest
 
 
 def _check_disk_budget(output_root, manifest, args):
     complete = sum(int(scene["successes"]) for scene in manifest["scenes"])
-    requested = args.scenario_count * args.episodes_per_scenario
+    requested = len(manifest["scenes"]) * args.episodes_per_scenario
     remaining = requested - complete
     estimated_payload = remaining * args.estimated_mib_per_episode * 1024**2
     reserve = args.minimum_free_gib * 1024**3
@@ -608,6 +745,7 @@ def _run_attempt(
     start_seed,
     attempt_index,
     success_index,
+    anchor=None,
     runtime_blueprint_id=0,
     expected_signature=None,
     scene_index=None,
@@ -634,7 +772,10 @@ def _run_attempt(
                 + (
                     ""
                     if scene_index is None
-                    else f"scene={scene_index + 1}/{args.scenario_count} "
+                    else (
+                        f"scene={scene_index + 1}/"
+                        f"{len(args.anchors) * args.scenario_count} "
+                    )
                 )
                 + f"index={attempt_index + 1} scenario_seed={scenario_seed} "
                 f"start_seed={start_seed} blueprint={runtime_blueprint_id}",
@@ -644,6 +785,7 @@ def _run_attempt(
                 _prepare_ready,
                 client,
                 args,
+                args.anchors[0] if anchor is None else anchor,
                 scenario_seed,
                 runtime_blueprint_id,
             )
@@ -842,10 +984,10 @@ def _run_attempt(
     }
 
 
-def _prepare_ready(client, args, scenario_seed, blueprint_id):
+def _prepare_ready(client, args, anchor, scenario_seed, blueprint_id):
     def prepare(requested_blueprint_id):
         scenario_id = client.prepare_fire_scenario(
-            args.anchor,
+            anchor,
             seed=scenario_seed,
             firetruck_count=args.firetrucks,
             pedestrian_count=args.pedestrians,
@@ -907,15 +1049,30 @@ def _run_grouped(args):
     try:
         client.set_time(12, 0, 0)
         client.set_weather("EXTRASUNNY")
-        client.teleport_player(*args.anchor)
+        current_anchor_index = None
+        total_scene_count = len(manifest["scenes"])
         for scene in manifest["scenes"]:
             scene_index = int(scene["scene_index"])
+            anchor_index = int(scene["anchor_index"])
+            scene_in_anchor = int(scene["scene_in_anchor"])
+            anchor = tuple(float(value) for value in scene["anchor"])
+            if anchor_index != current_anchor_index:
+                client.teleport_player(*anchor)
+                current_anchor_index = anchor_index
+                print(
+                    "ANCHOR_START "
+                    f"anchor={anchor_index + 1}/{len(args.anchors)} "
+                    f"position={anchor}",
+                    flush=True,
+                )
             if int(scene["successes"]) >= args.episodes_per_scenario:
                 scene["status"] = "COMPLETE"
                 continue
             print(
                 "SCENE_START "
-                f"scene={scene_index + 1}/{args.scenario_count} "
+                f"anchor={anchor_index + 1}/{len(args.anchors)} "
+                f"scene={scene_in_anchor + 1}/{args.scenario_count} "
+                f"global_scene={scene_index + 1}/{total_scene_count} "
                 f"seed={scene['scenario_seed']} "
                 f"successes={scene['successes']}/"
                 f"{args.episodes_per_scenario} "
@@ -950,6 +1107,7 @@ def _run_grouped(args):
                     start_seed,
                     attempt_index,
                     int(scene["successes"]),
+                    anchor=anchor,
                     runtime_blueprint_id=runtime_blueprint_id,
                     expected_signature=expected_signature,
                     scene_index=scene_index,
@@ -966,7 +1124,8 @@ def _run_grouped(args):
                     scene["episodes"].append(result["episode_name"])
                 print(
                     "SCENE_PROGRESS "
-                    f"scene={scene_index + 1}/{args.scenario_count} "
+                    f"anchor={anchor_index + 1}/{len(args.anchors)} "
+                    f"scene={scene_in_anchor + 1}/{args.scenario_count} "
                     f"successes={scene['successes']}/"
                     f"{args.episodes_per_scenario} "
                     f"attempts={scene['attempts_completed']}/"
@@ -990,11 +1149,13 @@ def _run_grouped(args):
         total_successes = sum(
             int(scene["successes"]) for scene in manifest["scenes"]
         )
+        total_scene_count = len(manifest["scenes"])
         print(
             "DONE_GROUPED "
-            f"scenes={args.scenario_count - len(incomplete)}/"
-            f"{args.scenario_count} episodes={total_successes}/"
-            f"{args.scenario_count * args.episodes_per_scenario} "
+            f"anchors={len(args.anchors)} "
+            f"scenes={total_scene_count - len(incomplete)}/"
+            f"{total_scene_count} episodes={total_successes}/"
+            f"{total_scene_count * args.episodes_per_scenario} "
             f"wall={time.perf_counter() - collection_started:.1f}s",
             flush=True,
         )
@@ -1034,7 +1195,7 @@ def _run_flat(args):
     try:
         client.set_time(12, 0, 0)
         client.set_weather("EXTRASUNNY")
-        client.teleport_player(*args.anchor)
+        client.teleport_player(*args.anchors[0])
         for attempt in range(args.max_attempts):
             if successes >= args.max_success_episodes:
                 break

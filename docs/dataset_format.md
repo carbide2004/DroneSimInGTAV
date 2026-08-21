@@ -13,33 +13,52 @@ its `.partial` directory must be new. Using a fresh root per collection run is
 recommended. Dataset and recording roots are ignored by Git because RGB-D
 collections can grow quickly.
 
-Grouped collection mode stores a `dataset_manifest.json` and one directory per
-fixed scenario blueprint. Each scene has an independent success quota and
-attempt budget. A later `--resume` validates the collection configuration,
-every completed episode, absence of partial payloads, and the blueprint
-signature rebuilt from the same anchor and seed before appending data. Runtime
-blueprint IDs are never trusted across GTA/plugin restarts.
+Grouped collection mode stores a `dataset_manifest.json` and directories
+organized by anchor and fixed scenario blueprint. The ASI manual camera saves
+anchor rows to `<GTA V>\data\DroneSim_anchors.jsonl` when `F8` is pressed; the
+generator reads that file with `--anchor-file`. `--scenes-per-anchor` controls
+the number of seed-distinct blueprints at each coordinate and
+`--starts-per-scene` controls the successful episode quota for each blueprint.
+The older names `--scenario-count` and `--episodes-per-scenario` are aliases.
+Each scene has an independent attempt budget.
+
+The anchor file is UTF-8 JSONL with one finite numeric XYZ record per line:
+
+```json
+{"x":234.123456,"y":324.123456,"z":100.123456}
+```
+
+Blank lines are ignored. Malformed records and duplicate coordinates are
+rejected before the generator connects to GTA.
+
+A later `--resume` validates the collection configuration, every completed
+episode, absence of partial payloads, and the immutable blueprint signature.
+The plugin's runtime blueprint ID is persisted to accelerate a Python-only
+resume, but a GTA/plugin restart triggers a same-anchor/same-seed rebuild and
+signature check before any payload is appended.
 
 ## Batch layout
 
 ```text
 stage2e_fire/
   dataset_manifest.json
-  scene_000_seed_1/
-    episode_0000_attempt_0000_start_<id>/
-      agent/
-        episode.json
-        steps.jsonl
-        rgb/
-        depth/
-      teacher/
-        episode.json
-        awareness.jsonl
-        beliefs.npz
-      evaluation_truth/
-        episode.json
-        steps.jsonl
-  scene_001_seed_2/
+  anchor_000/
+    scene_000_seed_1/
+      episode_0000_attempt_0000_start_<id>/
+        agent/
+          episode.json
+          steps.jsonl
+          rgb/
+          depth/
+        teacher/
+          episode.json
+          awareness.jsonl
+          beliefs.npz
+        evaluation_truth/
+          episode.json
+          steps.jsonl
+    scene_001_seed_2/
+  anchor_001/
   ...
   failures.jsonl
   timings.jsonl
@@ -108,7 +127,7 @@ The dataset visualizer accepts either one successful episode directory or the
 batch root:
 
 ```powershell
-python validation\visualize_stage2e_dataset.py dataset\stage2e_fire
+python validation\visualize_stage2e_dataset.py dataset\stage2e_multi_anchor
 ```
 
 It joins the agent, teacher, truth, and belief streams, but deliberately does
@@ -132,5 +151,5 @@ candidate ordering or task semantics.
 Summarize a completed batch with:
 
 ```powershell
-python validation\summarize_stage2e_timings.py dataset\stage2e_fire
+python validation\summarize_stage2e_timings.py dataset\stage2e_multi_anchor
 ```
