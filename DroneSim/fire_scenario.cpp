@@ -30,6 +30,8 @@ constexpr std::array<std::array<float, 2>, 4>
         {{50.0f, 65.0f}},
     }};
 constexpr float kPedestrianMaximumVerticalOffsetMeters = 12.0f;
+constexpr float kPedestrianMaximumRoadNodeDistanceMeters = 20.0f;
+constexpr float kPedestrianMaximumRoadLayerOffsetMeters = 3.0f;
 constexpr float kFireTruckSpeedMetersPerSecond = 12.0f;
 constexpr float kFireTruckStopRangeMeters = 10.0f;
 constexpr float kPedestrianFleeDistanceMeters = 120.0f;
@@ -250,6 +252,8 @@ ScenarioOperationStatus FireScenario::prepare(
     placement_attempts_ = 0;
     pedestrian_query_failures_ = 0;
     pedestrian_bounds_rejections_ = 0;
+    pedestrian_road_query_failures_ = 0;
+    pedestrian_road_layer_rejections_ = 0;
     pedestrian_duplicate_rejections_ = 0;
 
     lifecycle_ = ScenarioLifecycle::Preparing;
@@ -677,6 +681,10 @@ bool FireScenario::resolve_pedestrian_spawns(
                 std::to_string(pedestrian_query_failures_) +
                 ", bounds_rejections=" +
                 std::to_string(pedestrian_bounds_rejections_) +
+                ", road_query_failures=" +
+                std::to_string(pedestrian_road_query_failures_) +
+                ", road_layer_rejections=" +
+                std::to_string(pedestrian_road_layer_rejections_) +
                 ", duplicate_rejections=" +
                 std::to_string(pedestrian_duplicate_rejections_);
             return false;
@@ -689,70 +697,91 @@ bool FireScenario::resolve_pedestrian_spawns(
             event_position_.x + std::cos(angle) * radius;
         const float candidate_y =
             event_position_.y + std::sin(angle) * radius;
-        bool placed = false;
-        for (const BOOL sidewalk_only : {TRUE, FALSE}) {
-            Vector3 safe{};
-            if (!PATHFIND::GET_SAFE_COORD_FOR_PED(
-                    candidate_x,
-                    candidate_y,
-                    event_position_.z + 5.0f,
-                    sidewalk_only,
-                    &safe,
-                    0)) {
-                ++pedestrian_query_failures_;
-                continue;
-            }
-            const ScenarioVector3 position =
-                to_scenario_vector(safe);
-            const float dx = position.x - event_position_.x;
-            const float dy = position.y - event_position_.y;
-            const float horizontal_distance =
-                std::sqrt(dx * dx + dy * dy);
-            const float vertical_offset =
-                std::abs(position.z - event_position_.z);
-            if (horizontal_distance <
-                    kPedestrianDistanceBandsMeters[target_band][0] ||
-                horizontal_distance >
-                    kPedestrianDistanceBandsMeters[target_band][1] ||
-                vertical_offset >
-                    kPedestrianMaximumVerticalOffsetMeters) {
-                ++pedestrian_bounds_rejections_;
-                continue;
-            }
-            bool duplicate = false;
-            for (const auto& candidates :
-                 pedestrian_candidate_spawns_) {
-                duplicate = duplicate ||
-                    std::any_of(
-                        candidates.begin(),
-                        candidates.end(),
-                        [&](const SpawnPoint& point) {
-                            return distance_between(
-                                       position,
-                                       point.position) < 2.0f;
-                        });
-            }
-            if (duplicate) {
-                ++pedestrian_duplicate_rejections_;
-                continue;
-            }
-            // The model is assigned from the pre-drawn slot table once this
-            // candidate is actually selected, so accepting a candidate
-            // consumes no randomness here.
-            pedestrian_candidate_spawns_[target_band].push_back(
-                {
-                    position,
-                    heading_away_from(
-                        event_position_,
-                        position),
-                    0,
-                });
-            placement_attempts_ = 0;
-            placed = true;
-            break;
+        Vector3 safe{};
+        if (!PATHFIND::GET_SAFE_COORD_FOR_PED(
+                candidate_x,
+                candidate_y,
+                event_position_.z + 5.0f,
+                TRUE,
+                &safe,
+                0)) {
+            ++pedestrian_query_failures_;
+            continue;
         }
-        if (placed &&
-            pedestrian_candidate_spawns_[target_band].size() >=
+        const ScenarioVector3 position =
+            to_scenario_vector(safe);
+        const float dx = position.x - event_position_.x;
+        const float dy = position.y - event_position_.y;
+        const float horizontal_distance =
+            std::sqrt(dx * dx + dy * dy);
+        const float vertical_offset =
+            std::abs(position.z - event_position_.z);
+        if (horizontal_distance <
+                kPedestrianDistanceBandsMeters[target_band][0] ||
+            horizontal_distance >
+                kPedestrianDistanceBandsMeters[target_band][1] ||
+            vertical_offset >
+                kPedestrianMaximumVerticalOffsetMeters) {
+            ++pedestrian_bounds_rejections_;
+            continue;
+        }
+
+        // GET_SAFE_COORD_FOR_PED accepts any loaded walkable navmesh,
+        // including roofs. Tie the candidate to the nearby road layer so
+        // civilians may use sidewalks and road shoulders without being
+        // placed on a building above the street.
+        Vector3 road_node{};
+        if (!PATHFIND::GET_CLOSEST_VEHICLE_NODE(
+                position.x,
+                position.y,
+                position.z,
+                &road_node,
+                1,
+                3.0f,
+                0.0f)) {
+            ++pedestrian_road_query_failures_;
+            continue;
+        }
+        const ScenarioVector3 road_position =
+            to_scenario_vector(road_node);
+        if (horizontal_distance_between(position, road_position) >
+                kPedestrianMaximumRoadNodeDistanceMeters ||
+            std::abs(position.z - road_position.z) >
+                kPedestrianMaximumRoadLayerOffsetMeters) {
+            ++pedestrian_road_layer_rejections_;
+            continue;
+        }
+
+        bool duplicate = false;
+        for (const auto& candidates :
+             pedestrian_candidate_spawns_) {
+            duplicate = duplicate ||
+                std::any_of(
+                    candidates.begin(),
+                    candidates.end(),
+                    [&](const SpawnPoint& point) {
+                        return distance_between(
+                                   position,
+                                   point.position) < 2.0f;
+                    });
+        }
+        if (duplicate) {
+            ++pedestrian_duplicate_rejections_;
+            continue;
+        }
+        // The model is assigned from the pre-drawn slot table once this
+        // candidate is actually selected, so accepting a candidate consumes
+        // no randomness here.
+        pedestrian_candidate_spawns_[target_band].push_back(
+            {
+                position,
+                heading_away_from(
+                    event_position_,
+                    position),
+                0,
+            });
+        placement_attempts_ = 0;
+        if (pedestrian_candidate_spawns_[target_band].size() >=
                 candidate_targets[target_band]) {
             return true;
         }
@@ -1821,6 +1850,8 @@ void FireScenario::cleanup_owned_resources() {
     placement_attempts_ = 0;
     pedestrian_query_failures_ = 0;
     pedestrian_bounds_rejections_ = 0;
+    pedestrian_road_query_failures_ = 0;
+    pedestrian_road_layer_rejections_ = 0;
     pedestrian_duplicate_rejections_ = 0;
     release_models();
     if (fire_ptfx_asset_requested_) {

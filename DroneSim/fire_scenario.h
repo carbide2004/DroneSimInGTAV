@@ -153,6 +153,8 @@ private:
     std::size_t placement_attempts_ = 0;
     std::size_t pedestrian_query_failures_ = 0;
     std::size_t pedestrian_bounds_rejections_ = 0;
+    std::size_t pedestrian_road_query_failures_ = 0;
+    std::size_t pedestrian_road_layer_rejections_ = 0;
     std::size_t pedestrian_duplicate_rejections_ = 0;
     std::uint32_t start_game_timer_ms_ = 0;
     std::uint32_t start_frame_count_ = 0;
