@@ -40,6 +40,8 @@ response types. See [Research direction](docs/research_direction.md).
 - a controlled fire scenario with immutable blueprints, staged responders,
   stable entity IDs, and structured evaluation truth;
 - geometry-based occlusion and visibility queries isolated from the agent;
+- reusable per-anchor source-shadow start pools, followed by per-scene
+  projected and real-RGB-D-certified start catalogs;
 - a cue-grounded expert that builds a belief from RGB-D responder tracks and
   produces replayable trajectories;
 - online stability, geometry, timing, visibility, and scenario validators.
@@ -51,9 +53,9 @@ response types. See [Research direction](docs/research_direction.md).
 | Observation | Synchronized oblique/nadir RGB-D and start-local odometry |
 | Hidden from agent | Event coordinates, GTA handles, world camera matrices, entity truth, and visibility truth |
 | Actions | `FORWARD`, `ASCEND`, `DESCEND`, `TURN_LEFT`, `TURN_RIGHT`, `HOLD`, `STOP` |
-| Motion | `2 m` translation or `15°` yaw; actions cannot be combined |
+| Motion | `1 m` translation or `15°` yaw; actions cannot be combined |
 | Time | Every action except `STOP` advances `250 ms`; inference wall time is frozen |
-| Default horizon | 65 actions including `STOP` |
+| Default horizon | 80 actions including `STOP` |
 | Success | Issue `STOP`, directly observe the fire-source vehicle, and estimate its start-local 3D position within `5 m` |
 
 The event is hidden in the initial observation. A valid dynamic cue requires
@@ -162,6 +164,30 @@ python validation\generate_stage2e_experts.py `
   --output-dir dataset\stage2e_multi_anchor
 ```
 
+Before creating a fresh grouped dataset, the generator audits every anchor once
+with a source-only static scene (`0` responders) and builds its source-shadow
+`start_pool.json`. The current deterministic pool samples 42--60 m radius in
+2 m increments, 25--60 m AGL, and dense azimuths inside ray-supported building
+shadows, then keeps at most 160 spatially distributed entries. Smoke-envelope
+visibility is recorded only as a diagnostic;
+start eligibility depends on occlusion of the fire-source vehicle. Anchors with
+too few static positions are removed from an `--anchor-file` atomically. An
+`UNKNOWN` protocol/load failure aborts without changing the file. No backup is
+created, so keep the source list elsewhere if it is valuable.
+
+For each requested scene slot, the generator then tries deterministic
+seed-distinct blueprints. `starts_per_scene` is the hard acceptance quota. The
+generator tries to certify up to `starts_per_scene + scene_catalog_reserve`
+starts through projected response visibility and a real dual-view RGB-D
+grounder check, but a reserve shortfall does not reject an otherwise usable
+scene. This catalog is
+built once, persisted in the schema-4 manifest, and every entry is attempted at
+most once. `--max-scene-seed-candidates` bounds scene replacement; protocol or
+capture errors stop collection instead of being misclassified as bad seeds.
+The expert treats a response-derived belief mode as a directional waypoint,
+executes one collision-checked strict-action chunk, then observes again; reaching
+the belief centroid is not treated as reaching the hidden event.
+
 `--scenario-count` and `--episodes-per-scenario` remain supported aliases for
 `--scenes-per-anchor` and `--starts-per-scene`. Each anchor gets its own
 seed-distinct immutable scenario blueprints and each scene has an independent
@@ -169,7 +195,16 @@ success quota and attempt budget; a scene that exhausts its budget is not filled
 from another location. A single coordinate can still be supplied with
 `--anchor X Y Z`. Startup prints a conservative payload/free-space estimate.
 Resume an interrupted collection with the exact same arguments plus `--resume`;
-completed episodes and the blueprint signature are verified before appending.
+completed episodes, schema-4 manifest, pool and scene-catalog digests, event position, static
+occlusion masks, and blueprint signature are verified before appending. Schema
+1/2/3 collections remain viewable but cannot be resumed by this generator.
+
+Validate one anchor's source-shadow pool online without saving payloads:
+
+```powershell
+python validation\validate_anchor_start_pool.py `
+  --anchor 234 324 100 --verify-seed-isolation
+```
 
 Play every retained episode in order:
 

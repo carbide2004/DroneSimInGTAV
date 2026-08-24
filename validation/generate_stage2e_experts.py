@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import time
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 
 
@@ -13,27 +14,51 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from agent_control.dronesim_client import (  # noqa: E402
+    CaptureError,
     DroneSimClient,
     DroneSimCommandError,
+    DroneSimProtocolError,
     LockstepSession,
     OBLIQUE_PITCH_DEGREES,
 )
 from agent_control.expert_episode import run_expert_episode  # noqa: E402
+from agent_control.expert_teacher import (  # noqa: E402
+    ExpertGenerationError,
+    SOURCE_STOP_MAX_HORIZONTAL_RANGE_METERS,
+    SOURCE_STOP_MIN_PROJECTED_SPAN_PIXELS,
+)
 from agent_control.expert_recording import (  # noqa: E402
     ExpertEpisodeRecorder,
     append_attempt_timing,
     append_failure,
 )
 from agent_control.expert_starts import (  # noqa: E402
+    certify_scene_start_catalog_rgbd,
     generate_audited_task_start,
+)
+from agent_control.scene_catalog import (  # noqa: E402
+    build_scene_start_catalog,
+    scene_catalog_from_json,
+    scene_catalog_to_json,
+)
+from agent_control.start_pool import (  # noqa: E402
+    START_POOL_MAX_ENTRIES,
+    build_static_start_pool,
+    load_pool,
+    revalidate_static_start_pool,
+    write_pool,
 )
 from agent_control.task_starts import (  # noqa: E402
     ObservationSpec,
+    TASK_FORWARD_STEP_METERS,
     TASK_HORIZON_STEPS,
+    TASK_VERTICAL_STEP_METERS,
+    TASK_YAW_STEP_DEGREES,
+    TaskStartGenerationError,
 )
 
 
-COLLECTION_SCHEMA_VERSION = 2
+COLLECTION_SCHEMA_VERSION = 4
 UINT64_MASK = 0xFFFFFFFFFFFFFFFF
 
 
@@ -132,13 +157,6 @@ def _parse_args():
     parser.add_argument("--pedestrians", type=int, default=32)
     parser.add_argument("--prepare-timeout", type=float, default=30.0)
     parser.add_argument(
-        "--start-audit-timeout",
-        type=float,
-        default=120.0,
-        help="Wall-clock limit for one lightweight start goal audit",
-    )
-    parser.add_argument("--start-attempts", type=int, default=16)
-    parser.add_argument(
         "--max-steps",
         type=int,
         default=TASK_HORIZON_STEPS,
@@ -180,6 +198,24 @@ def _parse_args():
         default=40,
     )
     parser.add_argument(
+        "--scene-catalog-reserve",
+        type=int,
+        default=4,
+        help=(
+            "Extra real-RGB-D starts the generator tries to certify beyond "
+            "the hard scene quota; shortfall does not reject the scene"
+        ),
+    )
+    parser.add_argument(
+        "--max-scene-seed-candidates",
+        type=int,
+        default=20,
+        help=(
+            "Maximum seed-distinct blueprints tried to fill each requested "
+            "scene slot"
+        ),
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help=(
@@ -212,6 +248,14 @@ def _parse_args():
     else:
         try:
             args.anchors = _load_anchor_file(args.anchor_file)
+            args.anchor_line_numbers = tuple(
+                line_number
+                for line_number, raw in enumerate(
+                    args.anchor_file.read_text(encoding="utf-8").splitlines(),
+                    1,
+                )
+                if raw.strip()
+            )
         except (OSError, ValueError) as error:
             parser.error(str(error))
     if not 0 <= args.seed <= UINT64_MASK:
@@ -224,12 +268,14 @@ def _parse_args():
         parser.error("--pedestrians must be in [0, 32]")
     if args.firetrucks + args.pedestrians == 0:
         parser.error("At least one response actor is required")
-    if not 1 <= args.start_attempts <= 256:
-        parser.error("--start-attempts must be in [1, 256]")
     if not 21 <= args.max_steps <= 256:
         parser.error("--max-steps must be in [21, 256]")
     if args.max_attempts <= 0:
         parser.error("--max-attempts must be positive")
+    if not 0 <= args.scene_catalog_reserve <= 64:
+        parser.error("--scene-catalog-reserve must be in [0, 64]")
+    if not 1 <= args.max_scene_seed_candidates <= 256:
+        parser.error("--max-scene-seed-candidates must be in [1, 256]")
     if not 1 <= args.jpeg_quality <= 95:
         parser.error("--jpeg-quality must be in [1, 95]")
 
@@ -258,8 +304,8 @@ def _parse_args():
             )
         if args.scenario_count <= 0:
             parser.error("--scenario-count must be positive")
-        if args.episodes_per_scenario <= 0:
-            parser.error("--episodes-per-scenario must be positive")
+        if not 1 <= args.episodes_per_scenario <= 128:
+            parser.error("--episodes-per-scenario must be in [1, 128]")
         if args.max_attempts_per_scenario < args.episodes_per_scenario:
             parser.error(
                 "--max-attempts-per-scenario cannot be smaller than "
@@ -284,8 +330,8 @@ def _parse_args():
                 "or select grouped collection with --scenario-count and "
                 "--episodes-per-scenario"
             )
-        if args.max_success_episodes <= 0:
-            parser.error("--max-success-episodes must be positive")
+        if not 1 <= args.max_success_episodes <= 128:
+            parser.error("--max-success-episodes must be in [1, 128]")
         if args.resume:
             parser.error("--resume is available only for grouped collection")
     return args
@@ -326,7 +372,10 @@ def _format_detail(audited_start, result, failed_start_timing):
     if timing is not None:
         fields.append(
             "start[attempts="
-            f"{timing.attempts} generate="
+            f"{timing.attempts} dynamic_response_query="
+            f"{timing.dynamic_response_query_seconds:.1f}s yaw_selection="
+            f"{timing.yaw_selection_seconds:.1f}s real_camera_verify="
+            f"{timing.real_camera_verify_seconds:.1f}s generate="
             f"{timing.task_start_generation_seconds:.1f}s ground="
             f"{timing.rgbd_grounding_seconds:.1f}s budget_audit="
             f"{timing.static_goal_budget_audit_seconds:.1f}s]"
@@ -489,10 +538,27 @@ def _manifest_config(args):
         "start_seed_base": int(args.start_seed),
         "episodes_per_scenario": int(args.episodes_per_scenario),
         "max_attempts_per_scenario": int(args.max_attempts_per_scenario),
-        "start_attempts": int(args.start_attempts),
         "firetrucks": int(args.firetrucks),
         "pedestrians": int(args.pedestrians),
         "max_steps": int(args.max_steps),
+        "action_spec": {
+            "forward_step_m": TASK_FORWARD_STEP_METERS,
+            "vertical_step_m": TASK_VERTICAL_STEP_METERS,
+            "yaw_step_degrees": TASK_YAW_STEP_DEGREES,
+        },
+        "source_stop_policy": {
+            "maximum_horizontal_range_m": (
+                SOURCE_STOP_MAX_HORIZONTAL_RANGE_METERS
+            ),
+            "minimum_projected_span_pixels": (
+                SOURCE_STOP_MIN_PROJECTED_SPAN_PIXELS
+            ),
+            "consecutive_grounded_observations": 2,
+        },
+        "scene_catalog_reserve": int(args.scene_catalog_reserve),
+        "max_scene_seed_candidates": int(
+            args.max_scene_seed_candidates
+        ),
         "jpeg_quality": int(args.jpeg_quality),
     }
 
@@ -510,6 +576,8 @@ def _new_manifest(args):
                     "scene_in_anchor": scene_in_anchor,
                     "anchor": [float(value) for value in anchor],
                     "scenario_seed": scenario_seed,
+                    "scenario_seed_candidate_index": 0,
+                    "rejected_scenario_seeds": [],
                     "directory": (
                         f"anchor_{anchor_index:03d}/"
                         f"scene_{scene_in_anchor:03d}_seed_{scenario_seed}"
@@ -525,6 +593,9 @@ def _new_manifest(args):
                     # coordinates with blueprint_id=0.
                     "runtime_blueprint_id": None,
                     "blueprint_signature": None,
+                    "used_pool_start_ids": [],
+                    "attempted_pool_start_ids": [],
+                    "scene_start_catalog": None,
                 }
             )
     return {
@@ -532,6 +603,7 @@ def _new_manifest(args):
         "collection_type": "stage2e_grouped_scenarios",
         "config": _manifest_config(args),
         "status": "IN_PROGRESS",
+        "anchor_pools": [],
         "scenes": scenes,
     }
 
@@ -540,23 +612,11 @@ def _load_manifest(path):
     with Path(path).open("r", encoding="utf-8") as stream:
         payload = json.load(stream)
     schema_version = payload.get("schema_version")
-    if schema_version == 1:
-        config = payload.get("config") or {}
-        anchor = config.pop("anchor", None)
-        scenes_per_anchor = config.pop("scenario_count", None)
-        if anchor is None or scenes_per_anchor is None:
-            raise RuntimeError(
-                "Legacy grouped manifest lacks anchor/scenario_count"
-            )
-        config["anchors"] = [anchor]
-        config["scenes_per_anchor"] = scenes_per_anchor
-        for scene_index, scene in enumerate(payload.get("scenes") or []):
-            scene["anchor_index"] = 0
-            scene["scene_in_anchor"] = scene_index
-            scene["anchor"] = list(anchor)
-        payload["schema_version"] = COLLECTION_SCHEMA_VERSION
-    elif schema_version != COLLECTION_SCHEMA_VERSION:
-        raise RuntimeError("Unsupported grouped collection manifest schema")
+    if schema_version != COLLECTION_SCHEMA_VERSION:
+        raise RuntimeError(
+            "Grouped manifest schema 1/2/3 cannot be resumed with the "
+            "source-shadow start-pool generator; create a new output directory"
+        )
     if payload.get("collection_type") != "stage2e_grouped_scenarios":
         raise RuntimeError("Output manifest is not a Stage 2E grouped collection")
     return payload
@@ -628,6 +688,42 @@ def _validate_resume(output_root, manifest, args):
             raise RuntimeError(
                 "Grouped manifest scene-to-anchor mapping is invalid"
             )
+        seed_candidate_index = int(
+            scene.get("scenario_seed_candidate_index", -1)
+        )
+        rejected_seeds = scene.get("rejected_scenario_seeds")
+        if (
+            not 0 <= seed_candidate_index < args.max_scene_seed_candidates
+            or not isinstance(rejected_seeds, list)
+            or len(rejected_seeds) != seed_candidate_index
+        ):
+            raise RuntimeError(
+                "Grouped manifest scene-seed candidate history is invalid"
+            )
+        expected_seed = (
+            int(args.seed)
+            + expected_index
+            + seed_candidate_index * expected_scene_count
+        ) & UINT64_MASK
+        if int(scene.get("scenario_seed", -1)) != expected_seed:
+            raise RuntimeError(
+                "Grouped manifest active scenario seed is invalid"
+            )
+        for rejected_index, rejected in enumerate(rejected_seeds):
+            rejected_expected = (
+                int(args.seed)
+                + expected_index
+                + rejected_index * expected_scene_count
+            ) & UINT64_MASK
+            if (
+                int(rejected.get("candidate_index", -1)) != rejected_index
+                or int(rejected.get("scenario_seed", -1))
+                != rejected_expected
+                or not isinstance(rejected.get("reason"), str)
+            ):
+                raise RuntimeError(
+                    "Grouped manifest rejected scenario-seed history is invalid"
+                )
         scene_root = output_root / scene["directory"]
         episode_names = scene.get("episodes")
         if not isinstance(episode_names, list):
@@ -651,6 +747,23 @@ def _validate_resume(output_root, manifest, args):
             raise RuntimeError(
                 f"Scene directory and manifest disagree: {scene_root}"
             )
+        used_pool_start_ids = scene.get("used_pool_start_ids")
+        if (not isinstance(used_pool_start_ids, list) or
+                len(used_pool_start_ids) != int(scene.get("successes", -1)) or
+                len(set(int(value) for value in used_pool_start_ids)) !=
+                len(used_pool_start_ids)):
+            raise RuntimeError("Grouped manifest successful start IDs are invalid")
+        attempted_pool_start_ids = scene.get("attempted_pool_start_ids")
+        if (not isinstance(attempted_pool_start_ids, list) or
+                len(set(int(value) for value in attempted_pool_start_ids)) !=
+                len(attempted_pool_start_ids) or
+                not set(int(value) for value in used_pool_start_ids).issubset(
+                    int(value) for value in attempted_pool_start_ids
+                )):
+            raise RuntimeError("Grouped manifest attempted start IDs are invalid")
+        catalog_payload = scene.get("scene_start_catalog")
+        if catalog_payload is not None:
+            scene_catalog_from_json(catalog_payload)
         attempts = int(scene.get("attempts_completed", -1))
         if not 0 <= attempts <= args.max_attempts_per_scenario:
             raise RuntimeError("Grouped manifest attempt count is invalid")
@@ -696,7 +809,8 @@ def _prepare_grouped_output(args):
                 parents=True,
                 exist_ok=False,
             )
-        _atomic_json(manifest_path, manifest)
+        # Fresh grouped collection writes the first manifest only after all
+        # per-anchor pool files have been installed by _run_grouped().
     return output_root, manifest_path, manifest
 
 
@@ -749,6 +863,11 @@ def _run_attempt(
     runtime_blueprint_id=0,
     expected_signature=None,
     scene_index=None,
+    start_pool=None,
+    scene_catalog=None,
+    attempted_pool_start_ids=(),
+    catalog_minimum_entries=1,
+    catalog_target_entries=None,
 ):
     scenario_id = None
     session = None
@@ -762,6 +881,25 @@ def _run_attempt(
     attempt_started = time.perf_counter()
     attempt_timing = {}
     outcome = "ERROR"
+    error_phase = None
+    error_message = None
+    error_type_name = None
+    semantic_prepare_failure = False
+    semantic_catalog_failure = False
+    fatal_error = False
+    active_scene_catalog = scene_catalog
+    catalog_minimum_entries = int(catalog_minimum_entries)
+    catalog_target_entries = (
+        catalog_minimum_entries
+        if catalog_target_entries is None
+        else int(catalog_target_entries)
+    )
+    if catalog_target_entries < catalog_minimum_entries:
+        raise ValueError(
+            "catalog_target_entries cannot be smaller than the hard quota"
+        )
+    candidate_pool_start_id = None
+    candidate_consumed = False
     phase = "prepare"
     phase_started = attempt_started
     interrupted = False
@@ -819,6 +957,57 @@ def _run_attempt(
                 time.perf_counter() - phase_started
             )
 
+            if active_scene_catalog is None:
+                phase = "scene_catalog"
+                phase_started = time.perf_counter()
+                (
+                    active_scene_catalog,
+                    attempt_timing["scene_catalog_projection"],
+                ) = _timed(
+                    build_scene_start_catalog,
+                    client,
+                    session,
+                    scenario,
+                    observation_spec,
+                    start_pool,
+                    minimum_entries=int(catalog_minimum_entries),
+                    horizon_steps=args.max_steps,
+                )
+                print(
+                    "SCENE_CATALOG_PROJECTED "
+                    f"scenario_seed={scenario_seed} "
+                    f"candidates={len(active_scene_catalog.candidates)} "
+                    f"time={attempt_timing['scene_catalog_projection']:.1f}s",
+                    flush=True,
+                )
+            if not active_scene_catalog.real_rgbd_certified:
+                phase = "scene_catalog"
+                phase_started = time.perf_counter()
+                (
+                    active_scene_catalog,
+                    attempt_timing["scene_catalog_rgbd"],
+                ) = _timed(
+                    certify_scene_start_catalog_rgbd,
+                    client,
+                    session,
+                    scenario,
+                    observation_spec,
+                    start_pool,
+                    active_scene_catalog,
+                    minimum_entries=catalog_target_entries,
+                    required_entries=catalog_minimum_entries,
+                    horizon_steps=args.max_steps,
+                    progress_callback=_progress,
+                )
+                print(
+                    "SCENE_CATALOG_CERTIFIED "
+                    f"scenario_seed={scenario_seed} "
+                    f"candidates={len(active_scene_catalog.candidates)} "
+                    f"digest={active_scene_catalog.digest} "
+                    f"time={attempt_timing['scene_catalog_rgbd']:.1f}s",
+                    flush=True,
+                )
+
             phase = "start_audit"
             phase_started = time.perf_counter()
             audited_start, attempt_timing["start_audit"] = _timed(
@@ -828,8 +1017,9 @@ def _run_attempt(
                 scenario,
                 observation_spec,
                 start_seed,
-                maximum_attempts=args.start_attempts,
-                audit_timeout_seconds=args.start_audit_timeout,
+                start_pool=start_pool,
+                scene_catalog=active_scene_catalog,
+                attempted_pool_start_ids=attempted_pool_start_ids,
                 horizon_steps=args.max_steps,
                 progress_callback=_progress,
             )
@@ -859,6 +1049,8 @@ def _run_attempt(
                 audited_start,
                 recorder=recorder,
             )
+            candidate_pool_start_id = int(audited_start.pool_start_id)
+            candidate_consumed = True
             phase = "write_finalize"
             phase_started = time.perf_counter()
             if result.success:
@@ -875,6 +1067,7 @@ def _run_attempt(
                         "initial_grounded_response_count": (
                             audited_start.initial_grounded_response_count
                         ),
+                        "pool_start_id": audited_start.pool_start_id,
                         "timing": {
                             "audited_start": audited_start.timing,
                             "rollout": result.timing,
@@ -919,7 +1112,50 @@ def _run_attempt(
             interrupted = True
             outcome = "INTERRUPTED"
         except Exception as error:
+            error_phase = phase
+            error_message = str(error)
+            error_type_name = type(error).__name__
+            semantic_prepare_failure = (
+                phase == "prepare"
+                and ready is None
+                and isinstance(error, RuntimeError)
+                and error_message.startswith("Fire scenario preparation failed:")
+            )
+            semantic_catalog_failure = (
+                phase == "scene_catalog"
+                and isinstance(error, TaskStartGenerationError)
+                and error_message.startswith(
+                    "SCENE_START_CATALOG_INSUFFICIENT:"
+                )
+            )
+            semantic_start_failure = (
+                phase == "start_audit"
+                and isinstance(error, TaskStartGenerationError)
+            )
+            semantic_rollout_failure = (
+                phase == "rollout"
+                and isinstance(error, ExpertGenerationError)
+            )
+            fatal_error = not any((
+                semantic_prepare_failure,
+                semantic_catalog_failure,
+                semantic_start_failure,
+                semantic_rollout_failure,
+            ))
             failed_start_timing = getattr(error, "timing", None)
+            failed_catalog = getattr(error, "scene_start_catalog", None)
+            if active_scene_catalog is None and failed_catalog is not None:
+                active_scene_catalog = failed_catalog
+            if audited_start is not None:
+                candidate_pool_start_id = int(audited_start.pool_start_id)
+                candidate_consumed = not isinstance(
+                    error, (CaptureError, DroneSimProtocolError)
+                )
+            elif hasattr(error, "pool_start_id"):
+                candidate_pool_start_id = int(error.pool_start_id)
+                candidate_consumed = bool(
+                    getattr(error, "consume_candidate", False)
+                )
             if phase not in attempt_timing:
                 attempt_timing[phase] = time.perf_counter() - phase_started
             append_failure(
@@ -973,6 +1209,12 @@ def _run_attempt(
         raise KeyboardInterrupt
     return {
         "success": outcome == "PASS",
+        "scene_prepare_failed": semantic_prepare_failure,
+        "scene_catalog_failed": semantic_catalog_failure,
+        "fatal_error": fatal_error,
+        "error_type": error_type_name,
+        "error_phase": error_phase,
+        "error_message": error_message,
         "outcome": outcome,
         "runtime_blueprint_id": (
             None if ready is None else int(ready.blueprint_id)
@@ -981,16 +1223,39 @@ def _run_attempt(
         "episode_name": (
             None if recorded_path is None else recorded_path.name
         ),
+        "pool_start_id": candidate_pool_start_id,
+        "candidate_consumed": candidate_consumed,
+
+        "catalog_exhausted": (
+            error_message is not None
+            and error_message.startswith("SCENE_START_CATALOG_EXHAUSTED:")
+        ),
+        "scene_start_catalog": (
+            None
+            if active_scene_catalog is None
+            else scene_catalog_to_json(active_scene_catalog)
+        ),
     }
 
 
-def _prepare_ready(client, args, anchor, scenario_seed, blueprint_id):
+def _prepare_ready(
+    client,
+    args,
+    anchor,
+    scenario_seed,
+    blueprint_id,
+    firetruck_count=None,
+    pedestrian_count=None,
+):
+    firetrucks = args.firetrucks if firetruck_count is None else int(firetruck_count)
+    pedestrians = args.pedestrians if pedestrian_count is None else int(pedestrian_count)
+
     def prepare(requested_blueprint_id):
         scenario_id = client.prepare_fire_scenario(
             anchor,
             seed=scenario_seed,
-            firetruck_count=args.firetrucks,
-            pedestrian_count=args.pedestrians,
+            firetruck_count=firetrucks,
+            pedestrian_count=pedestrians,
             blueprint_id=requested_blueprint_id,
         )
         try:
@@ -1027,24 +1292,354 @@ def _start_seed_for_grouped_attempt(args, scene_index, attempt_index):
     # A fixed scene stride keeps start-seed windows disjoint without making
     # them depend on the configured attempt budget.
     window_index = (int(scene_index) << 32) + int(attempt_index)
-    return (
-        int(args.start_seed) + window_index * int(args.start_attempts)
-    ) & UINT64_MASK
+    return (int(args.start_seed) + window_index) & UINT64_MASK
 
+
+
+def _rewrite_anchor_file_without_indices(path, rejected_indices):
+    rejected_indices = {int(value) for value in rejected_indices}
+    path = Path(path)
+    raw_lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    kept = []
+    anchor_index = 0
+    for raw in raw_lines:
+        if raw.strip():
+            if anchor_index not in rejected_indices:
+                kept.append(raw)
+            anchor_index += 1
+        else:
+            kept.append(raw)
+    temporary = path.with_name(path.name + ".tmp")
+    if not any(raw.strip() for raw in kept):
+        kept = []
+    with temporary.open("w", encoding="utf-8", newline="") as stream:
+        stream.writelines(kept)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+def _preflight_anchor_pools(client, args, original_pose):
+    accepted = []
+    pools = []
+    rejected = []
+    for original_index, anchor in enumerate(args.anchors):
+        scenario_id = None
+        session = None
+        started = time.perf_counter()
+        print(
+            f"ANCHOR_AUDIT_START anchor={original_index + 1}/{len(args.anchors)} "
+            f"position={anchor}",
+            flush=True,
+        )
+        try:
+            client.teleport_player(*anchor)
+            ready = _prepare_ready(
+                client,
+                args,
+                anchor,
+                (int(args.seed) + original_index * args.scenario_count) & UINT64_MASK,
+                0,
+                firetruck_count=0,
+                pedestrian_count=0,
+            )
+            scenario_id = ready.scenario_id
+            client.set_camera_pose(
+                ready.event_position[0], ready.event_position[1] - 40.0,
+                ready.event_position[2] + 40.0, original_pose[5],
+                collision_check=False,
+            )
+            client.set_camera_pitch(OBLIQUE_PITCH_DEGREES)
+            session = LockstepSession(client)
+            session.__enter__()
+            calibration = session.capture_rgbd_pair()
+            pool = build_static_start_pool(
+                client,
+                session,
+                ready,
+                minimum_entries=min(
+                    START_POOL_MAX_ENTRIES, args.episodes_per_scenario,
+                ),
+                observation_spec=ObservationSpec.from_pair(calibration),
+                horizon_steps=args.max_steps,
+                progress_callback=_progress,
+            )
+            pool = dataclass_replace(
+                pool,
+                timing=dataclass_replace(
+                    pool.timing,
+                    anchor_prepare=time.perf_counter() - started - pool.timing.total,
+                ),
+            )
+            accepted.append(anchor)
+            pools.append(pool)
+            print(
+                f"ANCHOR_AUDIT_PASS original_anchor={original_index} "
+                f"pool={len(pool.entries)} digest={pool.digest} "
+                f"bearing_histogram={pool.bearing_histogram} "
+                f"wall={time.perf_counter() - started:.1f}s",
+                flush=True,
+            )
+        except (TaskStartGenerationError, RuntimeError) as error:
+            message = str(error)
+            static_unsuitable = message.startswith("ANCHOR_UNSUITABLE:")
+            response_unsuitable = message.startswith(
+                "Fire scenario preparation failed: Could not resolve enough "
+            ) and (
+                "firetruck road nodes" in message or
+                "pedestrian safe coordinates" in message
+            )
+            if not static_unsuitable and not response_unsuitable:
+                raise
+            pool = getattr(error, "start_pool", None)
+            rejected.append(original_index)
+            line_number = (
+                args.anchor_line_numbers[original_index]
+                if args.anchor_file is not None
+                else None
+            )
+            print(
+                f"ANCHOR_REMOVED original_anchor={original_index} "
+                f"line={line_number} position={anchor} "
+                f"pool={0 if pool is None else len(pool.entries)} "
+                f"rejections={None if pool is None else dict(pool.rejection_counts)} "
+                f"reason={error}",
+                flush=True,
+            )
+        finally:
+            session, scenario_id = _cleanup_frozen(client, session, scenario_id)
+    if args.anchor_file is not None and rejected:
+        _rewrite_anchor_file_without_indices(args.anchor_file, rejected)
+        print(
+            f"ANCHOR_FILE_REWRITTEN path={args.anchor_file} removed={len(rejected)} "
+            f"remaining={len(accepted)}",
+            flush=True,
+        )
+    if not accepted:
+        raise RuntimeError("No suitable anchors remain after collection preflight")
+    return tuple(accepted), tuple(pools)
+
+
+def _install_pool_manifest(output_root, manifest, pools):
+    manifest["anchor_pools"] = []
+    for anchor_index, pool in enumerate(pools):
+        relative = Path(f"anchor_{anchor_index:03d}") / "start_pool.json"
+        destination = output_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        write_pool(destination, pool)
+        manifest["anchor_pools"].append({
+            "anchor_index": anchor_index,
+            "anchor": list(pool.anchor),
+            "event_position": list(pool.event_position),
+            "path": relative.as_posix(),
+            "digest": pool.digest,
+            "count": len(pool.entries),
+            "timing": {
+                "anchor_prepare": pool.timing.anchor_prepare,
+                "shadow_rays": pool.timing.shadow_rays,
+                "ground_clearance": pool.timing.ground_clearance,
+                "fire_occlusion": pool.timing.fire_occlusion,
+                "goal_audit": pool.timing.goal_audit,
+                "total": pool.timing.anchor_prepare + pool.timing.total,
+            },
+        })
+
+
+def _load_manifest_pools(output_root, manifest):
+    records = manifest.get("anchor_pools")
+    if not isinstance(records, list) or not records:
+        raise RuntimeError("Schema 4 manifest has no anchor pools")
+    pools = []
+    for expected_index, record in enumerate(records):
+        if int(record.get("anchor_index", -1)) != expected_index:
+            raise RuntimeError("Manifest anchor-pool indices are invalid")
+        pool = load_pool(output_root / record["path"])
+        if pool.digest != record.get("digest") or len(pool.entries) != int(record.get("count", -1)):
+            raise RuntimeError("ANCHOR_POOL_MISMATCH: manifest metadata differs")
+        pools.append(pool)
+    return tuple(pools)
+
+
+
+def _validate_manifest_pool_usage(manifest, pools):
+    for scene in manifest["scenes"]:
+        anchor_index = int(scene["anchor_index"])
+        valid_ids = {
+            int(entry.pool_start_id)
+            for entry in pools[anchor_index].entries
+        }
+        used_ids = {
+            int(value) for value in scene["used_pool_start_ids"]
+        }
+        attempted_ids = {
+            int(value) for value in scene["attempted_pool_start_ids"]
+        }
+        if (
+            not used_ids.issubset(attempted_ids)
+            or not attempted_ids.issubset(valid_ids)
+        ):
+            raise RuntimeError(
+                "ANCHOR_POOL_MISMATCH: manifest references an unknown "
+                "or unattempted pool start"
+            )
+        payload = scene.get("scene_start_catalog")
+        if payload is not None:
+            catalog = scene_catalog_from_json(payload)
+            if not catalog.real_rgbd_certified:
+                raise RuntimeError(
+                    "SCENE_START_CATALOG_MISMATCH: manifest catalog is not "
+                    "real-RGB-D certified"
+                )
+            catalog_ids = {
+                candidate.pool_start_id
+                for candidate in catalog.candidates
+            }
+            if (
+                catalog.pool_digest != pools[anchor_index].digest
+                or not catalog_ids.issubset(valid_ids)
+                or not attempted_ids.issubset(catalog_ids)
+            ):
+                raise RuntimeError(
+                    "SCENE_START_CATALOG_MISMATCH: catalog and manifest "
+                    "candidate IDs disagree"
+                )
+
+def _revalidate_manifest_pools(client, args, original_pose, pools):
+    for anchor_index, pool in enumerate(pools):
+        scenario_id = None
+        session = None
+        try:
+            client.teleport_player(*pool.anchor)
+            ready = _prepare_ready(
+                client,
+                args,
+                pool.anchor,
+                (int(args.seed) + anchor_index * args.scenario_count) & UINT64_MASK,
+                0,
+                firetruck_count=0,
+                pedestrian_count=0,
+            )
+            scenario_id = ready.scenario_id
+            client.set_camera_pose(
+                ready.event_position[0], ready.event_position[1] - 40.0,
+                ready.event_position[2] + 40.0, original_pose[5],
+                collision_check=False,
+            )
+            session = LockstepSession(client)
+            session.__enter__()
+            revalidate_static_start_pool(client, session, ready, pool)
+            print(
+                f"ANCHOR_POOL_REVALIDATED anchor={anchor_index} "
+                f"count={len(pool.entries)} digest={pool.digest}",
+                flush=True,
+            )
+        finally:
+            session, scenario_id = _cleanup_frozen(client, session, scenario_id)
+
+
+def _replace_empty_scene_seed(scene, args, total_scene_count, reason):
+    """Replace a rejected empty scene slot with the next deterministic seed."""
+    if int(scene["successes"]) != 0:
+        return False
+    current_index = int(scene.get("scenario_seed_candidate_index", 0))
+    next_index = current_index + 1
+    if next_index >= int(args.max_scene_seed_candidates):
+        return False
+    scene.setdefault("rejected_scenario_seeds", []).append({
+        "candidate_index": current_index,
+        "scenario_seed": int(scene["scenario_seed"]),
+        "reason": str(reason),
+    })
+    scene_index = int(scene["scene_index"])
+    scenario_seed = (
+        int(args.seed)
+        + scene_index
+        + next_index * int(total_scene_count)
+    ) & UINT64_MASK
+    scene_in_anchor = int(scene["scene_in_anchor"])
+    anchor_index = int(scene["anchor_index"])
+    scene.update({
+        "scenario_seed": scenario_seed,
+        "scenario_seed_candidate_index": next_index,
+        "directory": (
+            f"anchor_{anchor_index:03d}/"
+            f"scene_{scene_in_anchor:03d}_candidate_{next_index:03d}_"
+            f"seed_{scenario_seed}"
+        ),
+        "status": "PENDING",
+        "attempts_completed": 0,
+        "successes": 0,
+        "episodes": [],
+        "runtime_blueprint_id": None,
+        "blueprint_signature": None,
+        "used_pool_start_ids": [],
+        "attempted_pool_start_ids": [],
+        "scene_start_catalog": None,
+    })
+    for key in (
+        "prepare_failure",
+        "catalog_failure",
+        "rejected_scene_start_catalog",
+    ):
+        scene.pop(key, None)
+    return True
 
 def _run_grouped(args):
-    output_root, manifest_path, manifest = _prepare_grouped_output(args)
-    _check_disk_budget(output_root, manifest, args)
+    if not args.resume and args.output_dir.exists() and any(args.output_dir.iterdir()):
+        raise FileExistsError(
+            "Grouped --output-dir must be absent or empty unless --resume is supplied"
+        )
+    client = DroneSimClient(args.host, args.port)
+    client.require_camera_active()
+    original_pose = client.get_pose()
+    try:
+        if args.resume:
+            output_root, manifest_path, manifest = _prepare_grouped_output(args)
+            pools = _load_manifest_pools(output_root, manifest)
+            _validate_manifest_pool_usage(manifest, pools)
+            _revalidate_manifest_pools(client, args, original_pose, pools)
+        else:
+            accepted, pools = _preflight_anchor_pools(client, args, original_pose)
+            args.anchors = accepted
+            output_root, manifest_path, manifest = _prepare_grouped_output(args)
+            _install_pool_manifest(output_root, manifest, pools)
+            _atomic_json(manifest_path, manifest)
+    except BaseException:
+        try:
+            client.set_camera_pose(
+                original_pose[0], original_pose[1], original_pose[2],
+                original_pose[5], collision_check=False,
+            )
+            client.set_camera_pitch(original_pose[3])
+        finally:
+            client.restore_player()
+        raise
+    try:
+        _check_disk_budget(output_root, manifest, args)
+    except BaseException:
+        try:
+            client.set_camera_pose(
+                original_pose[0], original_pose[1], original_pose[2],
+                original_pose[5], collision_check=False,
+            )
+            client.set_camera_pitch(original_pose[3])
+        finally:
+            client.restore_player()
+        raise
     if all(
         int(scene["successes"]) >= args.episodes_per_scenario
         for scene in manifest["scenes"]
     ):
+        try:
+            client.set_camera_pose(
+                original_pose[0], original_pose[1], original_pose[2],
+                original_pose[5], collision_check=False,
+            )
+            client.set_camera_pitch(original_pose[3])
+        finally:
+            client.restore_player()
         print("DONE grouped collection is already complete", flush=True)
         return
-
-    client = DroneSimClient(args.host, args.port)
-    client.require_camera_active()
-    original_pose = client.get_pose()
     collection_started = time.perf_counter()
     try:
         client.set_time(12, 0, 0)
@@ -1086,6 +1681,14 @@ def _run_grouped(args):
                 scene.get("runtime_blueprint_id") or 0
             )
             expected_signature = scene["blueprint_signature"]
+            catalog_payload = scene.get("scene_start_catalog")
+            active_scene_catalog = (
+                None
+                if catalog_payload is None
+                else scene_catalog_from_json(catalog_payload)
+            )
+            scene_prepare_failed = False
+            scene_catalog_invalid = False
             while (
                 int(scene["successes"]) < args.episodes_per_scenario
                 and int(scene["attempts_completed"])
@@ -1111,17 +1714,92 @@ def _run_grouped(args):
                     runtime_blueprint_id=runtime_blueprint_id,
                     expected_signature=expected_signature,
                     scene_index=scene_index,
+                    start_pool=pools[anchor_index],
+                    scene_catalog=active_scene_catalog,
+                    attempted_pool_start_ids=(
+                        scene["attempted_pool_start_ids"]
+                    ),
+                    catalog_minimum_entries=min(
+                        START_POOL_MAX_ENTRIES, args.episodes_per_scenario,
+                    ),
+                    catalog_target_entries=min(
+                        START_POOL_MAX_ENTRIES,
+                        args.episodes_per_scenario
+                        + args.scene_catalog_reserve,
+                    ),
                 )
+                if result["fatal_error"]:
+                    _atomic_json(manifest_path, manifest)
+                    raise RuntimeError(
+                        "FATAL_COLLECTION_ERROR: "
+                        f"phase={result['error_phase']} "
+                        f"error={result['error_type']} "
+                        f"message={result['error_message']}"
+                    )
                 if result["runtime_blueprint_id"] is not None:
                     runtime_blueprint_id = result["runtime_blueprint_id"]
                     scene["runtime_blueprint_id"] = runtime_blueprint_id
                 if expected_signature is None and result["blueprint_signature"]:
                     expected_signature = result["blueprint_signature"]
                     scene["blueprint_signature"] = expected_signature
+
+                returned_catalog = result["scene_start_catalog"]
+                if returned_catalog is not None and not result[
+                    "scene_catalog_failed"
+                ]:
+                    parsed = scene_catalog_from_json(returned_catalog)
+                    if (
+                        active_scene_catalog is not None
+                        and parsed.digest != active_scene_catalog.digest
+                    ):
+                        raise CollectionInvariantError(
+                            "SCENE_START_CATALOG_MISMATCH: rebuilt catalog "
+                            "differs from the manifest"
+                        )
+                    active_scene_catalog = parsed
+                    scene["scene_start_catalog"] = returned_catalog
+
                 scene["attempts_completed"] = attempt_index + 1
+                if result["candidate_consumed"]:
+                    pool_start_id = int(result["pool_start_id"])
+                    attempted = scene["attempted_pool_start_ids"]
+                    if pool_start_id in attempted:
+                        raise CollectionInvariantError(
+                            "A consumed scene-start candidate was attempted twice"
+                        )
+                    attempted.append(pool_start_id)
                 if result["success"]:
                     scene["successes"] = int(scene["successes"]) + 1
                     scene["episodes"].append(result["episode_name"])
+                    scene["used_pool_start_ids"].append(
+                        int(result["pool_start_id"])
+                    )
+
+                if result["scene_prepare_failed"]:
+                    scene_prepare_failed = True
+                    scene["prepare_failure"] = result["error_message"]
+                    print(
+                        "SCENE_PREPARE_FAILED "
+                        f"scene={scene_index + 1}/{total_scene_count}; "
+                        "this scene seed cannot be used",
+                        flush=True,
+                    )
+                if result["scene_catalog_failed"] or result[
+                    "catalog_exhausted"
+                ]:
+                    scene_catalog_invalid = True
+                    scene["catalog_failure"] = result["error_message"]
+                    if returned_catalog is not None:
+                        scene["rejected_scene_start_catalog"] = (
+                            returned_catalog
+                        )
+                    print(
+                        "SCENE_CATALOG_REJECTED "
+                        f"scene={scene_index + 1}/{total_scene_count} "
+                        f"reason={result['error_message']}",
+                        flush=True,
+                    )
+
                 print(
                     "SCENE_PROGRESS "
                     f"anchor={anchor_index + 1}/{len(args.anchors)} "
@@ -1129,16 +1807,53 @@ def _run_grouped(args):
                     f"successes={scene['successes']}/"
                     f"{args.episodes_per_scenario} "
                     f"attempts={scene['attempts_completed']}/"
-                    f"{args.max_attempts_per_scenario}",
+                    f"{args.max_attempts_per_scenario} "
+                    f"candidates={len(scene['attempted_pool_start_ids'])}",
                     flush=True,
                 )
                 _atomic_json(manifest_path, manifest)
+                if scene_prepare_failed or scene_catalog_invalid:
+                    replacement_reason = (
+                        scene.get("prepare_failure")
+                        or scene.get("catalog_failure")
+                        or "scene rejected"
+                    )
+                    if _replace_empty_scene_seed(
+                        scene,
+                        args,
+                        total_scene_count,
+                        replacement_reason,
+                    ):
+                        (output_root / scene["directory"]).mkdir(
+                            parents=True,
+                            exist_ok=False,
+                        )
+                        runtime_blueprint_id = 0
+                        expected_signature = None
+                        active_scene_catalog = None
+                        scene_prepare_failed = False
+                        scene_catalog_invalid = False
+                        print(
+                            "SCENE_SEED_REPLACED "
+                            f"scene={scene_index + 1}/{total_scene_count} "
+                            f"candidate={scene['scenario_seed_candidate_index'] + 1}/"
+                            f"{args.max_scene_seed_candidates} "
+                            f"seed={scene['scenario_seed']} "
+                            f"reason={replacement_reason}",
+                            flush=True,
+                        )
+                        _atomic_json(manifest_path, manifest)
+                        continue
+                    break
             if int(scene["successes"]) >= args.episodes_per_scenario:
                 scene["status"] = "COMPLETE"
+            elif scene_prepare_failed:
+                scene["status"] = "PREPARE_FAILED"
+            elif scene_catalog_invalid:
+                scene["status"] = "CATALOG_REJECTED"
             else:
                 scene["status"] = "EXHAUSTED"
             _atomic_json(manifest_path, manifest)
-
         incomplete = [
             scene
             for scene in manifest["scenes"]
@@ -1191,11 +1906,30 @@ def _run_flat(args):
     original_pose = client.get_pose()
     successes = 0
     attempts_run = 0
+    start_pool = None
     started = time.perf_counter()
     try:
         client.set_time(12, 0, 0)
         client.set_weather("EXTRASUNNY")
         client.teleport_player(*args.anchors[0])
+        preflight_ready = _prepare_ready(
+            client, args, args.anchors[0], args.seed, 0,
+            firetruck_count=0, pedestrian_count=0,
+        )
+        preflight_session = LockstepSession(client)
+        preflight_session.__enter__()
+        try:
+            calibration = preflight_session.capture_rgbd_pair()
+            start_pool = build_static_start_pool(
+                client, preflight_session, preflight_ready,
+                minimum_entries=args.max_success_episodes,
+                observation_spec=ObservationSpec.from_pair(calibration),
+                horizon_steps=args.max_steps,
+                progress_callback=_progress,
+            )
+        finally:
+            client.reset_scenario(preflight_ready.scenario_id)
+            preflight_session.close()
         for attempt in range(args.max_attempts):
             if successes >= args.max_success_episodes:
                 break
@@ -1212,7 +1946,19 @@ def _run_flat(args):
                 start_seed,
                 attempt,
                 successes,
+                start_pool=start_pool,
+                scene_catalog=None,
+                attempted_pool_start_ids=(),
+                catalog_minimum_entries=1,
+                catalog_target_entries=1,
             )
+            if result["fatal_error"]:
+                raise RuntimeError(
+                    "FATAL_COLLECTION_ERROR: "
+                    f"phase={result['error_phase']} "
+                    f"error={result['error_type']} "
+                    f"message={result['error_message']}"
+                )
             if result["success"]:
                 successes += 1
                 print(

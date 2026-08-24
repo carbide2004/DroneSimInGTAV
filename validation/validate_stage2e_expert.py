@@ -19,8 +19,11 @@ from agent_control.dronesim_client import (  # noqa: E402
 )
 from agent_control.expert_episode import run_expert_episode  # noqa: E402
 from agent_control.expert_starts import (  # noqa: E402
+    certify_scene_start_catalog_rgbd,
     generate_audited_task_start,
 )
+from agent_control.scene_catalog import build_scene_start_catalog  # noqa: E402
+from agent_control.start_pool import build_static_start_pool  # noqa: E402
 from agent_control.task_starts import (  # noqa: E402
     ObservationSpec,
     TASK_HORIZON_STEPS,
@@ -59,13 +62,6 @@ def _parse_args():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--start-seed", type=int, default=1)
     parser.add_argument("--prepare-timeout", type=float, default=30.0)
-    parser.add_argument(
-        "--start-audit-timeout",
-        type=float,
-        default=120.0,
-        help="Wall-clock limit for one lightweight start goal audit",
-    )
-    parser.add_argument("--start-attempts", type=int, default=16)
     parser.add_argument(
         "--max-steps",
         type=int,
@@ -248,11 +244,15 @@ def _prepare_ready(client, args, blueprint_id=0):
         pedestrian_count=32,
         blueprint_id=blueprint_id,
     )
-    ready = client.wait_scenario_ready(
-        scenario_id,
-        timeout=args.prepare_timeout,
-    )
-    return scenario_id, ready
+    try:
+        ready = client.wait_scenario_ready(
+            scenario_id,
+            timeout=args.prepare_timeout,
+        )
+        return scenario_id, ready
+    except BaseException:
+        client.reset_scenario(scenario_id)
+        raise
 
 
 def _reset_then_close(client, scenario_id, session):
@@ -285,8 +285,32 @@ def main():
 
         scenario_id, ready = _prepare_ready(client, args)
         signature = _validate_ready(ready)
+        client.set_camera_pose(
+            ready.event_position[0],
+            ready.event_position[1] - 40.0,
+            ready.event_position[2] + 40.0,
+            original_pose[5],
+            collision_check=False,
+        )
+        client.set_camera_pitch(OBLIQUE_PITCH_DEGREES)
         session = LockstepSession(client)
         session.__enter__()
+        start_pool = build_static_start_pool(
+            client,
+            session,
+            ready,
+            minimum_entries=1,
+            observation_spec=ObservationSpec.from_pair(
+                session.capture_rgbd_pair()
+            ),
+            horizon_steps=args.max_steps,
+            progress_callback=lambda message: print(message, flush=True),
+        )
+        print(
+            f"static start pool PASS count={len(start_pool.entries)} "
+            f"digest={start_pool.digest}",
+            flush=True,
+        )
         client.start_scenario(scenario_id)
         _audit_response_wave(
             client,
@@ -324,14 +348,46 @@ def main():
         session.advance()
         calibration = session.capture_rgbd_pair()
         scenario = client.get_scenario_state(scenario_id)
+        observation_spec = ObservationSpec.from_pair(calibration)
+        scene_catalog = build_scene_start_catalog(
+            client,
+            session,
+            scenario,
+            observation_spec,
+            start_pool,
+            minimum_entries=1,
+            horizon_steps=args.max_steps,
+        )
+        print(
+            f"scene start catalog PROJECTED count={len(scene_catalog.candidates)} "
+            f"digest={scene_catalog.digest}",
+            flush=True,
+        )
+        scene_catalog = certify_scene_start_catalog_rgbd(
+            client,
+            session,
+            scenario,
+            observation_spec,
+            start_pool,
+            scene_catalog,
+            minimum_entries=1,
+            horizon_steps=args.max_steps,
+            progress_callback=lambda message: print(message, flush=True),
+        )
+        print(
+            f"scene start catalog CERTIFIED count={len(scene_catalog.candidates)} "
+            f"digest={scene_catalog.digest}",
+            flush=True,
+        )
         audited_start = generate_audited_task_start(
             client,
             session,
             scenario,
-            ObservationSpec.from_pair(calibration),
+            observation_spec,
             args.start_seed,
-            maximum_attempts=args.start_attempts,
-            audit_timeout_seconds=args.start_audit_timeout,
+            start_pool=start_pool,
+            scene_catalog=scene_catalog,
+            attempted_pool_start_ids=(),
             horizon_steps=args.max_steps,
             progress_callback=lambda message: print(
                 message,

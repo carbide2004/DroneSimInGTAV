@@ -39,6 +39,9 @@ enum class RuntimeCommandType {
     ProbeCameraStart,
     ProbeCameraGeometryBatch,
     QueryTargetVisibilityBatch,
+    ProbeFireShadowBatch,
+    ProbeCameraStartBatch,
+    QueryFireOcclusionBatch,
 };
 
 enum class RuntimeCommandStatus : std::uint32_t {
@@ -91,6 +94,9 @@ struct RuntimeCommandResult {
     VisibilitySnapshot visibility_snapshot;
     GeometryBatchSnapshot geometry_batch_snapshot;
     TargetVisibilityBatchSnapshot target_visibility_batch_snapshot;
+    FireShadowBatchSnapshot fire_shadow_batch_snapshot;
+    CameraStartBatchSnapshot camera_start_batch_snapshot;
+    FireOcclusionBatchSnapshot fire_occlusion_batch_snapshot;
     CameraStartProbe camera_start_probe;
     std::uint64_t value = 0;
     bool bool_value = false;
@@ -113,6 +119,9 @@ struct RuntimeCommand {
     std::vector<ScenarioVector3> geometry_points;
     std::vector<GeometrySegment> geometry_segments;
     std::vector<TargetVisibilityCase> target_visibility_cases;
+    std::vector<ScenarioVector3> fire_shadow_directions;
+    std::vector<CameraStartCase> camera_start_cases;
+    std::vector<ScenarioVector3> fire_occlusion_camera_centers;
 
     std::atomic<bool> cancelled{false};
     std::mutex completion_mutex;

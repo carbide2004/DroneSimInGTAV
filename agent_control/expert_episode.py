@@ -12,6 +12,8 @@ from .expert_teacher import (
     CueGroundedExpert,
     ExpertGenerationError,
     LocalGeometryFacade,
+    SOURCE_STOP_MAX_HORIZONTAL_RANGE_METERS,
+    SOURCE_STOP_MIN_PROJECTED_SPAN_PIXELS,
     VisibleTrackGrounder,
 )
 from .research_actions import ResearchActionExecutor, StopAction
@@ -270,9 +272,18 @@ def run_expert_episode(
                 "observation_spec": blueprint.observation_spec,
             },
             teacher={
-                "teacher": "cue-grounded-stage2e-v1",
+                "teacher": "cue-grounded-stage2e-v2-close-source",
                 "belief_cell_m": 4.0,
                 "belief_radius_m": 120.0,
+                "source_stop_policy": {
+                    "maximum_horizontal_range_m": (
+                        SOURCE_STOP_MAX_HORIZONTAL_RANGE_METERS
+                    ),
+                    "minimum_projected_span_pixels": (
+                        SOURCE_STOP_MIN_PROJECTED_SPAN_PIXELS
+                    ),
+                    "consecutive_grounded_observations": 2,
+                },
             },
             evaluation_truth={
                 "start_blueprint": blueprint,

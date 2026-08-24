@@ -35,10 +35,11 @@ from .task_starts import (
 
 BELIEF_RADIUS_METERS = 120.0
 BELIEF_CELL_METERS = 4.0
-LOCAL_SUBGOAL_MAX_METERS = 20.0
+NAVIGATION_CHUNK_METERS = 24.0
 LOCAL_PLAN_MAX_ACTIONS = 32
-LOCAL_PLAN_MAX_EXPANDED_STATES = 12000
-LOCAL_PLAN_TIMEOUT_SECONDS = 15.0
+LOCAL_PLAN_MANEUVER_RESERVE_ACTIONS = 4
+LOCAL_PLAN_MAX_EXPANDED_STATES = 6000
+LOCAL_PLAN_TIMEOUT_SECONDS = 5.0
 BELIEF_LIKELIHOOD_FLOOR = 0.05
 FIRETRUCK_SIGMA_DEGREES = 35.0
 PEDESTRIAN_SIGMA_DEGREES = 55.0
@@ -48,6 +49,9 @@ REACQUIRE_AFTER_STEPS = 4
 STATIC_CONFIRM_STEPS = 8
 SCAN_MAX_ACTIONS = 6
 SOURCE_CONFIRMATION_MAX_FAILURES = 2
+SOURCE_STOP_MAX_HORIZONTAL_RANGE_METERS = 30.0
+SOURCE_STOP_MIN_PROJECTED_SPAN_PIXELS = 64.0
+DEPTH_GROUNDING_PIXEL_RADIUS = 4
 
 
 class ExpertIntent(str, Enum):
@@ -55,7 +59,6 @@ class ExpertIntent(str, Enum):
     CONFIRM_MOTION = "CONFIRM_MOTION"
     FOLLOW_BELIEF = "FOLLOW_BELIEF"
     REACQUIRE_CUE = "REACQUIRE_CUE"
-    AVOID_COLLISION = "AVOID_COLLISION"
     VERIFY_SOURCE = "VERIFY_SOURCE"
     STOP = "STOP"
 
@@ -176,6 +179,17 @@ def _yaw_toward_local(origin, target):
     return math.degrees(math.atan2(-delta_right, delta_forward))
 
 
+def _minimum_discrete_turn_actions(source_yaw, target_yaw):
+    """Count 15-degree turns needed to face a target within half a step."""
+    error = abs(_angle_delta_degrees(target_yaw, source_yaw))
+    if error <= TASK_YAW_STEP_DEGREES * 0.5:
+        return 0
+    return int(math.ceil(
+        (error - TASK_YAW_STEP_DEGREES * 0.5)
+        / TASK_YAW_STEP_DEGREES
+    ))
+
+
 def _action_pose_local(position, yaw_degrees, action):
     position = np.asarray(position, dtype=np.float64).copy()
     yaw = float(yaw_degrees)
@@ -191,6 +205,8 @@ def _action_pose_local(position, yaw_degrees, action):
         yaw += TASK_YAW_STEP_DEGREES
     elif isinstance(action, TurnRightAction):
         yaw -= TASK_YAW_STEP_DEGREES
+    elif isinstance(action, HoldAction):
+        pass
     else:
         raise TypeError(f"Unsupported local-planner action {action!r}")
     yaw = (yaw + 180.0) % 360.0 - 180.0
@@ -204,7 +220,7 @@ class LocalGeometryFacade:
         self._client = client
         self._lockstep = lockstep
         self._blueprint = blueprint
-        self._cache_instant = None
+        self._cache_session_id = None
         self._segment_cache = {}
         self.requested_segments = 0
         self.queried_segments = 0
@@ -225,13 +241,12 @@ class LocalGeometryFacade:
         if not local_segments:
             return ()
         clock = self._lockstep.snapshot
-        instant = (
-            int(clock.session_id),
-            int(clock.step_index),
-            int(clock.game_timer_ms),
-        )
-        if instant != self._cache_instant:
-            self._cache_instant = instant
+        # The native query tests map/world geometry only. That geometry is
+        # static throughout one lockstep session, so retain results across
+        # 250 ms steps instead of repeating the same shape tests.
+        session_id = int(clock.session_id)
+        if session_id != self._cache_session_id:
+            self._cache_session_id = session_id
             self._segment_cache.clear()
 
         keys = []
@@ -278,7 +293,7 @@ class LocalGeometryFacade:
         return tuple(self._segment_cache[key] for key in keys)
 
     def action_clear(self, position, yaw, action):
-        if isinstance(action, (TurnLeftAction, TurnRightAction)):
+        if isinstance(action, (TurnLeftAction, TurnRightAction, HoldAction)):
             return True
         target, _ = _action_pose_local(position, yaw, action)
         return bool(self.segments_clear(((position, target),))[0])
@@ -312,8 +327,16 @@ class StrictLocalAStar:
 
     @staticmethod
     def _heuristic(position, target):
-        horizontal = math.dist(position[:2], target[:2])
-        vertical = abs(float(position[2]) - float(target[2]))
+        horizontal = max(
+            0.0,
+            math.dist(position[:2], target[:2])
+            - TASK_FORWARD_STEP_METERS,
+        )
+        vertical = max(
+            0.0,
+            abs(float(position[2]) - float(target[2]))
+            - TASK_VERTICAL_STEP_METERS * 0.5,
+        )
         return int(math.ceil(horizontal / TASK_FORWARD_STEP_METERS)) + int(
             math.ceil(vertical / TASK_VERTICAL_STEP_METERS)
         )
@@ -342,6 +365,73 @@ class StrictLocalAStar:
             and abs(float(position[2])) <= float(activity_vertical_m)
         )
 
+    def _direct_plan(
+        self,
+        position,
+        yaw,
+        target,
+        geometry,
+        activity_radius_m,
+        activity_vertical_m,
+    ):
+        current_position = tuple(float(value) for value in position)
+        current_yaw = float(yaw)
+        actions = []
+        while (
+            not self._goal(current_position, target)
+            and len(actions) < self.maximum_actions
+        ):
+            horizontal = math.dist(current_position[:2], target[:2])
+            vertical_delta = float(target[2]) - float(current_position[2])
+            if horizontal > TASK_FORWARD_STEP_METERS:
+                target_yaw = _yaw_toward_local(current_position, target)
+                yaw_error = _angle_delta_degrees(target_yaw, current_yaw)
+                if abs(yaw_error) > TASK_YAW_STEP_DEGREES * 0.5:
+                    action = (
+                        TurnLeftAction()
+                        if yaw_error > 0.0
+                        else TurnRightAction()
+                    )
+                else:
+                    action = ForwardAction()
+            elif abs(vertical_delta) > TASK_VERTICAL_STEP_METERS * 0.5:
+                action = (
+                    AscendAction()
+                    if vertical_delta > 0.0
+                    else DescendAction()
+                )
+            else:
+                break
+            child_position, child_yaw = _action_pose_local(
+                current_position, current_yaw, action
+            )
+            if not self._inside_activity(
+                child_position,
+                activity_radius_m,
+                activity_vertical_m,
+            ):
+                return None
+            actions.append(action)
+            current_position, current_yaw = child_position, child_yaw
+        if not self._goal(current_position, target):
+            return None
+
+        motion_segments = []
+        current_position = tuple(float(value) for value in position)
+        current_yaw = float(yaw)
+        for action in actions:
+            child_position, child_yaw = _action_pose_local(
+                current_position, current_yaw, action
+            )
+            if not isinstance(action, (TurnLeftAction, TurnRightAction)):
+                motion_segments.append((current_position, child_position))
+            current_position, current_yaw = child_position, child_yaw
+        if motion_segments and not all(
+            geometry.segments_clear(motion_segments)
+        ):
+            return None
+        return tuple(actions)
+
     def plan(
         self,
         position,
@@ -362,6 +452,17 @@ class StrictLocalAStar:
                 "LOCAL_PLAN_NOT_FOUND: current pose is outside the activity "
                 "bounds"
             )
+        direct = self._direct_plan(
+            position,
+            yaw,
+            target,
+            geometry,
+            activity_radius_m,
+            activity_vertical_m,
+        )
+        if direct is not None:
+            return direct
+
         started = time.perf_counter()
         expanded = 0
         collision_rejections = 0
@@ -679,17 +780,35 @@ class VisibleTrackGrounder:
                         or expected_depth <= 0.0
                     ):
                         continue
-                    x = int(round(float(pixel[0])))
-                    y = int(round(float(pixel[1])))
-                    if not (
-                        0 <= x < frame.width
-                        and 0 <= y < frame.height
-                    ):
-                        continue
-                    measured_depth = float(depth_array[y, x])
+                    center_x = int(round(float(pixel[0])))
+                    center_y = int(round(float(pixel[1])))
                     tolerance = max(1.0, expected_depth * 0.05)
-                    if abs(measured_depth - expected_depth) > tolerance:
+                    best_pixel = None
+                    best_error = math.inf
+                    for y in range(
+                        max(0, center_y - DEPTH_GROUNDING_PIXEL_RADIUS),
+                        min(
+                            frame.height,
+                            center_y + DEPTH_GROUNDING_PIXEL_RADIUS + 1,
+                        ),
+                    ):
+                        for x in range(
+                            max(0, center_x - DEPTH_GROUNDING_PIXEL_RADIUS),
+                            min(
+                                frame.width,
+                                center_x + DEPTH_GROUNDING_PIXEL_RADIUS + 1,
+                            ),
+                        ):
+                            measured_depth = float(depth_array[y, x])
+                            if not math.isfinite(measured_depth):
+                                continue
+                            error = abs(measured_depth - expected_depth)
+                            if error <= tolerance and error < best_error:
+                                best_pixel = (x, y, measured_depth)
+                                best_error = error
+                    if best_pixel is None:
                         continue
+                    x, y, measured_depth = best_pixel
                     recovered.append(
                         self._backproject_pixel(
                             frame,
@@ -905,8 +1024,11 @@ class CueGroundedExpert:
         self._track_update_counts = {}
         self._cached_actions = []
         self._cached_subgoal = None
-        self._cached_intent = None
         self._cached_mode_id = None
+        self._planned_hypothesis = None
+        self._last_navigation_yaw = None
+        self._planner_calls = 0
+        self._maximum_planner_calls = self.spec.horizon_steps
         self._last_evidence_step = None
         self._seen_evidence_ids = set()
         self._scan_intent = None
@@ -918,7 +1040,6 @@ class CueGroundedExpert:
         self._consecutive_scan_turns = 0
         self._scan_transition_used = set()
         self._search_altitude_change_used = False
-        self._planner_retry_signature = None
         self._source_confirmation_track = None
         self._source_confirmation_failures = 0
 
@@ -1033,6 +1154,23 @@ class CueGroundedExpert:
         return sources[0] if sources else None
 
     @staticmethod
+    def _source_projected_span(source):
+        x_min, y_min, x_max, y_max = source.projected_bbox
+        return max(float(x_max) - float(x_min), float(y_max) - float(y_min))
+
+    @classmethod
+    def _source_stop_ready(cls, source, camera_position):
+        horizontal_range = math.dist(
+            tuple(float(value) for value in camera_position[:2]),
+            tuple(float(value) for value in source.position_local[:2]),
+        )
+        return (
+            horizontal_range <= SOURCE_STOP_MAX_HORIZONTAL_RANGE_METERS
+            and cls._source_projected_span(source)
+            >= SOURCE_STOP_MIN_PROJECTED_SPAN_PIXELS
+        )
+
+    @staticmethod
     def _estimated_agl(observation):
         view = observation.nadir
         depth = np.frombuffer(view.depth, dtype="<f4").reshape(
@@ -1052,21 +1190,59 @@ class CueGroundedExpert:
             else math.inf
         )
 
-    @staticmethod
-    def _temporary_subgoal(position, hypothesis):
+    def _belief_subgoal(self, position, yaw, hypothesis):
+        """Move one bounded strict-action chunk toward the belief mode."""
         delta = np.asarray(
             (
-                hypothesis[0] - position[0],
-                hypothesis[1] - position[1],
+                float(hypothesis[0]) - float(position[0]),
+                float(hypothesis[1]) - float(position[1]),
+                0.0,
             ),
             dtype=np.float64,
         )
-        distance = float(np.linalg.norm(delta))
-        if distance > LOCAL_SUBGOAL_MAX_METERS:
-            delta *= LOCAL_SUBGOAL_MAX_METERS / distance
+        distance = float(np.linalg.norm(delta[:2]))
+        if distance > TASK_FORWARD_STEP_METERS:
+            target = np.asarray(position, dtype=np.float64) + delta
+            desired_yaw = _yaw_toward_local(position, target)
+            self._last_navigation_yaw = desired_yaw
+        elif self._last_navigation_yaw is not None:
+            # A direction cue constrains a ray, not a terminal distance.
+            # Reaching the current belief centroid therefore means continue
+            # one bounded chunk along the latest response-derived heading.
+            desired_yaw = self._last_navigation_yaw
+            distance = NAVIGATION_CHUNK_METERS
+        else:
+            return tuple(float(value) for value in position)
+        target_yaw = (
+            round(desired_yaw / TASK_YAW_STEP_DEGREES)
+            * TASK_YAW_STEP_DEGREES
+        )
+        turn_actions = _minimum_discrete_turn_actions(yaw, target_yaw)
+        translation_budget = (
+            LOCAL_PLAN_MAX_ACTIONS
+            - turn_actions
+            - LOCAL_PLAN_MANEUVER_RESERVE_ACTIONS
+        )
+        if translation_budget <= 0:
+            raise ExpertGenerationError(
+                "BELIEF_SUBGOAL_FAILED: local action horizon is smaller "
+                "than the required turn reserve"
+            )
+        maximum_forward_actions = min(
+            translation_budget,
+            int(NAVIGATION_CHUNK_METERS // TASK_FORWARD_STEP_METERS),
+        )
+        forward_actions = min(
+            maximum_forward_actions,
+            max(1, int(math.floor(
+                distance / TASK_FORWARD_STEP_METERS + 1.0e-12
+            ))),
+        )
+        radians = math.radians(target_yaw)
+        chunk_distance = forward_actions * TASK_FORWARD_STEP_METERS
         return (
-            float(position[0] + delta[0]),
-            float(position[1] + delta[1]),
+            float(position[0]) + math.cos(radians) * chunk_distance,
+            float(position[1]) - math.sin(radians) * chunk_distance,
             float(position[2]),
         )
 
@@ -1160,7 +1336,14 @@ class CueGroundedExpert:
             self._completed_scan = None
             self._scan_transition_used.clear()
 
-        source = self._source_track(grounded)
+        observed_source = self._source_track(grounded)
+        source_approach = (
+            observed_source
+            if observed_source is not None
+            and not self._source_stop_ready(observed_source, position)
+            else None
+        )
+        source = observed_source if source_approach is None else None
         if source is None and self._source_confirmation_track is not None:
             self._source_confirmation_track = None
             self._source_confirmation_failures += 1
@@ -1207,6 +1390,31 @@ class CueGroundedExpert:
                 action = HoldAction()
                 self._source_confirmation_track = source.track_id
             self._cached_actions.clear()
+        elif source_approach is not None:
+            horizontal_range = math.dist(
+                position[:2], source_approach.position_local[:2]
+            )
+            if (
+                horizontal_range <= SOURCE_STOP_MAX_HORIZONTAL_RANGE_METERS
+                and self._source_projected_span(source_approach)
+                < SOURCE_STOP_MIN_PROJECTED_SPAN_PIXELS
+            ):
+                intent = ExpertIntent.VERIFY_SOURCE
+                action = DescendAction()
+                candidate, _candidate_yaw = _action_pose_local(
+                    position, yaw, action
+                )
+                if (
+                    not self._inside_activity(candidate)
+                    or not self.geometry.action_clear(position, yaw, action)
+                ):
+                    raise ExpertGenerationError(
+                        "SOURCE_APPROACH_BLOCKED: cannot descend for a "
+                        "larger grounded-source observation"
+                    )
+                self._cached_actions.clear()
+            else:
+                intent = ExpertIntent.FOLLOW_BELIEF
         elif evidence and self.belief.ambiguous:
             intent = ExpertIntent.REACQUIRE_CUE
         elif evidence:
@@ -1288,75 +1496,78 @@ class CueGroundedExpert:
                     )
                 self._cached_actions.clear()
             if intent == ExpertIntent.FOLLOW_BELIEF:
-                if hypothesis is None:
+                navigation_hypothesis = (
+                    source_approach.position_local
+                    if source_approach is not None
+                    else hypothesis
+                )
+                navigation_mode = (
+                    ("SOURCE", source_approach.track_id)
+                    if source_approach is not None
+                    else ("BELIEF", mode_id)
+                )
+                if navigation_hypothesis is None:
                     raise ExpertGenerationError(
                         "No belief hypothesis is available"
                     )
-                subgoal = self._temporary_subgoal(
-                    position,
-                    hypothesis,
-                )
-                needs_replan = (
-                    not self._cached_actions
-                    or self._cached_intent != intent
-                    or self._cached_subgoal is None
-                    or math.dist(
-                        self._cached_subgoal,
-                        subgoal,
-                    )
-                    > BELIEF_CELL_METERS
-                )
+
                 if (
-                    not needs_replan
+                    self._cached_actions
+                    and self._cached_mode_id != navigation_mode
+                ):
+                    self._cached_actions.clear()
+                if (
+                    self._cached_actions
                     and not self.geometry.action_clear(
                         position,
                         yaw,
                         self._cached_actions[0],
                     )
                 ):
-                    needs_replan = True
-                if needs_replan:
-                    retry_signature = (
-                        mode_id,
-                        tuple(round(value, 3) for value in subgoal),
-                    )
-                    try:
-                        self._cached_actions = list(self.planner.plan(
-                            position,
-                            yaw,
-                            subgoal,
-                            self.geometry,
-                            self.spec.activity_radius_m,
-                            self.spec.activity_vertical_m,
-                        ))
-                    except LocalPlanNotFound as error:
-                        if self._planner_retry_signature == retry_signature:
-                            raise ExpertGenerationError(
-                                "LOCAL_PLAN_RETRY_FAILED: the same belief "
-                                f"subgoal failed after one observation; {error}"
-                            ) from error
-                        self._planner_retry_signature = retry_signature
-                        self._cached_actions.clear()
-                        intent = ExpertIntent.AVOID_COLLISION
-                        action = HoldAction()
-                        planner_failure = str(error)
-                        replanned = True
-                    else:
-                        self._planner_retry_signature = None
-                        self._cached_subgoal = subgoal
-                        self._cached_intent = intent
-                        self._cached_mode_id = mode_id
-                        replanned = True
-                if (
-                    intent == ExpertIntent.FOLLOW_BELIEF
-                    and not self._cached_actions
-                ):
-                    raise ExpertGenerationError(
-                        "Local planner returned an empty non-terminal plan"
-                    )
-                if intent == ExpertIntent.FOLLOW_BELIEF:
-                    action = self._cached_actions.pop(0)
+                    self._cached_actions.clear()
 
+                if not self._cached_actions:
+                    if self._planner_calls >= self._maximum_planner_calls:
+                        raise ExpertGenerationError(
+                            "PLANNER_BUDGET_EXHAUSTED: more than "
+                            f"{self._maximum_planner_calls} belief plans "
+                            "would be required"
+                        )
+                    subgoal = self._belief_subgoal(
+                        position,
+                        yaw,
+                        navigation_hypothesis,
+                    )
+                    self._planner_calls += 1
+                    replanned = True
+                    try:
+                        planned = list(
+                            self.planner.plan(
+                                position,
+                                yaw,
+                                subgoal,
+                                self.geometry,
+                                self.spec.activity_radius_m,
+                                self.spec.activity_vertical_m,
+                            )
+                        )
+                    except LocalPlanNotFound as error:
+                        raise ExpertGenerationError(
+                            "BELIEF_PLAN_NOT_FOUND: response-derived "
+                            f"subgoal is unreachable; {error}"
+                        ) from error
+                    if not planned:
+                        # Pause at the current belief mode. If no fresh
+                        # evidence or source appears, the normal finite
+                        # reacquisition rule takes over after four steps.
+                        planned = [HoldAction()] * REACQUIRE_AFTER_STEPS
+                    self._cached_actions = planned
+                    self._cached_subgoal = subgoal
+                    self._cached_mode_id = navigation_mode
+                    self._planned_hypothesis = tuple(navigation_hypothesis)
+                else:
+                    subgoal = self._cached_subgoal
+                action = self._cached_actions.pop(0)
         self._previous_tracks = {
             track.track_id: track for track in grounded.tracks
         }

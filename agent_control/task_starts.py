@@ -26,11 +26,11 @@ from .dronesim_client import (
 )
 
 
-TASK_FORWARD_STEP_METERS = 2.0
-TASK_VERTICAL_STEP_METERS = 2.0
+TASK_FORWARD_STEP_METERS = 1.0
+TASK_VERTICAL_STEP_METERS = 1.0
 TASK_YAW_STEP_DEGREES = 15.0
 TASK_STEP_MILLISECONDS = 250
-TASK_HORIZON_STEPS = 65
+TASK_HORIZON_STEPS = 80
 TASK_ACTIVITY_RADIUS_METERS = 120.0
 TASK_ACTIVITY_VERTICAL_METERS = 40.0
 TASK_GOAL_VIEW_HEIGHTS_METERS = (
@@ -625,6 +625,7 @@ def assess_visibility(snapshot, view_matrices, spec):
         raise TypeError("snapshot must be a VisibilitySnapshot")
     results = []
     source_clear = False
+    source_sample_count = 0
     envelope_clear = False
     envelope_clear_count = 0
     envelope_sample_count = 0
@@ -652,6 +653,7 @@ def assess_visibility(snapshot, view_matrices, spec):
         )
         if target.role == VisibilityTargetRole.FIRE_SOURCE_VEHICLE:
             source_clear = any_clear
+            source_sample_count = len(target.samples)
             event_task_observable = observable
         elif target.role == VisibilityTargetRole.FIRE_ENVELOPE:
             envelope_clear = any_clear
@@ -676,20 +678,22 @@ def assess_visibility(snapshot, view_matrices, spec):
                 nadir=nadir,
             )
         )
-    if envelope_sample_count == 0:
+    if source_sample_count == 0:
         raise ValueError(
-            "Visibility snapshot has no fire-envelope samples"
+            "Visibility snapshot has no fire-source vehicle samples"
         )
     return VisibilityAssessment(
         source_vehicle_has_line_of_sight=source_clear,
         fire_envelope_has_line_of_sight=envelope_clear,
         fire_envelope_clear_fraction=(
             envelope_clear_count / envelope_sample_count
+            if envelope_sample_count else 0.0
         ),
         fire_envelope_task_observable=envelope_task_observable,
-        event_initially_hidden=(
-            not source_clear and not envelope_task_observable
-        ),
+        # GTA particle rendering is view-, distance-, and LOD-dependent. The
+        # fire envelope remains diagnostic truth, but it cannot invalidate a
+        # start. Hidden-event semantics are defined by the physical source.
+        event_initially_hidden=not source_clear,
         event_task_observable=event_task_observable,
         cue_task_observable=cue_task_observable,
         targets=tuple(results),
@@ -770,27 +774,39 @@ def _select_cue_visible_yaw(
             for kept in unique
         ):
             unique.append(yaw)
-    for yaw in unique:
+    best = None
+    for order, yaw in enumerate(unique):
         matrices = virtual_view_matrices(
             position,
             yaw,
             observation_spec,
         )
-        if any(
-            _assess_target_view(
+        observable = []
+        for case in early_batch.cases:
+            oblique = _assess_target_view(
                 case.target,
                 matrices["oblique"],
                 observation_spec,
-            ).task_observable
-            or _assess_target_view(
+            )
+            nadir = _assess_target_view(
                 case.target,
                 matrices["nadir"],
                 observation_spec,
-            ).task_observable
-            for case in early_batch.cases
-        ):
-            return yaw
-    return None
+            )
+            for view in (oblique, nadir):
+                if view.task_observable:
+                    observable.append(view)
+        if not observable:
+            continue
+        score = (
+            max(view.projected_span_pixels for view in observable),
+            max(view.clear_in_frustum_samples for view in observable),
+            len(observable),
+            -order,
+        )
+        if best is None or score > best[0]:
+            best = (score, yaw)
+    return None if best is None else best[1]
 
 
 def potential_cue_visible(
@@ -910,7 +926,6 @@ def generate_task_start(
         "space_blocked": 0,
         "goal_view_outside_activity": 0,
         "source_vehicle_visible": 0,
-        "fire_envelope_observable": 0,
         "stratum_mismatch": 0,
         "real_camera_mismatch": 0,
     }
@@ -1046,9 +1061,7 @@ def generate_task_start(
         if assessment.source_vehicle_has_line_of_sight:
             rejection_counts["source_vehicle_visible"] += 1
             continue
-        if assessment.fire_envelope_task_observable:
-            rejection_counts["fire_envelope_observable"] += 1
-            continue
+
         if not _stratum_matches(
             visibility_stratum,
             assessment,

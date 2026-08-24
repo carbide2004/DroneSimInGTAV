@@ -65,8 +65,7 @@ def _assert_start(generated, scenario):
     assessment = generated.assessment
     if not assessment.event_initially_hidden:
         raise RuntimeError(
-            "Generated start exposes the fire-source vehicle or makes "
-            "the fire envelope task-observable"
+            "Generated start exposes the fire-source vehicle"
         )
     expected_cue = (
         blueprint.visibility_stratum
@@ -471,12 +470,6 @@ def main():
                 != probe_start.assessment.event_initially_hidden
                 or assessment.source_vehicle_has_line_of_sight
                 != probe_start.assessment.source_vehicle_has_line_of_sight
-                or assessment.fire_envelope_has_line_of_sight
-                != probe_start.assessment.fire_envelope_has_line_of_sight
-                or assessment.fire_envelope_task_observable
-                != probe_start.assessment.fire_envelope_task_observable
-                or assessment.fire_envelope_clear_fraction
-                != probe_start.assessment.fire_envelope_clear_fraction
                 or assessment.cue_task_observable
                 != probe_start.assessment.cue_task_observable
             ):

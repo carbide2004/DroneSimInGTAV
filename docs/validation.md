@@ -90,9 +90,23 @@ python validation\validate_visibility_starts.py `
   --anchor 234 324 100 --strata both --verify-determinism
 ```
 
-Use `--show-starts` to inspect projected source, envelope, and responder boxes.
+Use `--show-starts` to inspect projected source, diagnostic envelope, and responder boxes.
 Use `--queries 1000` to stress repeated frozen visibility queries without
 saving payloads.
+
+Validate the source-shadow batch protocols, pool invariants, persistence
+digest, and optional scenario-seed isolation:
+
+```powershell
+python validation\validate_anchor_start_pool.py `
+  --anchor 234 324 100 --verify-seed-isolation
+```
+
+The validator keeps all RGB-D and visibility data in memory. It checks the
+120 m ray contract, the dense radius/AGL/azimuth grid (up to 160 retained
+entries), source occlusion, goal views,
+lockstep invariants, pool reload/tamper rejection, and atomic anchor-row
+removal semantics.
 
 ## Spatiotemporal feasibility audit
 
@@ -146,7 +160,7 @@ python validation\visualize_stage2e_dataset.py `
 
 `--max-steps` may audit a noncanonical budget explicitly. The chosen value is
 shared by start-budget checking, teacher rollout, and strict execution. The
-canonical benchmark default remains 65 including STOP.
+canonical benchmark default remains 80 including STOP.
 
 ## Storage behavior
 

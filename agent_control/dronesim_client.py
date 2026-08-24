@@ -36,6 +36,9 @@ TYPE_QUERY_VISIBILITY = 31
 TYPE_PROBE_CAMERA_START = 32
 TYPE_PROBE_CAMERA_GEOMETRY_BATCH = 33
 TYPE_QUERY_TARGET_VISIBILITY_BATCH = 34
+TYPE_PROBE_FIRE_SHADOW_BATCH = 35
+TYPE_PROBE_CAMERA_START_BATCH = 36
+TYPE_QUERY_FIRE_OCCLUSION_BATCH = 37
 
 COMMAND_STATUS = {
     0: "OK",
@@ -282,6 +285,65 @@ class TargetVisibilityCaseSnapshot:
 
 @dataclass(frozen=True)
 class TargetVisibilityBatchSnapshot:
+    scenario_id: int
+    lockstep_session_id: int
+    step_index: int
+    game_timer_ms: int
+    frame_count: int
+    cases: tuple
+
+
+
+class CameraStartBatchStatus(IntEnum):
+    OK = 0
+    GROUND_NOT_FOUND = 1
+    SPACE_BLOCKED = 2
+
+
+@dataclass(frozen=True)
+class FireShadowRaySnapshot:
+    hit: bool
+    distance: float
+    position: tuple
+    normal: tuple
+
+
+@dataclass(frozen=True)
+class FireShadowBatchSnapshot:
+    scenario_id: int
+    lockstep_session_id: int
+    step_index: int
+    game_timer_ms: int
+    frame_count: int
+    origin: tuple
+    rays: tuple
+
+
+@dataclass(frozen=True)
+class CameraStartBatchItem:
+    status: CameraStartBatchStatus
+    position: tuple
+    ground_z: float
+
+
+@dataclass(frozen=True)
+class CameraStartBatchSnapshot:
+    lockstep_session_id: int
+    step_index: int
+    game_timer_ms: int
+    frame_count: int
+    items: tuple
+
+
+@dataclass(frozen=True)
+class FireOcclusionCaseSnapshot:
+    camera_center: tuple
+    source_vehicle: VisibilityTarget
+    fire_envelope: VisibilityTarget
+
+
+@dataclass(frozen=True)
+class FireOcclusionBatchSnapshot:
     scenario_id: int
     lockstep_session_id: int
     step_index: int
@@ -901,6 +963,100 @@ def _decode_target_visibility_batch_snapshot(payload):
         frame_count=frame_count,
         cases=tuple(cases),
     )
+
+
+
+def _decode_fire_shadow_batch_snapshot(payload):
+    reader = _PayloadReader(payload)
+    scenario_id, session_id, step_index = reader.unpack("<QQQ")
+    game_timer_ms, frame_count = reader.unpack("<II")
+    origin = _finite_tuple("fire-shadow origin", reader.unpack("<3f"))
+    count = reader.unpack("<I")[0]
+    if scenario_id == 0 or session_id == 0 or not 1 <= count <= 256:
+        raise DroneSimProtocolError("Fire-shadow batch has invalid identity/count")
+    rays = []
+    for _ in range(count):
+        hit_value, distance = reader.unpack("<Bf")
+        if hit_value not in (0, 1) or not math.isfinite(distance):
+            raise DroneSimProtocolError("Fire-shadow result is invalid")
+        position = _finite_tuple("fire-shadow position", reader.unpack("<3f"))
+        normal = _finite_tuple("fire-shadow normal", reader.unpack("<3f"))
+        if distance < 0.0 or distance > 120.01:
+            raise DroneSimProtocolError("Fire-shadow distance is out of range")
+        rays.append(FireShadowRaySnapshot(bool(hit_value), float(distance),
+                                          position, normal))
+    reader.finish()
+    return FireShadowBatchSnapshot(scenario_id, session_id, step_index,
+                                   game_timer_ms, frame_count, origin,
+                                   tuple(rays))
+
+
+def _decode_camera_start_batch_snapshot(payload):
+    reader = _PayloadReader(payload)
+    session_id, step_index = reader.unpack("<QQ")
+    game_timer_ms, frame_count, count = reader.unpack("<3I")
+    if session_id == 0 or not 1 <= count <= 256:
+        raise DroneSimProtocolError("Camera-start batch has invalid identity/count")
+    items = []
+    for _ in range(count):
+        status_value = reader.unpack("<I")[0]
+        try:
+            status = CameraStartBatchStatus(status_value)
+        except ValueError as error:
+            raise DroneSimProtocolError(
+                f"Unknown camera-start batch status {status_value}") from error
+        position = _finite_tuple("camera-start position", reader.unpack("<3f"))
+        ground_z = reader.unpack("<f")[0]
+        if not math.isfinite(ground_z):
+            raise DroneSimProtocolError("Camera-start ground Z is non-finite")
+        items.append(CameraStartBatchItem(status, position, float(ground_z)))
+    reader.finish()
+    return CameraStartBatchSnapshot(session_id, step_index, game_timer_ms,
+                                    frame_count, tuple(items))
+
+
+def _read_fire_occlusion_target(reader, expected_role):
+    stable_id, gta_handle, role_value, sample_count = reader.unpack("<QiII")
+    try:
+        role = VisibilityTargetRole(role_value)
+    except ValueError as error:
+        raise DroneSimProtocolError(
+            f"Unknown fire-occlusion target role {role_value}") from error
+    if role != expected_role or not 1 <= sample_count <= 64:
+        raise DroneSimProtocolError("Fire-occlusion target schema is invalid")
+    if role == VisibilityTargetRole.FIRE_SOURCE_VEHICLE:
+        if stable_id == 0 or gta_handle == 0:
+            raise DroneSimProtocolError("Fire source has zero identity")
+    elif stable_id != 0 or gta_handle != 0:
+        raise DroneSimProtocolError("Fire envelope declares entity identity")
+    samples = []
+    for _ in range(sample_count):
+        x, y, z, clear_value, hit_entity = reader.unpack("<3fBi")
+        if clear_value not in (0, 1):
+            raise DroneSimProtocolError("Fire-occlusion flag is not boolean")
+        samples.append(VisibilitySample(
+            _finite_tuple("fire-occlusion sample", (x, y, z)),
+            bool(clear_value), hit_entity))
+    return VisibilityTarget(stable_id, gta_handle, role, tuple(samples))
+
+
+def _decode_fire_occlusion_batch_snapshot(payload):
+    reader = _PayloadReader(payload)
+    scenario_id, session_id, step_index = reader.unpack("<QQQ")
+    game_timer_ms, frame_count, count = reader.unpack("<3I")
+    if scenario_id == 0 or session_id == 0 or not 1 <= count <= 32:
+        raise DroneSimProtocolError("Fire-occlusion batch has invalid identity/count")
+    cases = []
+    for _ in range(count):
+        center = _finite_tuple("fire-occlusion center", reader.unpack("<3f"))
+        source = _read_fire_occlusion_target(
+            reader, VisibilityTargetRole.FIRE_SOURCE_VEHICLE)
+        envelope = _read_fire_occlusion_target(
+            reader, VisibilityTargetRole.FIRE_ENVELOPE)
+        cases.append(FireOcclusionCaseSnapshot(center, source, envelope))
+    reader.finish()
+    return FireOcclusionBatchSnapshot(scenario_id, session_id, step_index,
+                                      game_timer_ms, frame_count, tuple(cases))
 
 
 def _angle_error_degrees(actual, expected):
@@ -1739,6 +1895,90 @@ class DroneSimClient:
                 raise DroneSimProtocolError(
                     "Target-visibility response order does not match request"
                 )
+        return snapshot
+
+
+    def probe_fire_shadow_batch(
+        self, scenario_id, lockstep_session_id, directions, timeout=None
+    ):
+        scenario_id = int(scenario_id)
+        lockstep_session_id = int(lockstep_session_id)
+        normalized = []
+        for direction in directions:
+            try:
+                x, y, z = direction
+            except (TypeError, ValueError) as error:
+                raise ValueError("Each shadow direction must have three values") from error
+            _require_finite(x, y, z)
+            norm = math.sqrt(float(x) ** 2 + float(y) ** 2 + float(z) ** 2)
+            if abs(norm - 1.0) > 1.0e-3:
+                raise ValueError("Fire-shadow directions must be unit vectors")
+            normalized.append((float(x), float(y), float(z)))
+        if not 1 <= len(normalized) <= 256:
+            raise ValueError("Fire-shadow batch must contain 1..256 directions")
+        payload = bytearray(struct.pack(
+            "<QQI", scenario_id, lockstep_session_id, len(normalized)))
+        for direction in normalized:
+            payload.extend(struct.pack("<3f", *direction))
+        snapshot = _decode_fire_shadow_batch_snapshot(self._command(
+            TYPE_PROBE_FIRE_SHADOW_BATCH, bytes(payload), timeout=timeout))
+        if (snapshot.scenario_id != scenario_id or
+                snapshot.lockstep_session_id != lockstep_session_id or
+                len(snapshot.rays) != len(normalized)):
+            raise DroneSimProtocolError("Fire-shadow response identity/count mismatch")
+        return snapshot
+
+    def probe_camera_start_batch(
+        self, lockstep_session_id, cases, timeout=None
+    ):
+        lockstep_session_id = int(lockstep_session_id)
+        normalized = []
+        for item in cases:
+            try:
+                x, y, altitude = item
+            except (TypeError, ValueError) as error:
+                raise ValueError("Each camera-start case must have x/y/AGL") from error
+            _require_finite(x, y, altitude)
+            if float(altitude) <= 0.0:
+                raise ValueError("Camera-start AGL must be positive")
+            normalized.append((float(x), float(y), float(altitude)))
+        if not 1 <= len(normalized) <= 256:
+            raise ValueError("Camera-start batch must contain 1..256 cases")
+        payload = bytearray(struct.pack("<QI", lockstep_session_id, len(normalized)))
+        for item in normalized:
+            payload.extend(struct.pack("<3f", *item))
+        snapshot = _decode_camera_start_batch_snapshot(self._command(
+            TYPE_PROBE_CAMERA_START_BATCH, bytes(payload), timeout=timeout))
+        if (snapshot.lockstep_session_id != lockstep_session_id or
+                len(snapshot.items) != len(normalized)):
+            raise DroneSimProtocolError("Camera-start response identity/count mismatch")
+        return snapshot
+
+    def query_fire_occlusion_batch(
+        self, scenario_id, lockstep_session_id, camera_centers, timeout=None
+    ):
+        scenario_id = int(scenario_id)
+        lockstep_session_id = int(lockstep_session_id)
+        normalized = []
+        for center in camera_centers:
+            try:
+                x, y, z = center
+            except (TypeError, ValueError) as error:
+                raise ValueError("Each fire-occlusion center must have three values") from error
+            _require_finite(x, y, z)
+            normalized.append((float(x), float(y), float(z)))
+        if not 1 <= len(normalized) <= 32:
+            raise ValueError("Fire-occlusion batch must contain 1..32 centers")
+        payload = bytearray(struct.pack(
+            "<QQI", scenario_id, lockstep_session_id, len(normalized)))
+        for center in normalized:
+            payload.extend(struct.pack("<3f", *center))
+        snapshot = _decode_fire_occlusion_batch_snapshot(self._command(
+            TYPE_QUERY_FIRE_OCCLUSION_BATCH, bytes(payload), timeout=timeout))
+        if (snapshot.scenario_id != scenario_id or
+                snapshot.lockstep_session_id != lockstep_session_id or
+                len(snapshot.cases) != len(normalized)):
+            raise DroneSimProtocolError("Fire-occlusion response identity/count mismatch")
         return snapshot
 
     def capture(self, timeout_ms=5000):

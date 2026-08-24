@@ -385,6 +385,73 @@ std::vector<unsigned char> target_visibility_batch_snapshot_bytes(
     return data;
 }
 
+
+void append_visibility_target_snapshot(
+    std::vector<unsigned char>& data,
+    const VisibilityTargetSnapshot& target) {
+    append_scalar(data, target.stable_id);
+    append_scalar(data, target.gta_handle);
+    append_scalar(data, static_cast<std::uint32_t>(target.role));
+    append_scalar(data, static_cast<std::uint32_t>(target.samples.size()));
+    for (const VisibilitySampleSnapshot& sample : target.samples) {
+        append_vector3(data, sample.position);
+        data.push_back(sample.clear_line_of_sight ? 1 : 0);
+        append_scalar(data, sample.hit_entity);
+    }
+}
+
+std::vector<unsigned char> fire_shadow_batch_snapshot_bytes(
+    const FireShadowBatchSnapshot& snapshot) {
+    std::vector<unsigned char> data;
+    append_scalar(data, snapshot.scenario_id);
+    append_scalar(data, snapshot.lockstep_session_id);
+    append_scalar(data, snapshot.step_index);
+    append_scalar(data, snapshot.game_timer_ms);
+    append_scalar(data, snapshot.frame_count);
+    append_vector3(data, snapshot.origin);
+    append_scalar(data, static_cast<std::uint32_t>(snapshot.rays.size()));
+    for (const FireShadowRaySnapshot& ray : snapshot.rays) {
+        data.push_back(ray.hit ? 1 : 0);
+        append_scalar(data, ray.distance);
+        append_vector3(data, ray.position);
+        append_vector3(data, ray.normal);
+    }
+    return data;
+}
+
+std::vector<unsigned char> camera_start_batch_snapshot_bytes(
+    const CameraStartBatchSnapshot& snapshot) {
+    std::vector<unsigned char> data;
+    append_scalar(data, snapshot.lockstep_session_id);
+    append_scalar(data, snapshot.step_index);
+    append_scalar(data, snapshot.game_timer_ms);
+    append_scalar(data, snapshot.frame_count);
+    append_scalar(data, static_cast<std::uint32_t>(snapshot.items.size()));
+    for (const CameraStartBatchItem& item : snapshot.items) {
+        append_scalar(data, static_cast<std::uint32_t>(item.status));
+        append_vector3(data, item.position);
+        append_scalar(data, item.ground_z);
+    }
+    return data;
+}
+
+std::vector<unsigned char> fire_occlusion_batch_snapshot_bytes(
+    const FireOcclusionBatchSnapshot& snapshot) {
+    std::vector<unsigned char> data;
+    append_scalar(data, snapshot.scenario_id);
+    append_scalar(data, snapshot.lockstep_session_id);
+    append_scalar(data, snapshot.step_index);
+    append_scalar(data, snapshot.game_timer_ms);
+    append_scalar(data, snapshot.frame_count);
+    append_scalar(data, static_cast<std::uint32_t>(snapshot.cases.size()));
+    for (const FireOcclusionCaseSnapshot& item : snapshot.cases) {
+        append_vector3(data, item.camera_center);
+        append_visibility_target_snapshot(data, item.source_vehicle);
+        append_visibility_target_snapshot(data, item.fire_envelope);
+    }
+    return data;
+}
+
 bool empty_payload(
     const std::vector<unsigned char>& payload,
     RuntimeCommandResult& error) {
@@ -1048,6 +1115,134 @@ void Server::handle_client() {
                 if (result.status == RuntimeCommandStatus::Ok) {
                     data = target_visibility_batch_snapshot_bytes(
                         result.target_visibility_batch_snapshot);
+                }
+                break;
+            }
+
+            case MSG_PROBE_FIRE_SHADOW_BATCH: {
+                constexpr std::size_t fixed_size =
+                    sizeof(std::uint64_t) * 2 + sizeof(std::uint32_t);
+                if (payload.size() < fixed_size) {
+                    result = invalid_request(
+                        "PROBE_FIRE_SHADOW_BATCH payload is too short");
+                    break;
+                }
+                std::uint64_t scenario_id = 0;
+                std::uint64_t session_id = 0;
+                std::uint32_t count = 0;
+                read_scalar(payload, 0, scenario_id);
+                read_scalar(payload, sizeof(std::uint64_t), session_id);
+                read_scalar(payload, sizeof(std::uint64_t) * 2, count);
+                const std::uint64_t expected = fixed_size +
+                    static_cast<std::uint64_t>(count) * sizeof(float) * 3;
+                if (count == 0 || count > 256 || expected != payload.size()) {
+                    result = invalid_request(
+                        "PROBE_FIRE_SHADOW_BATCH expects 1..256 directions");
+                    break;
+                }
+                auto command = make_runtime_command(
+                    RuntimeCommandType::ProbeFireShadowBatch,
+                    header.request_id);
+                command->scenario_id = scenario_id;
+                command->lockstep_session_id = session_id;
+                command->fire_shadow_directions.reserve(count);
+                std::size_t offset = fixed_size;
+                for (std::uint32_t index = 0; index < count; ++index) {
+                    ScenarioVector3 direction;
+                    read_scalar(payload, offset, direction.x);
+                    read_scalar(payload, offset + sizeof(float), direction.y);
+                    read_scalar(payload, offset + sizeof(float) * 2, direction.z);
+                    offset += sizeof(float) * 3;
+                    command->fire_shadow_directions.push_back(direction);
+                }
+                result = run_command(command, std::chrono::milliseconds(30000));
+                if (result.status == RuntimeCommandStatus::Ok) {
+                    data = fire_shadow_batch_snapshot_bytes(
+                        result.fire_shadow_batch_snapshot);
+                }
+                break;
+            }
+            case MSG_PROBE_CAMERA_START_BATCH: {
+                constexpr std::size_t fixed_size =
+                    sizeof(std::uint64_t) + sizeof(std::uint32_t);
+                if (payload.size() < fixed_size) {
+                    result = invalid_request(
+                        "PROBE_CAMERA_START_BATCH payload is too short");
+                    break;
+                }
+                std::uint64_t session_id = 0;
+                std::uint32_t count = 0;
+                read_scalar(payload, 0, session_id);
+                read_scalar(payload, sizeof(std::uint64_t), count);
+                const std::uint64_t expected = fixed_size +
+                    static_cast<std::uint64_t>(count) * sizeof(float) * 3;
+                if (count == 0 || count > 256 || expected != payload.size()) {
+                    result = invalid_request(
+                        "PROBE_CAMERA_START_BATCH expects 1..256 cases");
+                    break;
+                }
+                auto command = make_runtime_command(
+                    RuntimeCommandType::ProbeCameraStartBatch,
+                    header.request_id);
+                command->lockstep_session_id = session_id;
+                command->camera_start_cases.reserve(count);
+                std::size_t offset = fixed_size;
+                for (std::uint32_t index = 0; index < count; ++index) {
+                    CameraStartCase item;
+                    read_scalar(payload, offset, item.x);
+                    read_scalar(payload, offset + sizeof(float), item.y);
+                    read_scalar(payload, offset + sizeof(float) * 2,
+                                item.altitude_agl);
+                    offset += sizeof(float) * 3;
+                    command->camera_start_cases.push_back(item);
+                }
+                result = run_command(command, std::chrono::milliseconds(30000));
+                if (result.status == RuntimeCommandStatus::Ok) {
+                    data = camera_start_batch_snapshot_bytes(
+                        result.camera_start_batch_snapshot);
+                }
+                break;
+            }
+            case MSG_QUERY_FIRE_OCCLUSION_BATCH: {
+                constexpr std::size_t fixed_size =
+                    sizeof(std::uint64_t) * 2 + sizeof(std::uint32_t);
+                if (payload.size() < fixed_size) {
+                    result = invalid_request(
+                        "QUERY_FIRE_OCCLUSION_BATCH payload is too short");
+                    break;
+                }
+                std::uint64_t scenario_id = 0;
+                std::uint64_t session_id = 0;
+                std::uint32_t count = 0;
+                read_scalar(payload, 0, scenario_id);
+                read_scalar(payload, sizeof(std::uint64_t), session_id);
+                read_scalar(payload, sizeof(std::uint64_t) * 2, count);
+                const std::uint64_t expected = fixed_size +
+                    static_cast<std::uint64_t>(count) * sizeof(float) * 3;
+                if (count == 0 || count > 32 || expected != payload.size()) {
+                    result = invalid_request(
+                        "QUERY_FIRE_OCCLUSION_BATCH expects 1..32 centers");
+                    break;
+                }
+                auto command = make_runtime_command(
+                    RuntimeCommandType::QueryFireOcclusionBatch,
+                    header.request_id);
+                command->scenario_id = scenario_id;
+                command->lockstep_session_id = session_id;
+                command->fire_occlusion_camera_centers.reserve(count);
+                std::size_t offset = fixed_size;
+                for (std::uint32_t index = 0; index < count; ++index) {
+                    ScenarioVector3 center;
+                    read_scalar(payload, offset, center.x);
+                    read_scalar(payload, offset + sizeof(float), center.y);
+                    read_scalar(payload, offset + sizeof(float) * 2, center.z);
+                    offset += sizeof(float) * 3;
+                    command->fire_occlusion_camera_centers.push_back(center);
+                }
+                result = run_command(command, std::chrono::milliseconds(30000));
+                if (result.status == RuntimeCommandStatus::Ok) {
+                    data = fire_occlusion_batch_snapshot_bytes(
+                        result.fire_occlusion_batch_snapshot);
                 }
                 break;
             }

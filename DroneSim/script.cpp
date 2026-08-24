@@ -515,6 +515,43 @@ RuntimeCommandResult execute_command(const RuntimeCommand& command) {
             result.message = error;
             return result;
         }
+        case RuntimeCommandType::ProbeFireShadowBatch: {
+            RuntimeCommandResult result = ok_result();
+            const VisibilityOperationStatus status =
+                VisibilityEvaluator::instance().probe_fire_shadow_batch(
+                    command.scenario_id,
+                    command.lockstep_session_id,
+                    command.fire_shadow_directions,
+                    command.cancelled,
+                    result.fire_shadow_batch_snapshot, error);
+            result.status = map_visibility_status(status);
+            result.message = error;
+            return result;
+        }
+        case RuntimeCommandType::ProbeCameraStartBatch: {
+            RuntimeCommandResult result = ok_result();
+            const VisibilityOperationStatus status =
+                VisibilityEvaluator::instance().probe_camera_start_batch(
+                    command.lockstep_session_id,
+                    command.camera_start_cases, command.cancelled,
+                    result.camera_start_batch_snapshot, error);
+            result.status = map_visibility_status(status);
+            result.message = error;
+            return result;
+        }
+        case RuntimeCommandType::QueryFireOcclusionBatch: {
+            RuntimeCommandResult result = ok_result();
+            const VisibilityOperationStatus status =
+                VisibilityEvaluator::instance().query_fire_occlusion_batch(
+                    command.scenario_id,
+                    command.lockstep_session_id,
+                    command.fire_occlusion_camera_centers,
+                    command.cancelled,
+                    result.fire_occlusion_batch_snapshot, error);
+            result.status = map_visibility_status(status);
+            result.message = error;
+            return result;
+        }
         case RuntimeCommandType::QueryTargetVisibilityBatch: {
             RuntimeCommandResult result = ok_result();
             const VisibilityOperationStatus status =

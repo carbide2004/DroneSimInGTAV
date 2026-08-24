@@ -30,15 +30,14 @@ constexpr std::array<std::array<float, 2>, 4>
         {{50.0f, 65.0f}},
     }};
 constexpr float kPedestrianMaximumVerticalOffsetMeters = 12.0f;
-constexpr float kPedestrianMaximumRoadNodeDistanceMeters = 20.0f;
-constexpr float kPedestrianMaximumRoadLayerOffsetMeters = 3.0f;
+constexpr float kPedestrianRoadCorridorRadiusMeters = 4.0f;
 constexpr float kFireTruckSpeedMetersPerSecond = 12.0f;
 constexpr float kFireTruckStopRangeMeters = 10.0f;
 constexpr float kPedestrianFleeDistanceMeters = 120.0f;
 constexpr int kDrivingStyle = 786603;
 constexpr std::size_t kMaximumPlacementAttempts = 2048;
 constexpr std::size_t kPlacementAttemptsPerFrame = 16;
-constexpr std::size_t kPedestrianCandidateMultiplier = 3;
+constexpr std::size_t kPedestrianCandidateMultiplier = 2;
 constexpr std::size_t kMaximumWorldEntities = 2048;
 constexpr std::uint32_t kFireActivationTimeoutMilliseconds = 3000;
 constexpr auto kModelLoadTimeout = std::chrono::seconds(10);
@@ -250,10 +249,8 @@ ScenarioOperationStatus FireScenario::prepare(
         pedestrian_slots_drawn_ = false;
     }
     placement_attempts_ = 0;
-    pedestrian_query_failures_ = 0;
     pedestrian_bounds_rejections_ = 0;
     pedestrian_road_query_failures_ = 0;
-    pedestrian_road_layer_rejections_ = 0;
     pedestrian_duplicate_rejections_ = 0;
 
     lifecycle_ = ScenarioLifecycle::Preparing;
@@ -497,8 +494,8 @@ bool FireScenario::resolve_pedestrian_spawns(
     // once, before the candidate search runs. These draws previously
     // happened inside the search loop, at the moment a candidate was
     // accepted, so they were consumed once per accepted candidate. The
-    // number of accepted candidates depends on GET_SAFE_COORD_FOR_PED,
-    // whose success rate varies with navmesh streaming state, so the same
+    // number of accepted road-node candidates can vary with world streaming
+    // state, so the same
     // seed consumed a different number of draws on each Prepare and the
     // whole model/activation sequence shifted by one or more slots. That
     // broke the Stage 2E.1 guarantee that one blueprint reproduces the same
@@ -677,14 +674,10 @@ bool FireScenario::resolve_pedestrian_spawns(
                 "," +
                 std::to_string(
                     pedestrian_candidate_spawns_[3].size()) +
-                ", native_query_failures=" +
-                std::to_string(pedestrian_query_failures_) +
                 ", bounds_rejections=" +
                 std::to_string(pedestrian_bounds_rejections_) +
                 ", road_query_failures=" +
                 std::to_string(pedestrian_road_query_failures_) +
-                ", road_layer_rejections=" +
-                std::to_string(pedestrian_road_layer_rejections_) +
                 ", duplicate_rejections=" +
                 std::to_string(pedestrian_duplicate_rejections_);
             return false;
@@ -697,19 +690,41 @@ bool FireScenario::resolve_pedestrian_spawns(
             event_position_.x + std::cos(angle) * radius;
         const float candidate_y =
             event_position_.y + std::sin(angle) * radius;
-        Vector3 safe{};
-        if (!PATHFIND::GET_SAFE_COORD_FOR_PED(
+        // Vehicle road nodes provide the street layer. Preserve the sampled
+        // direction while clamping it to a four-meter road corridor so one
+        // road segment can host a spaced pedestrian group without collapsing
+        // every candidate onto the sparse node center. Using the node Z keeps
+        // the group off rooftop navmesh.
+        Vector3 road_node{};
+        if (!PATHFIND::GET_CLOSEST_VEHICLE_NODE(
                 candidate_x,
                 candidate_y,
-                event_position_.z + 5.0f,
-                TRUE,
-                &safe,
-                0)) {
-            ++pedestrian_query_failures_;
+                event_position_.z,
+                &road_node,
+                1,
+                3.0f,
+                0.0f)) {
+            ++pedestrian_road_query_failures_;
             continue;
         }
-        const ScenarioVector3 position =
-            to_scenario_vector(safe);
+        const float candidate_road_dx = candidate_x - road_node.x;
+        const float candidate_road_dy = candidate_y - road_node.y;
+        const float candidate_road_distance = std::sqrt(
+            candidate_road_dx * candidate_road_dx +
+            candidate_road_dy * candidate_road_dy);
+        ScenarioVector3 position{
+            candidate_x,
+            candidate_y,
+            road_node.z,
+        };
+        if (candidate_road_distance >
+                kPedestrianRoadCorridorRadiusMeters) {
+            const float scale =
+                kPedestrianRoadCorridorRadiusMeters /
+                candidate_road_distance;
+            position.x = road_node.x + candidate_road_dx * scale;
+            position.y = road_node.y + candidate_road_dy * scale;
+        }
         const float dx = position.x - event_position_.x;
         const float dy = position.y - event_position_.y;
         const float horizontal_distance =
@@ -723,32 +738,6 @@ bool FireScenario::resolve_pedestrian_spawns(
             vertical_offset >
                 kPedestrianMaximumVerticalOffsetMeters) {
             ++pedestrian_bounds_rejections_;
-            continue;
-        }
-
-        // GET_SAFE_COORD_FOR_PED accepts any loaded walkable navmesh,
-        // including roofs. Tie the candidate to the nearby road layer so
-        // civilians may use sidewalks and road shoulders without being
-        // placed on a building above the street.
-        Vector3 road_node{};
-        if (!PATHFIND::GET_CLOSEST_VEHICLE_NODE(
-                position.x,
-                position.y,
-                position.z,
-                &road_node,
-                1,
-                3.0f,
-                0.0f)) {
-            ++pedestrian_road_query_failures_;
-            continue;
-        }
-        const ScenarioVector3 road_position =
-            to_scenario_vector(road_node);
-        if (horizontal_distance_between(position, road_position) >
-                kPedestrianMaximumRoadNodeDistanceMeters ||
-            std::abs(position.z - road_position.z) >
-                kPedestrianMaximumRoadLayerOffsetMeters) {
-            ++pedestrian_road_layer_rejections_;
             continue;
         }
 
@@ -1848,10 +1837,8 @@ void FireScenario::cleanup_owned_resources() {
     next_firetruck_ = 0;
     next_pedestrian_ = 0;
     placement_attempts_ = 0;
-    pedestrian_query_failures_ = 0;
     pedestrian_bounds_rejections_ = 0;
     pedestrian_road_query_failures_ = 0;
-    pedestrian_road_layer_rejections_ = 0;
     pedestrian_duplicate_rejections_ = 0;
     release_models();
     if (fire_ptfx_asset_requested_) {

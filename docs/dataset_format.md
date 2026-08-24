@@ -13,8 +13,10 @@ its `.partial` directory must be new. Using a fresh root per collection run is
 recommended. Dataset and recording roots are ignored by Git because RGB-D
 collections can grow quickly.
 
-Grouped collection mode stores a `dataset_manifest.json` and directories
-organized by anchor and fixed scenario blueprint. The ASI manual camera saves
+Grouped collection mode uses manifest schema 4 and stores a
+`dataset_manifest.json`, one reusable `start_pool.json` per accepted anchor,
+and directories organized by anchor and fixed scenario blueprint. The ASI
+manual camera saves
 anchor rows to `<GTA V>\data\DroneSim_anchors.jsonl` when `F8` is pressed; the
 generator reads that file with `--anchor-file`. `--scenes-per-anchor` controls
 the number of seed-distinct blueprints at each coordinate and
@@ -31,11 +33,37 @@ The anchor file is UTF-8 JSONL with one finite numeric XYZ record per line:
 Blank lines are ignored. Malformed records and duplicate coordinates are
 rejected before the generator connects to GTA.
 
+For a fresh grouped collection, all anchors are classified before the manifest
+is created. This phase prepares a source-only static scene with zero responders,
+so pedestrian/vehicle spawn probability cannot invalidate anchor geometry.
+Static rays identify building-shadow sectors; candidate points pass ground,
+2 m camera clearance, source-vehicle occlusion, and task-observable goal-view
+budget checks. The current deterministic grid covers 42--60 m radius in 2 m
+increments, 25--60 m AGL, and dense azimuths within supported shadow sectors;
+farthest-point sampling retains at most 160 entries. Fire-envelope masks are
+stored as diagnostics but do not reject
+a start. `UNSUITABLE` rows are atomically removed from an anchor JSONL while
+retained text and order are preserved. Any `UNKNOWN` failure leaves the file
+untouched.
+
+For each scene slot, projected response visibility first creates a deterministic
+truth-level shortlist at `t=250 ms`. Every shortlisted entry is then checked
+once with the real dual-view camera and the episode RGB-D grounder.
+`starts_per_scene` is the hard acceptance quota; the generator attempts to
+certify `scene_catalog_reserve` additional starts, but a reserve shortfall only
+produces a diagnostic warning. The certified catalog, its digest, attempted IDs, and successful IDs are
+stored in the manifest. An insufficient empty scene slot advances to the next
+deterministic scenario seed, bounded by `max_scene_seed_candidates`; protocol,
+capture, and implementation errors stop collection immediately.
+
 A later `--resume` validates the collection configuration, every completed
 episode, absence of partial payloads, and the immutable blueprint signature.
 The plugin's runtime blueprint ID is persisted to accelerate a Python-only
 resume, but a GTA/plugin restart triggers a same-anchor/same-seed rebuild and
-signature check before any payload is appended.
+signature check before any payload is appended. It also loads each pool,
+verifies its digest, and rechecks event position and static occlusion masks on
+first use. Schema 1/2/3 batches remain supported by offline visualization but
+cannot be resumed for generation.
 
 ## Batch layout
 
@@ -43,6 +71,7 @@ signature check before any payload is appended.
 stage2e_fire/
   dataset_manifest.json
   anchor_000/
+    start_pool.json
     scene_000_seed_1/
       episode_0000_attempt_0000_start_<id>/
         agent/
@@ -57,7 +86,7 @@ stage2e_fire/
         evaluation_truth/
           episode.json
           steps.jsonl
-    scene_001_seed_2/
+    scene_001_candidate_001_seed_17/
   anchor_001/
   ...
   failures.jsonl
@@ -72,6 +101,19 @@ depth range, binary16 resolution is approximately 3 cm near 50--60 m, 6 cm at
 120 m, and 0.5 m at 800 m. The dtype and units are declared in
 `agent/episode.json`. Episode and step metadata use JSON/JSONL; belief grids
 use NPZ.
+
+`start_pool.json` contains only evaluation/generation state: requested anchor,
+resolved event position, algorithm version, accepted camera positions, AGL,
+bearing, static source visibility plus diagnostic envelope samples,
+task-observable goal views, lower-bound budget, timing, and a content digest.
+It is never exposed in the Agent stream. The schema-4 manifest additionally
+stores each scene's real-RGB-D-certified catalog and rejected seed history.
+Within one scene every catalog start ID is attempted at most once and every
+successful ID is unique; different seed-distinct scenes may reuse the same
+static position and select a different responder-facing yaw. The manifest and
+teacher metadata record the close-source STOP policy (`30 m`, `64 px`, two
+consecutive grounded observations); resume rejects collections created under a
+different policy instead of mixing supervision semantics.
 
 ## Agent stream
 
@@ -143,8 +185,10 @@ Controls:
 
 ## Timing records
 
-Generation reports scenario preparation, lockstep setup, start generation,
-visibility, grounding, teacher planning, recording, pose control, Advance,
+Generation separately reports `anchor_prepare`, `shadow_rays`,
+`ground_clearance`, `fire_occlusion`, `goal_audit`,
+`dynamic_response_query`, `yaw_selection`, `real_camera_verify`, and
+`rgbd_grounding`, followed by teacher planning, recording, pose control, Advance,
 Capture, finalization, and cleanup. Timing is observational and does not alter
 candidate ordering or task semantics.
 

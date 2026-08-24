@@ -37,9 +37,9 @@ At that observation:
 
 - every geometry sample on the fire-source vehicle is occluded from the camera
   center;
-- the fire/smoke envelope is not task-observable in either named view;
-- partial line of sight to the envelope may exist and is retained as
-  diagnostic truth.
+- fire/smoke envelope visibility is retained as diagnostic truth only and does
+  not accept or reject a start, because GTA particle rendering depends on LOD,
+  distance, and view state.
 
 Current expert-data generation uses `POTENTIAL_CUE_VISIBLE` starts. The camera
 is 40--60 metres from the event, and at least one RGB-D-grounded responder is
@@ -77,9 +77,9 @@ The research action space is strictly discrete and mutually exclusive:
 
 | Action | Effect |
 |---|---|
-| `FORWARD` | Move exactly 2 m along current body-forward |
-| `ASCEND` | Move exactly 2 m along GTA world up |
-| `DESCEND` | Move exactly 2 m along GTA world down |
+| `FORWARD` | Move exactly 1 m along current body-forward |
+| `ASCEND` | Move exactly 1 m along GTA world up |
+| `DESCEND` | Move exactly 1 m along GTA world down |
 | `TURN_LEFT` | Increase GTA yaw by exactly 15° |
 | `TURN_RIGHT` | Decrease GTA yaw by exactly 15° |
 | `HOLD` | Keep pose fixed and acquire a later observation |
@@ -91,7 +91,7 @@ is not the agent action space.
 
 Every non-terminal action advances exactly `250 ms` of GTA simulation time and
 then returns a frozen dual-view observation. `STOP` consumes one action and
-does not advance time. The canonical horizon is 65 actions including the
+does not advance time. The canonical horizon is 80 actions including the
 reserved terminal action.
 
 ## Task observability
@@ -149,6 +149,10 @@ decision records. It is not evidence that a learned policy uses causal
 response cues; that claim requires counterfactual intervention experiments.
 
 The current teacher emits `STOP` only after the same RGB-D-grounded source has
-been observed in two adjacent observations. Successful dataset retention also
-requires a valid dynamic cue and a cue-sensitivity audit. These are stricter
-expert-quality filters, not additional environment `TaskSuccess` conditions.
+been observed in two adjacent observations, its horizontal range from the camera
+is at most `30 m`, and its clear projected box spans at least `64 px`. A farther
+grounded source is passed to the existing short-range planner; once horizontally
+close, the teacher descends if needed to enlarge the source observation.
+Successful dataset retention also requires a valid dynamic cue and a
+cue-sensitivity audit. These are stricter expert-quality filters, not additional
+environment `TaskSuccess` conditions.

@@ -40,6 +40,50 @@ struct CameraStartProbe {
     float ground_z = 0.0f;
 };
 
+enum class CameraStartBatchItemStatus : std::uint32_t {
+    Ok = 0,
+    GroundNotFound = 1,
+    SpaceBlocked = 2,
+};
+
+struct CameraStartCase {
+    float x = 0.0f;
+    float y = 0.0f;
+    float altitude_agl = 0.0f;
+};
+
+struct CameraStartBatchItem {
+    CameraStartBatchItemStatus status =
+        CameraStartBatchItemStatus::GroundNotFound;
+    ScenarioVector3 position;
+    float ground_z = 0.0f;
+};
+
+struct CameraStartBatchSnapshot {
+    std::uint64_t lockstep_session_id = 0;
+    std::uint64_t step_index = 0;
+    std::uint32_t game_timer_ms = 0;
+    std::uint32_t frame_count = 0;
+    std::vector<CameraStartBatchItem> items;
+};
+
+struct FireShadowRaySnapshot {
+    bool hit = false;
+    float distance = 0.0f;
+    ScenarioVector3 position;
+    ScenarioVector3 normal;
+};
+
+struct FireShadowBatchSnapshot {
+    std::uint64_t scenario_id = 0;
+    std::uint64_t lockstep_session_id = 0;
+    std::uint64_t step_index = 0;
+    std::uint32_t game_timer_ms = 0;
+    std::uint32_t frame_count = 0;
+    ScenarioVector3 origin;
+    std::vector<FireShadowRaySnapshot> rays;
+};
+
 struct VisibilitySampleSnapshot {
     ScenarioVector3 position;
     bool clear_line_of_sight = false;
@@ -98,6 +142,21 @@ struct TargetVisibilityBatchSnapshot {
     std::vector<TargetVisibilityCaseSnapshot> cases;
 };
 
+struct FireOcclusionCaseSnapshot {
+    ScenarioVector3 camera_center;
+    VisibilityTargetSnapshot source_vehicle;
+    VisibilityTargetSnapshot fire_envelope;
+};
+
+struct FireOcclusionBatchSnapshot {
+    std::uint64_t scenario_id = 0;
+    std::uint64_t lockstep_session_id = 0;
+    std::uint64_t step_index = 0;
+    std::uint32_t game_timer_ms = 0;
+    std::uint32_t frame_count = 0;
+    std::vector<FireOcclusionCaseSnapshot> cases;
+};
+
 class VisibilityEvaluator {
 public:
     static VisibilityEvaluator& instance();
@@ -122,6 +181,26 @@ public:
         const std::vector<TargetVisibilityCase>& cases,
         const std::atomic<bool>& cancelled,
         TargetVisibilityBatchSnapshot& output,
+        std::string& error) const;
+    VisibilityOperationStatus probe_fire_shadow_batch(
+        std::uint64_t scenario_id,
+        std::uint64_t lockstep_session_id,
+        const std::vector<ScenarioVector3>& directions,
+        const std::atomic<bool>& cancelled,
+        FireShadowBatchSnapshot& output,
+        std::string& error) const;
+    VisibilityOperationStatus probe_camera_start_batch(
+        std::uint64_t lockstep_session_id,
+        const std::vector<CameraStartCase>& cases,
+        const std::atomic<bool>& cancelled,
+        CameraStartBatchSnapshot& output,
+        std::string& error) const;
+    VisibilityOperationStatus query_fire_occlusion_batch(
+        std::uint64_t scenario_id,
+        std::uint64_t lockstep_session_id,
+        const std::vector<ScenarioVector3>& camera_centers,
+        const std::atomic<bool>& cancelled,
+        FireOcclusionBatchSnapshot& output,
         std::string& error) const;
     CameraStartProbeStatus probe_camera_start(
         float x,

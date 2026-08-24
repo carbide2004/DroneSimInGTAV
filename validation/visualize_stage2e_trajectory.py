@@ -244,9 +244,13 @@ class Stage2EPlayer:
             )
         axis.set_aspect("equal", adjustable="box")
         axis.set_xlim(-120.0, 120.0)
-        axis.set_ylim(-120.0, 120.0)
+        # Start-local coordinates are forward/right. Positive right must be
+        # drawn downward for the screen map to preserve physical turn sense:
+        # GTA positive yaw (TURN_LEFT) then appears counter-clockwise, while
+        # the heading arrow remains aligned with subsequent FORWARD motion.
+        axis.set_ylim(120.0, -120.0)
         axis.set_xlabel("start-local forward (m)")
-        axis.set_ylabel("start-local right (m)")
+        axis.set_ylabel("start-local right (m, positive downward)")
         axis.set_title("Expert trajectory, belief, and evaluation truth")
         axis.grid(alpha=0.2)
         axis.legend(fontsize=7, loc="best")

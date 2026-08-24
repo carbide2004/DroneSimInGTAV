@@ -20,6 +20,13 @@ namespace {
 
 constexpr int kRaycastFlags = 511;
 constexpr int kRaycastOption = 4;
+constexpr int kStaticRaycastFlags = 17;  // world | objects
+constexpr int kStaticRaycastOption = 7;
+constexpr float kFireShadowDistanceMeters = 120.0f;
+constexpr float kDirectionUnitTolerance = 1.0e-3f;
+constexpr std::size_t kMaximumFireShadowRays = 256;
+constexpr std::size_t kMaximumCameraStartCases = 256;
+constexpr std::size_t kMaximumFireOcclusionCases = 32;
 constexpr std::size_t kMaximumOutstandingRaycasts = 8;
 constexpr int kMaximumRaycastFrames = 8;
 constexpr float kMinimumModelExtentMeters = 0.01f;
@@ -237,7 +244,9 @@ bool evaluate_raycasts(
     Entity source_vehicle,
     const std::atomic<bool>& cancelled,
     std::vector<VisibilityTargetSnapshot>& targets,
-    std::string& error) {
+    std::string& error,
+    int raycast_flags = kRaycastFlags,
+    int raycast_option = kRaycastOption) {
     std::vector<std::pair<std::size_t, std::size_t>> work_items;
     for (std::size_t target_index = 0;
          target_index < targets.size();
@@ -279,9 +288,9 @@ bool evaluate_raycasts(
                 point.x,
                 point.y,
                 point.z,
-                kRaycastFlags,
+                raycast_flags,
                 ignored_player,
-                kRaycastOption);
+                raycast_option);
             if (work.handle == 0) {
                 error =
                     "GTA did not create visibility raycast " +
@@ -893,6 +902,410 @@ VisibilityEvaluator::query_target_batch(
             error =
                 "Lockstep instant changed during target-visibility batch";
         }
+        return VisibilityOperationStatus::GeometryInvalid;
+    }
+    output.frame_count = after.frame_count;
+    return VisibilityOperationStatus::Ok;
+}
+
+
+VisibilityOperationStatus VisibilityEvaluator::probe_fire_shadow_batch(
+    std::uint64_t scenario_id,
+    std::uint64_t lockstep_session_id,
+    const std::vector<ScenarioVector3>& directions,
+    const std::atomic<bool>& cancelled,
+    FireShadowBatchSnapshot& output,
+    std::string& error) const {
+    if (!CameraController::instance().is_active()) {
+        error = "Fire-shadow batch requires an active scripted camera";
+        return VisibilityOperationStatus::InvalidRequest;
+    }
+    if (directions.empty() || directions.size() > kMaximumFireShadowRays) {
+        error = "Fire-shadow batch must contain 1..256 directions";
+        return VisibilityOperationStatus::InvalidRequest;
+    }
+    for (const ScenarioVector3& direction : directions) {
+        if (!finite_vector(direction)) {
+            error = "Fire-shadow batch contains a non-finite direction";
+            return VisibilityOperationStatus::InvalidRequest;
+        }
+        const float norm = std::sqrt(
+            direction.x * direction.x + direction.y * direction.y +
+            direction.z * direction.z);
+        if (std::abs(norm - 1.0f) > kDirectionUnitTolerance) {
+            error = "Fire-shadow directions must be unit vectors";
+            return VisibilityOperationStatus::InvalidRequest;
+        }
+    }
+
+    LockstepSnapshot before;
+    const LockstepOperationStatus clock_status =
+        SimulationClock::instance().snapshot(
+            lockstep_session_id, before, error);
+    if (clock_status != LockstepOperationStatus::Ok) {
+        return clock_status == LockstepOperationStatus::SessionMismatch
+            ? VisibilityOperationStatus::LockstepSessionMismatch
+            : VisibilityOperationStatus::LockstepNotActive;
+    }
+    ScenarioSnapshot scenario;
+    const ScenarioOperationStatus scenario_status =
+        ScenarioManager::instance().snapshot(scenario_id, scenario, error);
+    if (scenario_status != ScenarioOperationStatus::Ok) {
+        return VisibilityOperationStatus::ScenarioNotFound;
+    }
+    if (scenario.lifecycle != ScenarioLifecycle::Ready &&
+        scenario.lifecycle != ScenarioLifecycle::Running) {
+        error = "Fire-shadow batch requires a READY or RUNNING scenario";
+        return VisibilityOperationStatus::ScenarioNotReady;
+    }
+    const auto source = std::find_if(
+        scenario.entities.begin(), scenario.entities.end(),
+        [](const ScenarioEntitySnapshot& entity) {
+            return entity.role == ScenarioEntityRole::FireSourceVehicle;
+        });
+    if (source == scenario.entities.end() || !source->exists ||
+        source->gta_handle == 0 ||
+        !ENTITY::DOES_ENTITY_EXIST(source->gta_handle)) {
+        error = "Scenario has no live fire-source vehicle";
+        return VisibilityOperationStatus::GeometryInvalid;
+    }
+    VisibilityTargetSnapshot source_target;
+    if (!build_vehicle_samples(
+            *source, VisibilityTargetRole::FireSourceVehicle,
+            source_target, error)) {
+        return VisibilityOperationStatus::GeometryInvalid;
+    }
+    const ScenarioVector3 origin = source_target.samples.back().position;
+    output = {};
+    output.scenario_id = scenario_id;
+    output.lockstep_session_id = lockstep_session_id;
+    output.step_index = before.step_index;
+    output.game_timer_ms = before.game_timer_ms;
+    output.origin = origin;
+    output.rays.resize(directions.size());
+
+    for (std::size_t offset = 0; offset < directions.size();
+         offset += kMaximumOutstandingRaycasts) {
+        if (evaluation_interrupted(cancelled)) {
+            error = "Fire-shadow batch was interrupted";
+            return VisibilityOperationStatus::Interrupted;
+        }
+        const std::size_t count = (std::min)(
+            kMaximumOutstandingRaycasts, directions.size() - offset);
+        struct Work { std::size_t index; int handle; bool complete; };
+        std::vector<Work> batch;
+        for (std::size_t local = 0; local < count; ++local) {
+            const std::size_t index = offset + local;
+            const ScenarioVector3& direction = directions[index];
+            const ScenarioVector3 end = {
+                origin.x + direction.x * kFireShadowDistanceMeters,
+                origin.y + direction.y * kFireShadowDistanceMeters,
+                origin.z + direction.z * kFireShadowDistanceMeters,
+            };
+            const int handle = WORLDPROBE::_0x7EE9F5D83DD4F90E(
+                origin.x, origin.y, origin.z,
+                end.x, end.y, end.z,
+                kStaticRaycastFlags, source->gta_handle,
+                kStaticRaycastOption);
+            if (handle == 0) {
+                error = "GTA did not create fire-shadow raycast";
+                return VisibilityOperationStatus::RaycastFailed;
+            }
+            batch.push_back({index, handle, false});
+            output.rays[index].position = end;
+            output.rays[index].distance = kFireShadowDistanceMeters;
+        }
+        bool complete = false;
+        for (int frame = 0; frame < kMaximumRaycastFrames && !complete;
+             ++frame) {
+            complete = true;
+            for (Work& work : batch) {
+                if (work.complete) continue;
+                BOOL hit = FALSE;
+                Vector3 hit_position{};
+                Vector3 hit_normal{};
+                Entity hit_entity = 0;
+                const int state = WORLDPROBE::_GET_RAYCAST_RESULT(
+                    work.handle, &hit, &hit_position, &hit_normal,
+                    &hit_entity);
+                if (state == 1) { complete = false; continue; }
+                if (state != 2) {
+                    error = "GTA returned invalid fire-shadow ray state";
+                    return VisibilityOperationStatus::RaycastFailed;
+                }
+                FireShadowRaySnapshot& result = output.rays[work.index];
+                result.hit = hit == TRUE;
+                if (result.hit) {
+                    result.position = to_scenario_vector(hit_position);
+                    result.normal = to_scenario_vector(hit_normal);
+                    result.distance = std::sqrt(
+                        distance_squared(origin, result.position));
+                }
+                work.complete = true;
+            }
+            if (!complete) {
+                if (evaluation_interrupted(cancelled)) {
+                    error = "Fire-shadow batch was interrupted";
+                    return VisibilityOperationStatus::Interrupted;
+                }
+                CameraController::instance().suppress_player_controls_for_frame();
+                WAIT(0);
+            }
+        }
+        if (!complete) {
+            error = "Fire-shadow raycasts did not complete within eight render frames";
+            return VisibilityOperationStatus::RaycastFailed;
+        }
+        if (offset + count < directions.size()) {
+            CameraController::instance().suppress_player_controls_for_frame();
+            WAIT(0);
+        }
+    }
+    LockstepSnapshot after;
+    const LockstepOperationStatus after_status =
+        SimulationClock::instance().snapshot(
+            lockstep_session_id, after, error);
+    if (after_status != LockstepOperationStatus::Ok ||
+        after.step_index != before.step_index ||
+        after.game_timer_ms != before.game_timer_ms) {
+        error = "Lockstep instant changed during fire-shadow batch";
+        return VisibilityOperationStatus::GeometryInvalid;
+    }
+    output.frame_count = after.frame_count;
+    return VisibilityOperationStatus::Ok;
+}
+
+VisibilityOperationStatus VisibilityEvaluator::probe_camera_start_batch(
+    std::uint64_t lockstep_session_id,
+    const std::vector<CameraStartCase>& cases,
+    const std::atomic<bool>& cancelled,
+    CameraStartBatchSnapshot& output,
+    std::string& error) const {
+    if (!CameraController::instance().is_active()) {
+        error = "Camera-start batch requires an active scripted camera";
+        return VisibilityOperationStatus::InvalidRequest;
+    }
+    if (cases.empty() || cases.size() > kMaximumCameraStartCases) {
+        error = "Camera-start batch must contain 1..256 cases";
+        return VisibilityOperationStatus::InvalidRequest;
+    }
+    for (const CameraStartCase& item : cases) {
+        if (!std::isfinite(item.x) || !std::isfinite(item.y) ||
+            !std::isfinite(item.altitude_agl) || item.altitude_agl <= 0.0f) {
+            error = "Camera-start batch contains an invalid case";
+            return VisibilityOperationStatus::InvalidRequest;
+        }
+    }
+    LockstepSnapshot before;
+    const LockstepOperationStatus clock_status =
+        SimulationClock::instance().snapshot(
+            lockstep_session_id, before, error);
+    if (clock_status != LockstepOperationStatus::Ok) {
+        return clock_status == LockstepOperationStatus::SessionMismatch
+            ? VisibilityOperationStatus::LockstepSessionMismatch
+            : VisibilityOperationStatus::LockstepNotActive;
+    }
+    output = {};
+    output.lockstep_session_id = lockstep_session_id;
+    output.step_index = before.step_index;
+    output.game_timer_ms = before.game_timer_ms;
+    output.items.resize(cases.size());
+    std::vector<std::size_t> clearable;
+    clearable.reserve(cases.size());
+    for (std::size_t index = 0; index < cases.size(); ++index) {
+        if (evaluation_interrupted(cancelled)) {
+            error = "Camera-start batch was interrupted";
+            return VisibilityOperationStatus::Interrupted;
+        }
+        float ground_z = 0.0f;
+        const CameraStartCase& item = cases[index];
+        CameraStartBatchItem& result = output.items[index];
+        if (GAMEPLAY::GET_GROUND_Z_FOR_3D_COORD(
+                item.x, item.y, 1000.0f, &ground_z, FALSE) != TRUE ||
+            !std::isfinite(ground_z)) {
+            result.status = CameraStartBatchItemStatus::GroundNotFound;
+            continue;
+        }
+        result.ground_z = ground_z;
+        result.position = {item.x, item.y, ground_z + item.altitude_agl};
+        clearable.push_back(index);
+    }
+
+    const Ped player = PLAYER::PLAYER_PED_ID();
+    struct Work { std::size_t index; int handle; bool complete; };
+    for (std::size_t offset = 0; offset < clearable.size();
+         offset += kMaximumOutstandingRaycasts) {
+        if (evaluation_interrupted(cancelled)) {
+            error = "Camera-start batch was interrupted";
+            return VisibilityOperationStatus::Interrupted;
+        }
+        const std::size_t count = (std::min)(
+            kMaximumOutstandingRaycasts, clearable.size() - offset);
+        std::vector<Work> batch;
+        batch.reserve(count);
+        for (std::size_t local = 0; local < count; ++local) {
+            const std::size_t index = clearable[offset + local];
+            const CameraStartCase& item = cases[index];
+            const CameraStartBatchItem& result = output.items[index];
+            const int handle = static_cast<int>(
+                WORLDPROBE::_CAST_3D_RAY_POINT_TO_POINT(
+                    item.x, item.y, result.position.z - 0.25f,
+                    item.x, item.y, result.position.z + 0.25f,
+                    kCameraClearanceRadiusMeters, 1, player,
+                    kRaycastOption));
+            if (handle == 0) {
+                error = "GTA did not create camera-start batch shape test";
+                return VisibilityOperationStatus::RaycastFailed;
+            }
+            batch.push_back({index, handle, false});
+        }
+        bool complete = false;
+        for (int frame = 0; frame < kMaximumRaycastFrames && !complete;
+             ++frame) {
+            complete = true;
+            for (Work& work : batch) {
+                if (work.complete) continue;
+                BOOL hit = FALSE;
+                Vector3 position{};
+                Vector3 normal{};
+                Entity entity = 0;
+                const int state = WORLDPROBE::_GET_RAYCAST_RESULT(
+                    work.handle, &hit, &position, &normal, &entity);
+                if (state == 1) { complete = false; continue; }
+                if (state != 2) {
+                    error = "GTA returned invalid camera-start batch state";
+                    return VisibilityOperationStatus::RaycastFailed;
+                }
+                output.items[work.index].status = hit == TRUE
+                    ? CameraStartBatchItemStatus::SpaceBlocked
+                    : CameraStartBatchItemStatus::Ok;
+                work.complete = true;
+            }
+            if (!complete) {
+                if (evaluation_interrupted(cancelled)) {
+                    error = "Camera-start batch was interrupted";
+                    return VisibilityOperationStatus::Interrupted;
+                }
+                CameraController::instance().suppress_player_controls_for_frame();
+                WAIT(0);
+            }
+        }
+        if (!complete) {
+            error = "Camera-start shape tests did not complete within eight render frames";
+            return VisibilityOperationStatus::RaycastFailed;
+        }
+        if (offset + count < clearable.size()) {
+            CameraController::instance().suppress_player_controls_for_frame();
+            WAIT(0);
+        }
+    }
+    LockstepSnapshot after;
+    const LockstepOperationStatus after_status =
+        SimulationClock::instance().snapshot(
+            lockstep_session_id, after, error);
+    if (after_status != LockstepOperationStatus::Ok ||
+        after.step_index != before.step_index ||
+        after.game_timer_ms != before.game_timer_ms) {
+        error = "Lockstep instant changed during camera-start batch";
+        return VisibilityOperationStatus::GeometryInvalid;
+    }
+    output.frame_count = after.frame_count;
+    return VisibilityOperationStatus::Ok;
+}
+
+VisibilityOperationStatus VisibilityEvaluator::query_fire_occlusion_batch(
+    std::uint64_t scenario_id,
+    std::uint64_t lockstep_session_id,
+    const std::vector<ScenarioVector3>& camera_centers,
+    const std::atomic<bool>& cancelled,
+    FireOcclusionBatchSnapshot& output,
+    std::string& error) const {
+    if (!CameraController::instance().is_active()) {
+        error = "Fire-occlusion batch requires an active scripted camera";
+        return VisibilityOperationStatus::InvalidRequest;
+    }
+    if (camera_centers.empty() ||
+        camera_centers.size() > kMaximumFireOcclusionCases) {
+        error = "Fire-occlusion batch must contain 1..32 camera centers";
+        return VisibilityOperationStatus::InvalidRequest;
+    }
+    if (std::any_of(camera_centers.begin(), camera_centers.end(),
+                    [](const ScenarioVector3& value) {
+                        return !finite_vector(value);
+                    })) {
+        error = "Fire-occlusion batch contains a non-finite camera center";
+        return VisibilityOperationStatus::InvalidRequest;
+    }
+    LockstepSnapshot before;
+    const LockstepOperationStatus clock_status =
+        SimulationClock::instance().snapshot(
+            lockstep_session_id, before, error);
+    if (clock_status != LockstepOperationStatus::Ok) {
+        return clock_status == LockstepOperationStatus::SessionMismatch
+            ? VisibilityOperationStatus::LockstepSessionMismatch
+            : VisibilityOperationStatus::LockstepNotActive;
+    }
+    ScenarioSnapshot scenario;
+    const ScenarioOperationStatus scenario_status =
+        ScenarioManager::instance().snapshot(scenario_id, scenario, error);
+    if (scenario_status != ScenarioOperationStatus::Ok) {
+        return VisibilityOperationStatus::ScenarioNotFound;
+    }
+    if (scenario.lifecycle != ScenarioLifecycle::Ready &&
+        scenario.lifecycle != ScenarioLifecycle::Running) {
+        error = "Fire-occlusion batch requires a READY or RUNNING scenario";
+        return VisibilityOperationStatus::ScenarioNotReady;
+    }
+    const auto source = std::find_if(
+        scenario.entities.begin(), scenario.entities.end(),
+        [](const ScenarioEntitySnapshot& entity) {
+            return entity.role == ScenarioEntityRole::FireSourceVehicle;
+        });
+    if (source == scenario.entities.end() || !source->exists ||
+        source->gta_handle == 0 ||
+        !ENTITY::DOES_ENTITY_EXIST(source->gta_handle)) {
+        error = "Scenario has no live fire-source vehicle";
+        return VisibilityOperationStatus::GeometryInvalid;
+    }
+    VisibilityTargetSnapshot source_geometry;
+    if (!build_vehicle_samples(
+            *source, VisibilityTargetRole::FireSourceVehicle,
+            source_geometry, error)) {
+        return VisibilityOperationStatus::GeometryInvalid;
+    }
+    const VisibilityTargetSnapshot envelope_geometry =
+        build_fire_envelope(scenario.event_position);
+    output = {};
+    output.scenario_id = scenario_id;
+    output.lockstep_session_id = lockstep_session_id;
+    output.step_index = before.step_index;
+    output.game_timer_ms = before.game_timer_ms;
+    for (const ScenarioVector3& center : camera_centers) {
+        FireOcclusionCaseSnapshot item;
+        item.camera_center = center;
+        std::vector<VisibilityTargetSnapshot> targets = {
+            source_geometry, envelope_geometry};
+        if (!evaluate_raycasts(
+                center, source->gta_handle, source->gta_handle,
+                cancelled, targets, error,
+                kStaticRaycastFlags, kStaticRaycastOption)) {
+            return cancelled.load(std::memory_order_acquire) ||
+                    SimulationClock::instance().emergency_recovery_requested()
+                ? VisibilityOperationStatus::Interrupted
+                : VisibilityOperationStatus::RaycastFailed;
+        }
+        item.source_vehicle = std::move(targets[0]);
+        item.fire_envelope = std::move(targets[1]);
+        output.cases.push_back(std::move(item));
+    }
+    LockstepSnapshot after;
+    const LockstepOperationStatus after_status =
+        SimulationClock::instance().snapshot(
+            lockstep_session_id, after, error);
+    if (after_status != LockstepOperationStatus::Ok ||
+        after.step_index != before.step_index ||
+        after.game_timer_ms != before.game_timer_ms) {
+        error = "Lockstep instant changed during fire-occlusion batch";
         return VisibilityOperationStatus::GeometryInvalid;
     }
     output.frame_count = after.frame_count;

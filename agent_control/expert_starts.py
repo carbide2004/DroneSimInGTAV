@@ -1,21 +1,23 @@
-"""Stage 2E potential-cue-visible starts with a light goal audit."""
+"""Stage 2E real-camera start checks driven by a scene catalog."""
 
-import math
 import time
+from collections import Counter
 from dataclasses import dataclass
 
 from .dronesim_client import ScenarioEntityRole
 from .expert_teacher import VisibleTrackGrounder
-from .feasibility import (
-    SpatiotemporalFeasibilityAuditor,
-    StaticGoalBudgetAudit,
+from .feasibility import StaticGoalBudgetAudit
+from .scene_catalog import (
+    SceneStartCatalog,
+    certified_scene_start_catalog,
+    materialize_scene_start,
+    next_scene_start_candidate,
 )
+from .start_pool import StaticStartPool
 from .task_starts import (
     GeneratedTaskStart,
-    StartVisibilityStratum,
     TASK_HORIZON_STEPS,
     TaskStartGenerationError,
-    generate_task_start,
 )
 
 
@@ -26,6 +28,9 @@ class AuditedStartTiming:
     rgbd_grounding_seconds: float
     static_goal_budget_audit_seconds: float
     total_seconds: float
+    dynamic_response_query_seconds: float = 0.0
+    yaw_selection_seconds: float = 0.0
+    real_camera_verify_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,7 @@ class AuditedTaskStart:
     altitude_bin: str
     initial_grounded_response_count: int
     timing: AuditedStartTiming
+    pool_start_id: int
 
 
 def _bearing_bin(degrees):
@@ -44,9 +50,133 @@ def _bearing_bin(degrees):
 
 
 def _altitude_bin(altitude_agl):
-    altitude_agl = float(altitude_agl)
-    return "25-42.5" if altitude_agl < 42.5 else "42.5-60"
+    return "25-42.5" if float(altitude_agl) < 42.5 else "42.5-60"
 
+
+def _ground_expected_responses(
+    generated,
+    observation_spec,
+    expected_responder_ids,
+):
+    grounder = VisibleTrackGrounder(
+        generated.blueprint, observation_spec
+    )
+    grounded = grounder.ground(
+        generated.rgbd_pair, generated.visibility
+    )
+    if any(
+        track.semantic_class == "FIRE_SOURCE"
+        for track in grounded.tracks
+    ):
+        raise TaskStartGenerationError(
+            "START_CANDIDATE_REJECTED: fire source was recovered "
+            "from the initial RGB-D"
+        )
+    expected = {int(value) for value in expected_responder_ids}
+    return tuple(
+        track
+        for track in grounded.tracks
+        if track.semantic_class in ("FIRE_TRUCK", "PEDESTRIAN")
+        and grounder.evaluation_stable_id(track.track_id) in expected
+    )
+
+
+def certify_scene_start_catalog_rgbd(
+    client,
+    session,
+    scenario,
+    observation_spec,
+    start_pool,
+    scene_catalog,
+    minimum_entries,
+    required_entries=None,
+    horizon_steps=TASK_HORIZON_STEPS,
+    progress_callback=None,
+):
+    """Filter a projected catalog through one real RGB-D check per entry."""
+    target_entries = int(minimum_entries)
+    required_entries = (
+        target_entries
+        if required_entries is None
+        else int(required_entries)
+    )
+    if not 1 <= required_entries <= len(scene_catalog.candidates):
+        raise ValueError(
+            "required_entries must fit the projected scene catalog"
+        )
+    target_entries = max(
+        required_entries, min(target_entries, len(scene_catalog.candidates))
+    )
+    if scene_catalog.real_rgbd_certified:
+        if len(scene_catalog.candidates) < required_entries:
+            raise TaskStartGenerationError(
+                "SCENE_START_CATALOG_INSUFFICIENT: certified catalog is "
+                "smaller than the required scene quota"
+            )
+        return scene_catalog
+    passed = []
+    rejection_counts = Counter()
+    for index, candidate in enumerate(scene_catalog.candidates, 1):
+        def validate(generated, _pool_start_id, _attempt, expected_ids):
+            tracks = _ground_expected_responses(
+                generated, observation_spec, expected_ids
+            )
+            return tracks or None
+
+        try:
+            materialize_scene_start(
+                client,
+                session,
+                scenario,
+                observation_spec,
+                start_pool,
+                scene_catalog,
+                candidate,
+                int(scenario.seed) ^ int(candidate.pool_start_id),
+                horizon_steps=horizon_steps,
+                candidate_validator=validate,
+            )
+        except TaskStartGenerationError as error:
+            message = str(error)
+            if not message.startswith("START_CANDIDATE_REJECTED:"):
+                raise
+            reason = message.split(":", 1)[1].strip()
+            rejection_counts[reason] += 1
+            if progress_callback is not None:
+                progress_callback(
+                    "scene catalog RGB-D REJECT "
+                    f"pool_start={candidate.pool_start_id} "
+                    f"checked={index}/{len(scene_catalog.candidates)} "
+                    f"reason={reason}"
+                )
+            continue
+        passed.append(candidate)
+        if progress_callback is not None:
+            progress_callback(
+                "scene catalog RGB-D PASS "
+                f"certified={len(passed)}/{target_entries} "
+                f"pool_start={candidate.pool_start_id}"
+            )
+        if len(passed) >= target_entries:
+            return certified_scene_start_catalog(scene_catalog, passed)
+    if len(passed) >= required_entries:
+        if progress_callback is not None:
+            progress_callback(
+                "SCENE_CATALOG_RESERVE_SHORTFALL "
+                f"certified={len(passed)} required={required_entries} "
+                f"target={target_entries} "
+                f"rejections={dict(rejection_counts)}"
+            )
+        return certified_scene_start_catalog(scene_catalog, passed)
+    error = TaskStartGenerationError(
+        "SCENE_START_CATALOG_INSUFFICIENT: real RGB-D certified "
+        f"candidates={len(passed)}, required={required_entries}, "
+        f"target={target_entries}, "
+        f"projected={len(scene_catalog.candidates)}, "
+        f"rejections={dict(rejection_counts)}"
+    )
+    error.scene_start_catalog = scene_catalog
+    raise error
 
 def generate_audited_task_start(
     client,
@@ -54,199 +184,126 @@ def generate_audited_task_start(
     scenario,
     observation_spec,
     start_seed,
-    maximum_attempts=16,
-    maximum_candidates_per_attempt=64,
-    audit_timeout_seconds=120.0,
+    start_pool,
+    scene_catalog,
+    attempted_pool_start_ids=(),
     progress_callback=None,
     horizon_steps=TASK_HORIZON_STEPS,
-    required_reserve_actions=15,
 ):
-    maximum_attempts = int(maximum_attempts)
-    if not 1 <= maximum_attempts <= 256:
-        raise ValueError("maximum_attempts must be in [1, 256]")
-    audit_timeout_seconds = float(audit_timeout_seconds)
-    if (
-        not math.isfinite(audit_timeout_seconds)
-        or audit_timeout_seconds <= 0.0
-    ):
-        raise ValueError(
-            "audit_timeout_seconds must be finite and positive"
-        )
+    """Consume one catalog candidate and perform one authoritative check."""
+    if not isinstance(start_pool, StaticStartPool):
+        raise TypeError("start_pool must be a StaticStartPool")
+    if not isinstance(scene_catalog, SceneStartCatalog):
+        raise TypeError("scene_catalog must be a SceneStartCatalog")
+    if not scene_catalog.real_rgbd_certified:
+        raise ValueError("scene_catalog must be real-RGB-D certified")
     horizon_steps = int(horizon_steps)
     if not 21 <= horizon_steps <= 256:
         raise ValueError("horizon_steps must be in [21, 256]")
-    required_reserve_actions = int(required_reserve_actions)
-    if not 0 <= required_reserve_actions < horizon_steps:
-        raise ValueError(
-            "required_reserve_actions must be in [0, horizon_steps)"
+
+    started = time.perf_counter()
+    candidate = next_scene_start_candidate(
+        scene_catalog, attempted_pool_start_ids
+    )
+    early_responder_ids = {
+        int(entity.stable_id)
+        for entity in scenario.entities
+        if entity.exists
+        and entity.role in (
+            ScenarioEntityRole.FIRE_TRUCK,
+            ScenarioEntityRole.FLEEING_PEDESTRIAN,
         )
-    failures = []
-    rejection_totals = {}
-    timing_started = time.perf_counter()
-    generation_seconds = 0.0
-    grounding_seconds = 0.0
-    audit_seconds = 0.0
-    for attempt_index in range(maximum_attempts):
-        attempt_seed = (
-            int(start_seed) + attempt_index
-        ) & 0xFFFFFFFFFFFFFFFF
-        attempt_started = time.perf_counter()
-        phase = "generate"
-        phase_started = attempt_started
+        and entity.planned_activation_offset_ms <= 2000
+    }
+
+    def validate_grounded_candidate(
+        generated, pool_start_id, _attempt, expected_responder_ids
+    ):
+        expected = {
+            int(value) for value in expected_responder_ids
+        } & early_responder_ids
         try:
-            generated = generate_task_start(
-                client,
-                session,
-                scenario,
-                observation_spec,
-                StartVisibilityStratum.POTENTIAL_CUE_VISIBLE,
-                attempt_seed,
-                max_candidates=maximum_candidates_per_attempt,
-                horizon_steps=horizon_steps,
+            response_tracks = _ground_expected_responses(
+                generated, observation_spec, expected
             )
-            generation_seconds += time.perf_counter() - phase_started
-            phase = "ground"
-            phase_started = time.perf_counter()
-            grounded = VisibleTrackGrounder(
-                generated.blueprint,
-                observation_spec,
-            )
-            grounded_frame = grounded.ground(
-                generated.rgbd_pair,
-                generated.visibility,
-            )
-            early_responder_ids = {
-                int(entity.stable_id)
-                for entity in scenario.entities
-                if entity.exists
-                and entity.role
-                in (
-                    ScenarioEntityRole.FIRE_TRUCK,
-                    ScenarioEntityRole.FLEEING_PEDESTRIAN,
-                )
-                and entity.planned_activation_offset_ms <= 2000
-            }
-            response_tracks = tuple(
-                track
-                for track in grounded_frame.tracks
-                if track.semantic_class
-                in ("FIRE_TRUCK", "PEDESTRIAN")
-                and grounded.evaluation_stable_id(track.track_id)
-                in early_responder_ids
-            )
-            if not response_tracks:
-                raise TaskStartGenerationError(
-                    "POTENTIAL_CUE_VISIBLE start has no early response "
-                    "track recoverable by the episode RGB-D grounder"
-                )
-            grounding_seconds += time.perf_counter() - phase_started
-            phase = "budget_audit"
-            phase_started = time.perf_counter()
-            auditor = SpatiotemporalFeasibilityAuditor(
-                client,
-                session,
-                scenario.scenario_id,
-                generated,
-                search_timeout_seconds=audit_timeout_seconds,
-                progress_callback=progress_callback,
-            )
-            goal_budget_audit = auditor.audit_static_goal_budget(
-                required_reserve_actions=required_reserve_actions,
-            )
-            audit_seconds += time.perf_counter() - phase_started
-            phase = "complete"
-            timing = AuditedStartTiming(
-                attempts=attempt_index + 1,
-                task_start_generation_seconds=generation_seconds,
-                rgbd_grounding_seconds=grounding_seconds,
-                static_goal_budget_audit_seconds=audit_seconds,
-                total_seconds=time.perf_counter() - timing_started,
-            )
+        except TaskStartGenerationError as error:
+            error.pool_start_id = int(pool_start_id)
+            error.consume_candidate = True
+            raise
+        if not response_tracks:
             if progress_callback is not None:
                 progress_callback(
-                    "audited start PASS "
-                    f"attempt={attempt_index + 1} "
-                    "time[generate="
-                    f"{generation_seconds:.1f}s ground="
-                    f"{grounding_seconds:.1f}s budget_audit="
-                    f"{audit_seconds:.1f}s total="
-                    f"{timing.total_seconds:.1f}s]"
+                    "scene start grounder REJECT "
+                    f"pool_start={pool_start_id}"
                 )
-            return AuditedTaskStart(
-                generated=generated,
-                goal_budget_audit=goal_budget_audit,
-                attempt_index=attempt_index,
-                bearing_bin=_bearing_bin(
-                    generated.blueprint.event_bearing_body_degrees
-                ),
-                altitude_bin=_altitude_bin(
-                    generated.blueprint.altitude_agl
-                ),
-                initial_grounded_response_count=len(response_tracks),
-                timing=timing,
-            )
-        except (RuntimeError, TaskStartGenerationError) as error:
-            if phase == "generate":
-                generation_seconds += time.perf_counter() - phase_started
-            elif phase == "ground":
-                grounding_seconds += time.perf_counter() - phase_started
-            elif phase == "budget_audit":
-                audit_seconds += time.perf_counter() - phase_started
-            failures.append(
-                f"seed={attempt_seed}:{type(error).__name__}:{error}"
-            )
-            for name, count in getattr(
-                error,
-                "rejection_counts",
-                {},
-            ).items():
-                rejection_totals[name] = (
-                    rejection_totals.get(name, 0) + int(count)
-                )
-            if progress_callback is not None:
-                progress_callback(
-                    "audited start attempt FAIL "
-                    f"attempt={attempt_index + 1} "
-                    f"wall={time.perf_counter() - attempt_started:.1f}s "
-                    f"phase={phase} error={type(error).__name__}: {error}"
-                )
-    candidate_total = sum(rejection_totals.values())
-    rejection_summary = ", ".join(
-        f"{name}={count}"
-        f"({100.0 * count / candidate_total:.0f}%)"
-        for name, count in sorted(
-            rejection_totals.items(),
-            key=lambda item: (-item[1], item[0]),
+            return None
+        return response_tracks
+    try:
+        (
+            generated,
+            goal_budget_audit,
+            response_tracks,
+            materialization_timing,
+        ) = materialize_scene_start(
+            client,
+            session,
+            scenario,
+            observation_spec,
+            start_pool,
+            scene_catalog,
+            candidate,
+            start_seed,
+            horizon_steps=horizon_steps,
+            candidate_validator=validate_grounded_candidate,
         )
-        if count
+    except TaskStartGenerationError as error:
+        if not hasattr(error, "pool_start_id"):
+            error.pool_start_id = int(candidate.pool_start_id)
+            error.consume_candidate = True
+        raise
+
+    total_seconds = time.perf_counter() - started
+    candidate_index = next(
+        index
+        for index, item in enumerate(scene_catalog.candidates)
+        if item.pool_start_id == candidate.pool_start_id
     )
-    if progress_callback is not None and rejection_summary:
+    timing = AuditedStartTiming(
+        attempts=1,
+        task_start_generation_seconds=(
+            total_seconds
+            - materialization_timing.candidate_validation
+        ),
+        rgbd_grounding_seconds=(
+            materialization_timing.candidate_validation
+        ),
+        static_goal_budget_audit_seconds=0.0,
+        total_seconds=total_seconds,
+        real_camera_verify_seconds=(
+            materialization_timing.real_camera_verify
+        ),
+    )
+    if progress_callback is not None:
         progress_callback(
-            "audited start EXHAUSTED "
-            f"attempts={maximum_attempts} "
-            f"candidates_rejected={candidate_total} "
-            f"time[generate={generation_seconds:.1f}s "
-            f"ground={grounding_seconds:.1f}s "
-            f"budget_audit={audit_seconds:.1f}s] "
-            f"rejections[{rejection_summary}]"
+            "scene start PASS "
+            f"pool_start={candidate.pool_start_id} "
+            f"catalog_rank={candidate_index + 1}/"
+            f"{len(scene_catalog.candidates)} "
+            f"time[verify={timing.real_camera_verify_seconds:.1f}s "
+            f"ground={timing.rgbd_grounding_seconds:.1f}s "
+            f"total={timing.total_seconds:.1f}s]"
         )
-    error = TaskStartGenerationError(
-        "AUDITED_TASK_START_NOT_FOUND after "
-        f"{maximum_attempts} attempts"
-        + (
-            f"; rejections[{rejection_summary}]"
-            if rejection_summary
-            else ""
-        )
-        + "; "
-        + " | ".join(failures[-4:])
+    return AuditedTaskStart(
+        generated=generated,
+        goal_budget_audit=goal_budget_audit,
+        attempt_index=candidate_index,
+        bearing_bin=_bearing_bin(
+            generated.blueprint.event_bearing_body_degrees
+        ),
+        altitude_bin=_altitude_bin(
+            generated.blueprint.altitude_agl
+        ),
+        initial_grounded_response_count=len(response_tracks),
+        timing=timing,
+        pool_start_id=int(candidate.pool_start_id),
     )
-    error.rejection_counts = dict(rejection_totals)
-    error.timing = AuditedStartTiming(
-        attempts=maximum_attempts,
-        task_start_generation_seconds=generation_seconds,
-        rgbd_grounding_seconds=grounding_seconds,
-        static_goal_budget_audit_seconds=audit_seconds,
-        total_seconds=time.perf_counter() - timing_started,
-    )
-    raise error
