@@ -2,52 +2,62 @@
 
 ## Scope
 
-The first Stage 3 model learns the mapping from observed dynamic response
-tracks to a 2-D event posterior. It intentionally leaves the existing
-strict-action planner unchanged:
+Stage 3A learns the mapping from observed dynamic response tracks to a 2-D
+event posterior while leaving the strict-action planner unchanged:
 
 ```text
 dual-view RGB-D
   -> existing RGB-D grounder and anonymous association
-  -> learned cue direction / uncertainty / reliability
-  -> explicit 61 x 61 belief fusion
+  -> source-blind track/candidate spatial evidence
+  -> explicit 61 x 61 belief state
   -> existing analytical action planner
 ```
 
-This isolates the scientific question "can the event belief update be
-learned?" from raw visual detection and action-policy failures. It is an
-entity-token upper baseline, not the final end-to-end method.
+Two offline baselines are retained. `LearnedCueBeliefUpdater` predicts
+interpretable cue direction, uncertainty, and reliability and adds their
+likelihoods to the posterior. `SpatialRecurrentBeliefUpdater` instead uses a
+pairwise track-cell encoder and belief-only Spatial ConvGRU, so it can preserve,
+correct, or replace an earlier hypothesis. Both are entity-token upper
+baselines, not end-to-end perception models.
 
-This delivery trains and evaluates the posterior on recorded episodes. It does
-not yet replace the online GTA expert inside `run_expert_episode`; wiring a
-trained checkpoint to the unchanged analytical planner is the next integration
-step after selecting a checkpoint on held-out anchors.
+This delivery trains and evaluates recorded schema-4 episodes only. It does not
+replace the online GTA expert inside `run_expert_episode`.
 
 ## Input contract
 
 For every grounded track and frozen observation, the loader provides:
 
-- semantic class (`FIRE_TRUCK`, `PEDESTRIAN`, `FIRE_SOURCE`, or `UNKNOWN`);
+- semantic class (`FIRE_TRUCK`, `PEDESTRIAN`, or `UNKNOWN` for Spatial RNN input);
 - start-local 3-D position recovered from RGB-D;
 - measured horizontal motion between exactly adjacent observations;
 - projected bounding-box location/size and named view;
-- current start-local camera odometry and remaining horizon.
+- continuous evidence age and same-class count.
 
 Stable track IDs are used only to reconstruct adjacent motion; the ID itself
 is never a feature. The following privileged/generated fields are forbidden
 model inputs:
 
 - event coordinates and evaluation truth;
+- `FIRE_SOURCE` tracks for the Spatial RNN;
 - event affiliation, GTA velocity, and GTA task state;
 - teacher `motion_evidence` and `inferred_event_direction`;
 - GTA handles and world camera/view matrices.
 
-The event cell is the sole training target, and it is used only at the final
-valid observation of each complete episode. The recorded teacher belief is
-never a training target or model input; it remains available only as an
-evaluation diagnostic.
+The Spatial RNN also cannot read camera pose. Coordinates have already been
+deterministically transformed into the start-local frame by the data pipeline.
+The event cell is the sole training target. The recorded teacher belief is
+never a training target, input, or checkpoint-selection criterion.
 
-## Model and fusion
+## Source-blind supervision
+
+The loader rejects episodes without a non-empty interval from the first valid
+non-source motion cue through the step immediately before the first grounded
+`FIRE_SOURCE`. Event-cell NLL is averaged over that interval inside each
+episode, then averaged across episodes. Belief is frozen before the first cue,
+at and after first source visibility, during padding, and whenever an update
+step has no valid motion evidence.
+
+## Incremental baseline
 
 An MLP over each semantic entity token predicts four interpretable values:
 
@@ -71,17 +81,30 @@ log L(x) = w * max(-0.5 * (theta(x) / sigma)^2, log(epsilon))
 All track log likelihoods are summed and added to the previous log posterior,
 then normalized over the circular 120 m map. The network cannot replace the
 posterior through a hidden recurrent state; the explicit belief map is its
-only temporal state.
+only temporal state. The old terminal-only checkpoint contract remains
+readable. Fair comparison to the Spatial RNN requires retraining with
+`--supervision inference`.
 
-Training minimizes only the negative log probability assigned to the true
-event cell at the terminal observation of each complete episode. There is no
-teacher-belief loss and no intermediate event-cell supervision. Because the
-terminal posterior is produced by the explicit sequence of Bayesian updates,
-its gradient still reaches cue predictions made at earlier observations.
-Evaluation may report teacher KL, event NLL, belief MAP error, and event-cell
-rank for all observations, observations after the first valid motion cue, and
-the terminal observation on anchor-disjoint locations; teacher KL is diagnostic
-only and does not affect checkpoint selection.
+## Spatial RNN baseline
+
+For every valid moving track and candidate cell, a shared MLP encodes normalized
+distance, motion-relative cosine/sine, displacement, relative height, bounding
+box span, named view, evidence age, count, and a categorical embedding. Each
+cell aggregates tracks with `mean + max + log-count` and projects the result to
+a 16-channel evidence map. Track order therefore has no semantic meaning.
+
+The recurrent step receives only the previous one-channel log-belief, current
+evidence map, and valid-grid mask. Ephemeral convolutions predict reset/update
+gates and a complete candidate log-belief. The result is normalized over the
+circular grid after every update. There is no recurrent hidden tensor alongside
+the belief map, and downstream components may consume only normalized belief.
+D4 rotations/reflections are applied jointly to training tracks, motion,
+teacher diagnostics, and event cell. Validation data is not augmented.
+
+Checkpoint selection uses held-out-anchor inference-window NLL. Reports include
+the whole inference interval and its final source-blind step: NLL, MAP error,
+event-cell rank, top-10/50/100 recall, entropy, and 50/80/90 percent credible
+region coverage and area. Teacher KL is explicitly diagnostic.
 
 ## Commands
 
@@ -92,17 +115,29 @@ python validation\validate_learned_belief.py dataset\stage2e_multi_anchor
 
 python learning\train_belief_updater.py `
   dataset\stage2e_multi_anchor `
-  --output learning\checkpoints\stage3_belief_updater.pt
+  --supervision inference `
+  --output learning\checkpoints\stage3_incremental_inference.pt
 
-python learning\evaluate_belief_updater.py `
+python learning\train_spatial_belief.py `
   dataset\stage2e_multi_anchor `
-  learning\checkpoints\stage3_belief_updater.pt `
-  --split validation
+  --output learning\checkpoints\stage3_spatial_rnn.pt
+
+python learning\evaluate_spatial_belief.py `
+  dataset\stage2e_multi_anchor `
+  learning\checkpoints\stage3_spatial_rnn.pt
+
+python learning\compare_belief_models.py `
+  dataset\stage2e_multi_anchor `
+  learning\checkpoints\stage3_incremental_inference.pt `
+  learning\checkpoints\stage3_spatial_rnn.pt
+
+python validation\validate_spatial_belief.py dataset\stage2e_multi_anchor
 ```
 
 Checkpoints record the exact semantic classes, feature layout, grid, and
-train/validation anchor lists. Evaluation rejects incompatible contracts.
-Checkpoint directories are Git-ignored.
+train/validation anchor lists, supervision boundary, model dimensions, and
+training hyperparameters. Evaluation rejects incompatible contracts. Checkpoint
+directories are Git-ignored.
 
 ## Current limitation
 

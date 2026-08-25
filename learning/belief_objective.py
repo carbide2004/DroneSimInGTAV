@@ -40,6 +40,41 @@ def belief_training_objective(
     }
 
 
+def inference_belief_objective(
+    prediction: dict[str, torch.Tensor],
+    event_cell: torch.Tensor,
+    inference_mask: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Episode-balanced NLL over the source-blind inference interval."""
+    predicted = prediction["belief"].clamp_min(1.0e-30)
+    if predicted.ndim != 4 or predicted.shape[:2] != inference_mask.shape:
+        raise ValueError("Predicted belief and inference mask shapes do not match")
+    if event_cell.shape != (predicted.shape[0], 2):
+        raise ValueError("event_cell must be [batch, 2]")
+    counts = inference_mask.sum(dim=1)
+    if bool((counts <= 0).any()):
+        raise ValueError("Every episode must contain a source-blind inference step")
+    batch_indices = torch.arange(predicted.shape[0], device=predicted.device)
+    time_indices = torch.arange(predicted.shape[1], device=predicted.device)
+    event_probability = predicted[
+        batch_indices[:, None],
+        time_indices[None, :],
+        event_cell[:, 0, None],
+        event_cell[:, 1, None],
+    ]
+    per_step_nll = -event_probability.clamp_min(1.0e-30).log()
+    weights = inference_mask.to(per_step_nll.dtype)
+    episode_nll = (per_step_nll * weights).sum(dim=1) / counts
+    episode_probability = (event_probability * weights).sum(dim=1) / counts
+    return {
+        "loss": episode_nll.mean(),
+        "event_nll": episode_nll.mean(),
+        "event_probability": episode_probability.mean(),
+        "episode_nll": episode_nll,
+        "per_step_nll": per_step_nll,
+    }
+
+
 @torch.no_grad()
 def belief_metrics(
     prediction: dict[str, torch.Tensor],
@@ -92,7 +127,13 @@ def belief_metrics(
         event_cell[:, 0, None],
         event_cell[:, 1, None],
     ]
-    event_rank = 1 + (flattened > event_probability[..., None]).sum(dim=-1)
+    event_greater = (flattened > event_probability[..., None]).sum(dim=-1)
+    event_equal = (flattened == event_probability[..., None]).sum(dim=-1).clamp_min(1)
+    event_rank = (
+        1.0
+        + event_greater.to(belief.dtype)
+        + 0.5 * (event_equal.to(belief.dtype) - 1.0)
+    )
 
     teacher_flat = teacher_belief.flatten(-2)
     teacher_event_probability = teacher_belief[
@@ -101,9 +142,37 @@ def belief_metrics(
         event_cell[:, 0, None],
         event_cell[:, 1, None],
     ]
-    teacher_event_rank = 1 + (
+    teacher_greater = (
         teacher_flat > teacher_event_probability[..., None]
     ).sum(dim=-1)
+    teacher_equal = (
+        teacher_flat == teacher_event_probability[..., None]
+    ).sum(dim=-1).clamp_min(1)
+    teacher_event_rank = 1.0 + teacher_greater.to(belief.dtype) + 0.5 * (
+        teacher_equal.to(belief.dtype) - 1.0
+    )
+
+    entropy = -torch.sum(
+        torch.where(belief > 0.0, belief * predicted_log, torch.zeros_like(belief)),
+        dim=(-2, -1),
+    )
+    sorted_probability = torch.sort(flattened, dim=-1, descending=True).values
+    cumulative_probability = sorted_probability.cumsum(dim=-1)
+    cell_m = float(torch.abs(grid_forward[1, 0] - grid_forward[0, 0]).item())
+    credible = {}
+    for percentage, level in ((50, 0.5), (80, 0.8), (90, 0.9)):
+        region_size = 1 + (cumulative_probability < level).sum(dim=-1)
+        region_size = region_size.clamp_max(flattened.shape[-1])
+        covered = (
+            (region_size.to(belief.dtype) - event_greater.to(belief.dtype))
+            / event_equal.to(belief.dtype)
+        ).clamp(0.0, 1.0)
+        credible[f"coverage_{percentage}"] = float(
+            covered[active].mean().item()
+        )
+        credible[f"credible_area_{percentage}_m2"] = float(
+            (region_size[active].float() * (cell_m**2)).mean().item()
+        )
 
     return {
         "teacher_kl": float(teacher_kl.item()),
@@ -115,5 +184,22 @@ def belief_metrics(
         "teacher_event_rank": float(
             teacher_event_rank[active].float().mean().item()
         ),
+        "top_10_recall": float(
+            (
+                (10 - event_greater).to(belief.dtype) / event_equal
+            ).clamp(0.0, 1.0)[active].mean().item()
+        ),
+        "top_50_recall": float(
+            (
+                (50 - event_greater).to(belief.dtype) / event_equal
+            ).clamp(0.0, 1.0)[active].mean().item()
+        ),
+        "top_100_recall": float(
+            (
+                (100 - event_greater).to(belief.dtype) / event_equal
+            ).clamp(0.0, 1.0)[active].mean().item()
+        ),
+        "entropy": float(entropy[active].mean().item()),
         "steps": float(active_count),
+        **credible,
     }

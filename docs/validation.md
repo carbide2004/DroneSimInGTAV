@@ -162,6 +162,24 @@ python validation\visualize_stage2e_dataset.py `
 shared by start-budget checking, teacher rollout, and strict execution. The
 canonical benchmark default remains 80 including STOP.
 
+## Stage 3A offline belief validation
+
+```powershell
+python validation\validate_spatial_belief.py dataset\stage2e_multi_anchor
+```
+
+The default run audits every schema-4 episode's source-blind boundary, source
+and pose exclusion, track permutation invariance, exact identity updates,
+normalization, D4 round trips, episode-balanced NLL, variable-length backward,
+tiny overfit, checkpoint reload, and five full-data smoke epochs. Use
+`--training-smoke-epochs 0 --overfit-steps 2` for a fast structural check.
+
+After training the two checkpoints, `learning/compare_belief_models.py` reports
+the uniform prior, inference-supervised incremental updater, and Spatial RNN on
+the identical anchor split. It reports performance differences without making
+one model winning an implementation acceptance condition. Teacher KL is always
+diagnostic.
+
 ## Storage behavior
 
 - ordinary validators: no payload files;

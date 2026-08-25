@@ -93,8 +93,8 @@ class LearnedCueBeliefUpdater(nn.Module):
         )
         forward, right = torch.meshgrid(coordinates, coordinates, indexing="ij")
         valid = forward.square() + right.square() <= config.radius_m**2 + 1.0e-4
-        self.register_buffer("grid_forward", forward, persistent=True)
-        self.register_buffer("grid_right", right, persistent=True)
+        self.register_buffer("grid_forward", forward.clone(), persistent=True)
+        self.register_buffer("grid_right", right.clone(), persistent=True)
         self.register_buffer("valid_mask", valid, persistent=True)
 
     def initial_log_belief(self, batch_size: int, dtype: torch.dtype) -> torch.Tensor:

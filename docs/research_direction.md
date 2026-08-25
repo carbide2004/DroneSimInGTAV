@@ -95,11 +95,16 @@ Until then, results apply only to the current Stage 2 planar navigation bias.
 ### 1. Learned explicit belief baseline under the current Stage 2 bias
 
 Replace the hand-written cue-to-belief update before replacing the action
-planner. The first baseline consumes anonymous structured tracks recovered
-from RGB-D, learns cue direction, angular uncertainty, and reliability, and
-fuses them through an explicit spatial posterior. It is an entity-token
-baseline, not a final perception model and not evidence of open-vocabulary
-generalization.
+planner. The initial additive baseline consumes anonymous structured tracks
+recovered from RGB-D and learns cue direction, angular uncertainty, and
+reliability. Stage 3A adds a source-blind Spatial ConvGRU whose only recurrent
+state is the explicit log-belief map. Both are evaluated over the same interval
+from the first valid dynamic cue to immediately before direct source grounding.
+
+These remain entity-token, planar baselines. They are not final perception
+models and categorical embeddings are not evidence of open-vocabulary
+generalization. Online planner integration follows only after offline
+calibration and held-out-anchor behavior are understood.
 
 ### 2. Deferred benchmark and vertical audit
 

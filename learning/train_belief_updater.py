@@ -31,6 +31,7 @@ from learning.belief_model import (  # noqa: E402
 from learning.belief_objective import (  # noqa: E402
     belief_metrics,
     belief_training_objective,
+    inference_belief_objective,
 )
 
 
@@ -60,6 +61,12 @@ def _arguments() -> argparse.Namespace:
         "--validation-anchors",
         nargs="+",
         help="Explicit anchor_NNN names; default is the final 20%% of anchors",
+    )
+    parser.add_argument(
+        "--supervision",
+        choices=("final", "inference"),
+        default="final",
+        help="Legacy final-step NLL or episode-normalized source-blind NLL",
     )
     parser.add_argument(
         "--device",
@@ -104,15 +111,38 @@ def _forward(model: LearnedCueBeliefUpdater, batch: dict) -> dict:
     )
 
 
+def _objective(prediction: dict, batch: dict, supervision: str) -> dict:
+    if supervision == "inference":
+        return inference_belief_objective(
+            prediction, batch["event_cell"], batch["inference_mask"]
+        )
+    return belief_training_objective(
+        prediction, batch["event_cell"], batch["sequence_mask"]
+    )
+
+
+def _metric_mask(batch: dict, supervision: str, device: torch.device) -> torch.Tensor:
+    if supervision == "inference":
+        return batch["inference_mask"]
+    final_mask = torch.zeros_like(batch["sequence_mask"])
+    lengths = batch["sequence_mask"].sum(dim=1)
+    final_mask[
+        torch.arange(final_mask.shape[0], device=device), lengths - 1
+    ] = True
+    return final_mask
+
+
 @torch.no_grad()
 def _evaluate(
     model: LearnedCueBeliefUpdater,
     loader: DataLoader,
     device: torch.device,
+    supervision: str,
 ) -> dict[str, float]:
     model.eval()
+    objective_sum = 0.0
+    episode_count = 0
     totals = {
-        "loss": 0.0,
         "teacher_kl": 0.0,
         "event_nll": 0.0,
         "map_error_m": 0.0,
@@ -123,14 +153,8 @@ def _evaluate(
     for raw_batch in loader:
         batch = _to_device(raw_batch, device)
         prediction = _forward(model, batch)
-        objective = belief_training_objective(
-            prediction, batch["event_cell"], batch["sequence_mask"]
-        )
-        final_mask = torch.zeros_like(batch["sequence_mask"])
-        lengths = batch["sequence_mask"].sum(dim=1)
-        final_mask[
-            torch.arange(final_mask.shape[0], device=device), lengths - 1
-        ] = True
+        objective = _objective(prediction, batch, supervision)
+        final_mask = _metric_mask(batch, supervision, device)
         metrics = belief_metrics(
             prediction,
             batch["teacher_belief"],
@@ -140,9 +164,11 @@ def _evaluate(
             model.grid_forward,
             model.grid_right,
         )
+        batch_episodes = int(batch["sequence_mask"].shape[0])
+        objective_sum += float(objective["loss"].item()) * batch_episodes
+        episode_count += batch_episodes
         weight = metrics["steps"]
         totals["steps"] += weight
-        totals["loss"] += float(objective["loss"].item()) * weight
         for name in (
             "teacher_kl",
             "event_nll",
@@ -151,12 +177,17 @@ def _evaluate(
             "teacher_event_rank",
         ):
             totals[name] += metrics[name] * weight
+    if episode_count <= 0:
+        raise RuntimeError("Validation loader produced no episodes")
     if totals["steps"] <= 0:
         raise RuntimeError("Validation loader produced no complete episodes")
-    episodes = totals["steps"]
+    metric_steps = totals["steps"]
     return {
-        name: value / episodes if name != "steps" else value
-        for name, value in totals.items()
+        "loss": objective_sum / episode_count,
+        **{
+            name: value / metric_steps if name != "steps" else value
+            for name, value in totals.items()
+        },
     }
 
 
@@ -231,7 +262,8 @@ def main() -> None:
     print(
         f"belief training device={device} episodes={len(train_records)}/"
         f"{len(validation_records)} anchors={train_anchors}/{validation_anchors} "
-        f"grid={grid.size}x{grid.size}@{grid.cell_m:g}m",
+        f"grid={grid.size}x{grid.size}@{grid.cell_m:g}m "
+        f"supervision={args.supervision}",
         flush=True,
     )
 
@@ -245,23 +277,21 @@ def main() -> None:
             batch = _to_device(raw_batch, device)
             optimizer.zero_grad(set_to_none=True)
             prediction = _forward(model, batch)
-            objective = belief_training_objective(
-                prediction, batch["event_cell"], batch["sequence_mask"]
-            )
+            objective = _objective(prediction, batch, args.supervision)
             objective["loss"].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradient_clip)
             optimizer.step()
             episodes = int(batch["sequence_mask"].shape[0])
             train_loss_sum += float(objective["loss"].item()) * episodes
             train_steps += episodes
-        validation = _evaluate(model, validation_loader, device)
+        validation = _evaluate(model, validation_loader, device, args.supervision)
         train_loss = train_loss_sum / max(1, train_steps)
         print(
-            f"epoch={epoch:03d} train_final_nll={train_loss:.5f} "
-            f"val_final_nll={validation['loss']:.5f} "
-            f"final_KL={validation['teacher_kl']:.5f} "
-            f"final_map_error={validation['map_error_m']:.2f}m "
-            f"final_rank={validation['event_rank']:.1f}",
+            f"epoch={epoch:03d} train_{args.supervision}_nll={train_loss:.5f} "
+            f"val_{args.supervision}_nll={validation['loss']:.5f} "
+            f"metric_KL={validation['teacher_kl']:.5f} "
+            f"metric_map_error={validation['map_error_m']:.2f}m "
+            f"metric_rank={validation['event_rank']:.1f}",
             flush=True,
         )
         if validation["loss"] < best_validation:
@@ -279,8 +309,13 @@ def main() -> None:
                 "dataset_root": str(Path(args.dataset_root).resolve()),
                 "epoch": epoch,
                 "validation_metrics": validation,
+                "supervision": (
+                    "source_blind_inference_nll"
+                    if args.supervision == "inference"
+                    else "final_event_cell_nll"
+                ),
                 "training_config": {
-                    "supervision": "final_event_cell_nll",
+                    "supervision": args.supervision,
                     "seed": args.seed,
                     "epochs": args.epochs,
                     "batch_size": args.batch_size,

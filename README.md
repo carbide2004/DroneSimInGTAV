@@ -73,7 +73,7 @@ in [Task specification](docs/task_specification.md).
 | Controlled fire-response scenario and truth | Implemented |
 | Occlusion-aware starts and visibility evaluation | Implemented |
 | Cue-grounded expert and dataset generation | Implemented |
-| Structured-track learned 2-D belief updater | Initial baseline implemented |
+| Incremental and Spatial RNN learned 2-D belief updaters | Offline baselines implemented |
 | Response-ecology statistical benchmark | Planned |
 | Paired counterfactual interventions | Planned |
 | Additional event types | Planned |
@@ -226,38 +226,55 @@ python validation\summarize_stage2e_timings.py dataset\stage2e_multi_anchor
 Dataset schema and recording behavior are documented in
 [Dataset format](docs/dataset_format.md).
 
-### 5. Train the first learned belief baseline
+### 5. Train the learned belief baselines
 
-The initial Stage 3 baseline learns how anonymous RGB-D-grounded responder
-tracks update the existing `61 x 61` spatial belief. It does not read teacher
-motion directions, event coordinates, GTA velocities, affiliation, or task
-state, and it does not yet replace RGB-D perception or the analytical action
-planner.
+Stage 3A provides two offline structured-track baselines: an explicit additive
+incremental updater and a belief-only Spatial ConvGRU. Both infer a `61 x 61`
+start-local posterior before the fire source is directly grounded. Teacher
+beliefs are diagnostics only; the event cell supervises every source-blind
+inference step with an episode-normalized NLL.
 
-Install PyTorch for the learning environment, then train with an
-anchor-disjoint validation split:
+Train both models with the same anchor-disjoint split and supervision window:
 
 ```powershell
 python -m pip install -r learning\requirements.txt
 
 python learning\train_belief_updater.py `
   dataset\stage2e_multi_anchor `
-  --output learning\checkpoints\stage3_belief_updater.pt
+  --supervision inference `
+  --output learning\checkpoints\stage3_incremental_inference.pt
 
-python learning\evaluate_belief_updater.py `
+python learning\train_spatial_belief.py `
   dataset\stage2e_multi_anchor `
-  learning\checkpoints\stage3_belief_updater.pt
+  --output learning\checkpoints\stage3_spatial_rnn.pt
 ```
 
-Run the no-checkpoint numerical and dataset-contract check with:
+Evaluate the Spatial RNN and print one common table for the uniform prior,
+incremental updater, and Spatial RNN:
 
 ```powershell
-python validation\validate_learned_belief.py dataset\stage2e_multi_anchor
+python learning\evaluate_spatial_belief.py `
+  dataset\stage2e_multi_anchor `
+  learning\checkpoints\stage3_spatial_rnn.pt
+
+python learning\compare_belief_models.py `
+  dataset\stage2e_multi_anchor `
+  learning\checkpoints\stage3_incremental_inference.pt `
+  learning\checkpoints\stage3_spatial_rnn.pt
 ```
 
-Training supervises only the true event grid cell at each complete episode's
-terminal observation. Recorded teacher beliefs are diagnostics only: they are
-neither model inputs nor loss targets.
+Run the Spatial RNN contract, invariance, D4, backward, overfit, checkpoint,
+and five-epoch full-data smoke checks with:
+
+```powershell
+python validation\validate_spatial_belief.py dataset\stage2e_multi_anchor
+```
+
+The Spatial RNN never receives `FIRE_SOURCE` tracks or pose tensors. Its only
+cross-time state is the normalized one-channel log-belief map; padding, missing
+motion evidence, and the source-visible phase are exact identity updates. It is
+still an entity-token, planar baseline and is not connected to the online GTA
+planner.
 
 The method, inputs, exclusions, losses, and current 2-D limitation are defined
 in [Belief learning baseline](docs/belief_learning.md).

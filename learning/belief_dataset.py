@@ -206,10 +206,17 @@ def _world_to_start_local(
 class GroundedTrackBeliefDataset(Dataset):
     """One item is one complete variable-length expert episode."""
 
-    def __init__(self, records: Sequence[BeliefEpisodeRecord]):
+    def __init__(
+        self,
+        records: Sequence[BeliefEpisodeRecord],
+        augment_d4: bool = False,
+        augmentation_seed: int = 0,
+    ):
         if not records:
             raise BeliefDatasetError("records must not be empty")
         self.records = tuple(records)
+        self.augment_d4 = bool(augment_d4)
+        self.augmentation_seed = int(augmentation_seed)
         self.grid_spec = self._read_grid_spec(self.records[0])
         for record in self.records[1:]:
             if self._read_grid_spec(record) != self.grid_spec:
@@ -292,6 +299,9 @@ class GroundedTrackBeliefDataset(Dataset):
         step_tracks = []
         maximum_tracks = 0
         poses = []
+        source_visible_rows = []
+        motion_evidence_rows = []
+        source_seen = False
 
         for sequence_index, (agent_row, teacher_row) in enumerate(
             zip(agent_steps, awareness_steps)
@@ -307,6 +317,11 @@ class GroundedTrackBeliefDataset(Dataset):
             grounded = teacher_row.get("grounded_tracks")
             if not isinstance(grounded, list):
                 raise BeliefDatasetError(f"grounded_tracks is not a list in {root}")
+            source_seen = source_seen or any(
+                str(item.get("semantic_class", "UNKNOWN")) == "FIRE_SOURCE"
+                for item in grounded
+            )
+            source_visible_rows.append(source_seen)
             class_counts: dict[str, int] = {}
             for item in grounded:
                 semantic = str(item.get("semantic_class", "UNKNOWN"))
@@ -314,6 +329,7 @@ class GroundedTrackBeliefDataset(Dataset):
 
             encoded = []
             current_tracks: dict[int, tuple[int, str, np.ndarray]] = {}
+            step_has_motion_evidence = False
             for item in grounded:
                 try:
                     track_id = int(item["track_id"])
@@ -346,6 +362,8 @@ class GroundedTrackBeliefDataset(Dataset):
                     if displacement >= 0.4:
                         motion_valid = 1.0
                         evidence_counts[track_id] = evidence_counts.get(track_id, 0) + 1
+                        if semantic != "FIRE_SOURCE":
+                            step_has_motion_evidence = True
                 unit = (
                     delta / displacement
                     if displacement > 1.0e-6
@@ -377,14 +395,21 @@ class GroundedTrackBeliefDataset(Dataset):
                 )
                 encoded.append((features, class_index))
                 current_tracks[track_id] = (expected_step, semantic, position)
+            motion_evidence_rows.append(step_has_motion_evidence)
             previous_tracks = current_tracks
             step_tracks.append(encoded)
             maximum_tracks = max(maximum_tracks, len(encoded))
 
             odometry = agent_row.get("odometry", {})
-            position_local = np.asarray(odometry.get("position_local"), dtype=np.float32)
+            position_local = np.asarray(
+                odometry.get("position_local"), dtype=np.float32
+            )
             yaw = float(odometry.get("yaw_from_start_degrees", math.nan))
-            if position_local.shape != (3,) or not np.isfinite(position_local).all() or not math.isfinite(yaw):
+            if (
+                position_local.shape != (3,)
+                or not np.isfinite(position_local).all()
+                or not math.isfinite(yaw)
+            ):
                 raise BeliefDatasetError(f"Invalid odometry in {root} step {expected_step}")
             yaw_radians = math.radians(yaw)
             poses.append(
@@ -397,6 +422,29 @@ class GroundedTrackBeliefDataset(Dataset):
                     (horizon - expected_step) / float(horizon),
                 )
             )
+
+        source_visible_mask = np.asarray(source_visible_rows, dtype=np.bool_)
+        motion_evidence_mask = np.asarray(motion_evidence_rows, dtype=np.bool_)
+        source_indices = np.flatnonzero(source_visible_mask)
+        cue_indices = np.flatnonzero(motion_evidence_mask)
+        if source_indices.size == 0:
+            raise BeliefDatasetError(
+                f"Episode never grounds FIRE_SOURCE before termination: {root}"
+            )
+        if cue_indices.size == 0:
+            raise BeliefDatasetError(
+                f"Episode has no valid non-source dynamic cue: {root}"
+            )
+        first_source = int(source_indices[0])
+        first_cue = int(cue_indices[0])
+        if first_cue >= first_source:
+            raise BeliefDatasetError(
+                "Episode has no source-blind inference interval: "
+                f"first_cue={first_cue + 1}, first_source={first_source + 1}, root={root}"
+            )
+        inference_mask = np.zeros(step_count, dtype=np.bool_)
+        inference_mask[first_cue:first_source] = True
+        belief_update_mask = inference_mask.copy()
 
         # Keep a real tensor dimension even when one step observes no tracks.
         maximum_tracks = max(1, maximum_tracks)
@@ -424,8 +472,12 @@ class GroundedTrackBeliefDataset(Dataset):
         except (KeyError, TypeError) as error:
             raise BeliefDatasetError(f"Missing event transform truth in {root}") from error
         event_local = _world_to_start_local(absolute_pose, event_world)
-        event_row = int(round((event_local[0] + self.grid_spec.radius_m) / self.grid_spec.cell_m))
-        event_column = int(round((event_local[1] + self.grid_spec.radius_m) / self.grid_spec.cell_m))
+        event_row = int(
+            round((event_local[0] + self.grid_spec.radius_m) / self.grid_spec.cell_m)
+        )
+        event_column = int(
+            round((event_local[1] + self.grid_spec.radius_m) / self.grid_spec.cell_m)
+        )
         if not (
             0 <= event_row < self.grid_spec.size
             and 0 <= event_column < self.grid_spec.size
@@ -435,7 +487,7 @@ class GroundedTrackBeliefDataset(Dataset):
                 f"Event lies outside the belief grid in {root}: local={event_local}"
             )
 
-        return {
+        item = {
             "episode_id": record.episode_id,
             "anchor_name": record.anchor_name,
             "track_features": torch.from_numpy(features),
@@ -445,8 +497,88 @@ class GroundedTrackBeliefDataset(Dataset):
             "teacher_belief": torch.from_numpy(teacher_belief),
             "event_cell": torch.tensor((event_row, event_column), dtype=torch.long),
             "event_xy": torch.tensor(event_local[:2], dtype=torch.float32),
+            "source_visible_mask": torch.from_numpy(source_visible_mask),
+            "motion_evidence_mask": torch.from_numpy(motion_evidence_mask),
+            "inference_mask": torch.from_numpy(inference_mask),
+            "belief_update_mask": torch.from_numpy(belief_update_mask),
             "length": step_count,
         }
+        if self.augment_d4:
+            code = (self.augmentation_seed + index * 5) % 8
+            item = apply_d4_transform(item, code)
+        else:
+            item["d4_code"] = 0
+        return item
+
+
+def apply_d4_transform(item: dict, code: int) -> dict:
+    """Apply one exact square-grid symmetry to a loaded episode item.
+
+    Codes 0..3 rotate counter-clockwise by k*90 degrees. Codes 4..7
+    first reflect the start-local right axis, then apply the rotation.
+    """
+    if not 0 <= int(code) < 8:
+        raise ValueError("D4 code must lie in [0, 7]")
+    result = {
+        key: value.clone() if isinstance(value, torch.Tensor) else value
+        for key, value in item.items()
+    }
+    rotation = int(code) % 4
+    reflected = int(code) >= 4
+    size = int(result["teacher_belief"].shape[-1])
+
+    def reflect_right() -> None:
+        result["track_features"][..., 1] *= -1.0
+        result["track_features"][..., 4] *= -1.0
+        result["pose_features"][..., 1] *= -1.0
+        result["pose_features"][..., 3] *= -1.0
+        result["event_xy"][1] *= -1.0
+        result["event_cell"][1] = size - 1 - result["event_cell"][1]
+        result["teacher_belief"] = result["teacher_belief"].flip(-1)
+
+    def rotate_once() -> None:
+        forward = result["track_features"][..., 0].clone()
+        right = result["track_features"][..., 1].clone()
+        result["track_features"][..., 0] = -right
+        result["track_features"][..., 1] = forward
+        motion_forward = result["track_features"][..., 3].clone()
+        motion_right = result["track_features"][..., 4].clone()
+        result["track_features"][..., 3] = -motion_right
+        result["track_features"][..., 4] = motion_forward
+        pose_forward = result["pose_features"][..., 0].clone()
+        pose_right = result["pose_features"][..., 1].clone()
+        result["pose_features"][..., 0] = -pose_right
+        result["pose_features"][..., 1] = pose_forward
+        pose_sin = result["pose_features"][..., 3].clone()
+        pose_cos = result["pose_features"][..., 4].clone()
+        result["pose_features"][..., 3] = pose_cos
+        result["pose_features"][..., 4] = -pose_sin
+        event_forward = result["event_xy"][0].clone()
+        event_right = result["event_xy"][1].clone()
+        result["event_xy"][0] = -event_right
+        result["event_xy"][1] = event_forward
+        event_row = result["event_cell"][0].clone()
+        event_column = result["event_cell"][1].clone()
+        result["event_cell"][0] = size - 1 - event_column
+        result["event_cell"][1] = event_row
+        result["teacher_belief"] = torch.rot90(
+            result["teacher_belief"], 1, dims=(-2, -1)
+        )
+
+    if reflected:
+        reflect_right()
+    for _ in range(rotation):
+        rotate_once()
+    result["d4_code"] = int(code)
+    return result
+
+
+def inverse_d4_code(code: int) -> int:
+    if not 0 <= int(code) < 8:
+        raise ValueError("D4 code must lie in [0, 7]")
+    if int(code) >= 4:
+        return int(code)
+    return (-int(code)) % 4
 
 
 def collate_belief_episodes(items: Iterable[dict]) -> dict:
@@ -473,6 +605,11 @@ def collate_belief_episodes(items: Iterable[dict]) -> dict:
         batch_size, maximum_steps, *grid_shape, dtype=torch.float32
     )
     sequence_mask = torch.zeros(batch_size, maximum_steps, dtype=torch.bool)
+    source_visible_mask = torch.zeros_like(sequence_mask)
+    motion_evidence_mask = torch.zeros_like(sequence_mask)
+    inference_mask = torch.zeros_like(sequence_mask)
+    belief_update_mask = torch.zeros_like(sequence_mask)
+    d4_codes = []
     event_cells = []
     event_xy = []
     episode_ids = []
@@ -487,6 +624,11 @@ def collate_belief_episodes(items: Iterable[dict]) -> dict:
         pose_features[batch_index, :length] = item["pose_features"]
         teacher_belief[batch_index, :length] = item["teacher_belief"]
         sequence_mask[batch_index, :length] = True
+        source_visible_mask[batch_index, :length] = item["source_visible_mask"]
+        motion_evidence_mask[batch_index, :length] = item["motion_evidence_mask"]
+        inference_mask[batch_index, :length] = item["inference_mask"]
+        belief_update_mask[batch_index, :length] = item["belief_update_mask"]
+        d4_codes.append(int(item.get("d4_code", 0)))
         event_cells.append(item["event_cell"])
         event_xy.append(item["event_xy"])
         episode_ids.append(item["episode_id"])
@@ -503,4 +645,9 @@ def collate_belief_episodes(items: Iterable[dict]) -> dict:
         "sequence_mask": sequence_mask,
         "event_cell": torch.stack(event_cells),
         "event_xy": torch.stack(event_xy),
+        "source_visible_mask": source_visible_mask,
+        "motion_evidence_mask": motion_evidence_mask,
+        "inference_mask": inference_mask,
+        "belief_update_mask": belief_update_mask,
+        "d4_code": torch.tensor(d4_codes, dtype=torch.long),
     }

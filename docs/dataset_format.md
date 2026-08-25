@@ -148,17 +148,25 @@ intervention; free-text plausibility alone is insufficient.
 RGB or depth payloads. It reconstructs consecutive horizontal motion from the
 teacher stream's anonymous RGB-D-grounded track positions and emits semantic
 class, measured position/motion, view/bounding-box diagnostics, start-local
-odometry, teacher belief diagnostics, and a privileged event cell. Only the
-event cell at the final valid observation of each complete episode contributes
-to the training loss. Teacher belief is never a training target and is used
-only for evaluation.
+odometry, teacher belief diagnostics, and a privileged event cell. It also
+derives four strict temporal masks:
+
+- `source_visible_mask`: cumulative from the first grounded `FIRE_SOURCE`;
+- `motion_evidence_mask`: valid adjacent non-source motion at that step;
+- `inference_mask`: first valid motion through the step before source visibility;
+- `belief_update_mask`: currently identical to `inference_mask`.
+
+Stage 3A supervises the true event cell at every `inference_mask` step, averages
+time within each episode, then averages episodes in the batch. Teacher belief
+is never a training target or checkpoint-selection criterion.
 
 The learned model input explicitly excludes teacher `motion_evidence`,
 teacher `inferred_event_direction`, event coordinates, entity affiliation,
 GTA velocity, GTA task state, handles, and world camera matrices. Stable track
 IDs are used only inside the loader to associate adjacent observations and are
-never embedded as model features. Train/validation splitting is by anchor, not
-by randomly mixing episodes from the same location.
+never embedded as model features. The Spatial RNN additionally excludes
+`FIRE_SOURCE` tracks and pose tensors. Train/validation splitting is by anchor,
+not by randomly mixing episodes from the same location.
 
 ## Evaluation truth
 
