@@ -142,6 +142,24 @@ This is generated supervision. Future Awareness experiments must place any
 claimed reasoning state on the actual decision path and test it through direct
 intervention; free-text plausibility alone is insufficient.
 
+## Learned belief reader
+
+`learning/belief_dataset.py` reads complete schema-4 episodes without loading
+RGB or depth payloads. It reconstructs consecutive horizontal motion from the
+teacher stream's anonymous RGB-D-grounded track positions and emits semantic
+class, measured position/motion, view/bounding-box diagnostics, start-local
+odometry, teacher belief diagnostics, and a privileged event cell. Only the
+event cell at the final valid observation of each complete episode contributes
+to the training loss. Teacher belief is never a training target and is used
+only for evaluation.
+
+The learned model input explicitly excludes teacher `motion_evidence`,
+teacher `inferred_event_direction`, event coordinates, entity affiliation,
+GTA velocity, GTA task state, handles, and world camera matrices. Stable track
+IDs are used only inside the loader to associate adjacent observations and are
+never embedded as model features. Train/validation splitting is by anchor, not
+by randomly mixing episodes from the same location.
+
 ## Evaluation truth
 
 Privileged truth records the immutable task blueprint, event location,

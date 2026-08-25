@@ -73,16 +73,43 @@ The controlled pedestrian wave and fire-truck task are experimental structure,
 not claims about GTA's native response ecology. The current expert is a data
 generator and baseline, not the final research method.
 
+### Known 2-D / vertical-action bias
+
+The implemented simulator exposes `ASCEND` and `DESCEND`, but the current
+Stage 2 teacher, belief grid, and collected trajectories are effectively
+2-D/2.5-D. In the inspected schema-4 collection (`68` episodes, `2497`
+actions), only one action was `ASCEND`, none was `DESCEND`, mean within-episode
+altitude range was `0.01 m`, and the maximum was `1 m`. The existing data
+therefore cannot support a claim that a learned policy has acquired meaningful
+vertical exploration.
+
+This is recorded rather than hidden by a model change. The first learned
+belief baseline intentionally matches the current 2-D teacher distribution.
+A later benchmark audit must add altitude-stratified starts, vertically
+occluded goals/cues, 3-D belief and viewpoint metrics, and enough successful
+vertical actions before ascent/descent performance is trained or reported.
+Until then, results apply only to the current Stage 2 planar navigation bias.
+
 ## Next research milestones
 
-### 1. Response-ecology measurement
+### 1. Learned explicit belief baseline under the current Stage 2 bias
+
+Replace the hand-written cue-to-belief update before replacing the action
+planner. The first baseline consumes anonymous structured tracks recovered
+from RGB-D, learns cue direction, angular uncertainty, and reliability, and
+fuses them through an explicit spatial posterior. It is an entity-token
+baseline, not a final perception model and not evidence of open-vocabulary
+generalization.
+
+### 2. Deferred benchmark and vertical audit
 
 Collect state-only telemetry before training a learned policy. Measure response
 latency, direction agreement, trajectory diversity, task failure, cue
 visibility, redundancy among pedestrians, and road/sidewalk biases across many
-locations and blueprints.
+locations and blueprints. Include the vertical-coverage requirements described
+above before calling the benchmark 3-D.
 
-### 2. Paired semantic interventions
+### 3. Paired semantic interventions
 
 Reuse immutable blueprints to construct matched conditions:
 
@@ -95,20 +122,20 @@ Reuse immutable blueprints to construct matched conditions:
 Interventions should preserve scene naturalness and background geometry rather
 than reverse trajectories or produce obviously invalid motion.
 
-### 3. Explicit belief baselines
+### 4. Additional explicit belief baselines
 
 Start with privileged entity tracks and a transparent spatial filter. Compare
 map-only, static RGB, oracle cue, Bayesian belief, and entity-token recurrent
 baselines before increasing model complexity.
 
-### 4. Learned perception and temporal models
+### 5. Learned perception and temporal models
 
 Replace privileged association with detection and tracking noise, then compare
 simple recurrent, attention-based, and state-space temporal models. Architecture
 choice follows evidence about sequence length and failure modes; it is not the
 starting contribution.
 
-### 5. Structured Awareness
+### 6. Structured Awareness
 
 Represent observed cues, hypotheses, support, contradiction, uncertainty, and
 information need as machine-testable fields. The policy must consume this

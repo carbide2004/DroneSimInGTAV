@@ -148,6 +148,21 @@ This teacher is intended to construct training trajectories and structured
 decision records. It is not evidence that a learned policy uses causal
 response cues; that claim requires counterfactual intervention experiments.
 
+The first learned baseline deliberately replaces only the teacher's
+cue-to-belief update. It consumes structured tracks recovered from the episode
+RGB-D stream and retains the analytical strict-action planner. This is an
+oracle-association/entity-token baseline: stable track association is provided
+by the dataset, while event coordinates, event affiliation, GTA velocity,
+task state, and teacher-inferred event direction remain excluded.
+
+The current implementation trains and evaluates this learned posterior
+offline; online GTA rollout still uses the hand-written belief until a selected
+checkpoint is connected to the otherwise unchanged analytical planner.
+
+Its posterior is 2-D. Although the environment action contract remains 3-D,
+the present Stage 2 trajectories contain essentially no vertical exploration;
+the learned baseline must not be presented as a learned ascent/descent policy.
+
 The current teacher emits `STOP` only after the same RGB-D-grounded source has
 been observed in two adjacent observations, its horizontal range from the camera
 is at most `30 m`, and its clear projected box spans at least `64 px`. A farther

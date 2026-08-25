@@ -73,10 +73,11 @@ in [Task specification](docs/task_specification.md).
 | Controlled fire-response scenario and truth | Implemented |
 | Occlusion-aware starts and visibility evaluation | Implemented |
 | Cue-grounded expert and dataset generation | Implemented |
+| Structured-track learned 2-D belief updater | Initial baseline implemented |
 | Response-ecology statistical benchmark | Planned |
 | Paired counterfactual interventions | Planned |
 | Additional event types | Planned |
-| Learned belief policy and Awareness supervision | Not yet implemented |
+| Learned RGB-D perception, action policy, and Awareness | Not yet implemented |
 
 The expert is a data-generation baseline, not the final learned model. GTA AI
 trajectories are not frame-identical across reconstructed runs; blueprints,
@@ -225,6 +226,42 @@ python validation\summarize_stage2e_timings.py dataset\stage2e_multi_anchor
 Dataset schema and recording behavior are documented in
 [Dataset format](docs/dataset_format.md).
 
+### 5. Train the first learned belief baseline
+
+The initial Stage 3 baseline learns how anonymous RGB-D-grounded responder
+tracks update the existing `61 x 61` spatial belief. It does not read teacher
+motion directions, event coordinates, GTA velocities, affiliation, or task
+state, and it does not yet replace RGB-D perception or the analytical action
+planner.
+
+Install PyTorch for the learning environment, then train with an
+anchor-disjoint validation split:
+
+```powershell
+python -m pip install -r learning\requirements.txt
+
+python learning\train_belief_updater.py `
+  dataset\stage2e_multi_anchor `
+  --output learning\checkpoints\stage3_belief_updater.pt
+
+python learning\evaluate_belief_updater.py `
+  dataset\stage2e_multi_anchor `
+  learning\checkpoints\stage3_belief_updater.pt
+```
+
+Run the no-checkpoint numerical and dataset-contract check with:
+
+```powershell
+python validation\validate_learned_belief.py dataset\stage2e_multi_anchor
+```
+
+Training supervises only the true event grid cell at each complete episode's
+terminal observation. Recorded teacher beliefs are diagnostics only: they are
+neither model inputs nor loss targets.
+
+The method, inputs, exclusions, losses, and current 2-D limitation are defined
+in [Belief learning baseline](docs/belief_learning.md).
+
 ## Architecture
 
 ```mermaid
@@ -258,6 +295,7 @@ protocol, seed, and truth boundaries.
 ```text
 DroneSim/        C++ ASI runtime, capture, clock, protocol, and scenarios
 agent_control/   strict Python client, task actions, expert, and recording
+learning/        structured-track belief model, training, and evaluation
 validation/      online validators and offline trajectory visualizers
 docs/            task, architecture, scenario, dataset, and validation docs
 ```
@@ -280,7 +318,9 @@ docs/            task, architecture, scenario, dataset, and validation docs
 - particle rendering is diagnostic appearance, not geometric truth;
 - native response ecology and counterfactual conditions have not yet been
   statistically validated;
-- no learned policy or causal Awareness bottleneck is included yet;
+- the first learned component updates a 2-D belief from structured tracks; raw
+  RGB-D perception, vertical belief, learned action selection, and causal
+  Awareness are not included yet;
 - GTA V, ScriptHookV, and game assets are not distributed by this repository.
 
 ## Documentation
@@ -289,6 +329,7 @@ docs/            task, architecture, scenario, dataset, and validation docs
 - [Architecture](docs/architecture.md)
 - [Controlled scenarios](docs/scenarios.md)
 - [Dataset format](docs/dataset_format.md)
+- [Belief learning baseline](docs/belief_learning.md)
 - [Validation guide](docs/validation.md)
 - [Research direction](docs/research_direction.md)
 
