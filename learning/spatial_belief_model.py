@@ -320,6 +320,48 @@ class SpatialRecurrentBeliefUpdater(nn.Module):
         visible_gate = visible_gate * self.valid_mask[None].to(visible_gate.dtype)
         return next_log_belief, evidence, visible_gate
 
+    def forward_step(
+        self,
+        previous_log_belief: torch.Tensor,
+        track_features: torch.Tensor,
+        track_classes: torch.Tensor,
+        track_mask: torch.Tensor,
+        update_allowed: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Advance one online step without replaying the sequence prefix."""
+        expected_belief = (
+            previous_log_belief.shape[0],
+            self.config.grid_size,
+            self.config.grid_size,
+        )
+        if previous_log_belief.shape != expected_belief:
+            raise ValueError("previous_log_belief has an invalid grid shape")
+        if track_features.ndim != 3:
+            raise ValueError("track_features must be [batch, tracks, features]")
+        if track_features.shape[0] != previous_log_belief.shape[0]:
+            raise ValueError("Online batch dimensions do not match")
+        if track_features.shape[-1] != len(TRACK_FEATURE_NAMES):
+            raise ValueError("Unexpected track feature layout")
+        if track_classes.shape != track_mask.shape:
+            raise ValueError("Track class and mask shapes do not match")
+        if track_classes.shape != track_features.shape[:2]:
+            raise ValueError("Track tensors have inconsistent shapes")
+        if update_allowed.shape != (previous_log_belief.shape[0],):
+            raise ValueError("update_allowed must contain one value per batch item")
+        next_log_belief, evidence, gate = self._recurrent_step(
+            previous_log_belief,
+            track_features,
+            track_classes,
+            track_mask,
+            update_allowed,
+        )
+        return {
+            "belief": next_log_belief.exp(),
+            "log_belief": next_log_belief,
+            "evidence_map": evidence.detach(),
+            "update_gate": gate.detach(),
+        }
+
     def forward(
         self,
         track_features: torch.Tensor,

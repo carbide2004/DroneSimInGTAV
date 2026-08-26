@@ -18,34 +18,12 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-
-SEMANTIC_CLASSES = (
-    "PAD",
-    "FIRE_TRUCK",
-    "PEDESTRIAN",
-    "FIRE_SOURCE",
-    "UNKNOWN",
-)
-SEMANTIC_CLASS_TO_INDEX = {
-    name: index for index, name in enumerate(SEMANTIC_CLASSES)
-}
-
-# Track feature layout.  Keeping this public makes checkpoints and future
-# perception front-ends able to declare the exact learned-updater contract.
-TRACK_FEATURE_NAMES = (
-    "position_forward_over_radius",
-    "position_right_over_radius",
-    "position_up_over_vertical_bound",
-    "motion_unit_forward",
-    "motion_unit_right",
-    "displacement_over_four_meters",
-    "motion_valid",
-    "evidence_age_over_horizon",
-    "bbox_center_x_normalized",
-    "bbox_center_y_normalized",
-    "bbox_span_over_256_pixels",
-    "view_is_nadir",
-    "same_class_count_over_32",
+from learning.belief_features import (
+    GroundedTrackFeatureConfig,
+    SEMANTIC_CLASSES,
+    SEMANTIC_CLASS_TO_INDEX,
+    StreamingGroundedTrackEncoder,
+    TRACK_FEATURE_NAMES,
 )
 
 
@@ -294,14 +272,20 @@ class GroundedTrackBeliefDataset(Dataset):
         if width < 2 or height < 2 or vertical_bound <= 0.0 or horizon <= 0:
             raise BeliefDatasetError(f"Invalid episode/observation spec in {root}")
 
-        previous_tracks: dict[int, tuple[int, str, np.ndarray]] = {}
-        evidence_counts: dict[int, int] = {}
+        feature_encoder = StreamingGroundedTrackEncoder(
+            GroundedTrackFeatureConfig(
+                radius_m=self.grid_spec.radius_m,
+                vertical_bound_m=vertical_bound,
+                horizon_steps=horizon,
+                width=width,
+                height=height,
+            )
+        )
         step_tracks = []
         maximum_tracks = 0
         poses = []
         source_visible_rows = []
         motion_evidence_rows = []
-        source_seen = False
 
         for sequence_index, (agent_row, teacher_row) in enumerate(
             zip(agent_steps, awareness_steps)
@@ -317,86 +301,21 @@ class GroundedTrackBeliefDataset(Dataset):
             grounded = teacher_row.get("grounded_tracks")
             if not isinstance(grounded, list):
                 raise BeliefDatasetError(f"grounded_tracks is not a list in {root}")
-            source_seen = source_seen or any(
-                str(item.get("semantic_class", "UNKNOWN")) == "FIRE_SOURCE"
-                for item in grounded
+            try:
+                encoded_step = feature_encoder.encode(expected_step, grounded)
+            except (KeyError, TypeError, ValueError) as error:
+                raise BeliefDatasetError(
+                    f"Invalid grounded track in {root} step {expected_step}: {error}"
+                ) from error
+            source_visible_rows.append(encoded_step.source_seen)
+            motion_evidence_rows.append(encoded_step.has_motion_evidence)
+            encoded = list(
+                zip(
+                    encoded_step.track_features,
+                    encoded_step.track_classes,
+                    strict=True,
+                )
             )
-            source_visible_rows.append(source_seen)
-            class_counts: dict[str, int] = {}
-            for item in grounded:
-                semantic = str(item.get("semantic_class", "UNKNOWN"))
-                class_counts[semantic] = class_counts.get(semantic, 0) + 1
-
-            encoded = []
-            current_tracks: dict[int, tuple[int, str, np.ndarray]] = {}
-            step_has_motion_evidence = False
-            for item in grounded:
-                try:
-                    track_id = int(item["track_id"])
-                    semantic = str(item["semantic_class"])
-                    position = np.asarray(item["position_local"], dtype=np.float32)
-                    bbox = np.asarray(item["projected_bbox"], dtype=np.float32)
-                    view_name = str(item["view_name"])
-                except (KeyError, TypeError, ValueError) as error:
-                    raise BeliefDatasetError(
-                        f"Invalid grounded track in {root} step {expected_step}"
-                    ) from error
-                if position.shape != (3,) or bbox.shape != (4,):
-                    raise BeliefDatasetError("Grounded track shape mismatch")
-                if not np.isfinite(position).all() or not np.isfinite(bbox).all():
-                    raise BeliefDatasetError("Grounded track contains non-finite values")
-                if view_name not in ("oblique", "nadir"):
-                    raise BeliefDatasetError(f"Unknown view_name={view_name!r}")
-
-                previous = previous_tracks.get(track_id)
-                delta = np.zeros(2, dtype=np.float32)
-                displacement = 0.0
-                motion_valid = 0.0
-                if (
-                    previous is not None
-                    and previous[0] == expected_step - 1
-                    and previous[1] == semantic
-                ):
-                    delta = position[:2] - previous[2][:2]
-                    displacement = float(np.linalg.norm(delta))
-                    if displacement >= 0.4:
-                        motion_valid = 1.0
-                        evidence_counts[track_id] = evidence_counts.get(track_id, 0) + 1
-                        if semantic != "FIRE_SOURCE":
-                            step_has_motion_evidence = True
-                unit = (
-                    delta / displacement
-                    if displacement > 1.0e-6
-                    else np.zeros(2, dtype=np.float32)
-                )
-                bbox_center_x = 0.5 * float(bbox[0] + bbox[2])
-                bbox_center_y = 0.5 * float(bbox[1] + bbox[3])
-                bbox_span = max(float(bbox[2] - bbox[0]), float(bbox[3] - bbox[1]))
-                features = np.asarray(
-                    (
-                        position[0] / self.grid_spec.radius_m,
-                        position[1] / self.grid_spec.radius_m,
-                        position[2] / vertical_bound,
-                        unit[0],
-                        unit[1],
-                        displacement / 4.0,
-                        motion_valid,
-                        evidence_counts.get(track_id, 0) / float(horizon),
-                        2.0 * bbox_center_x / float(width - 1) - 1.0,
-                        2.0 * bbox_center_y / float(height - 1) - 1.0,
-                        bbox_span / 256.0,
-                        1.0 if view_name == "nadir" else 0.0,
-                        class_counts[semantic] / 32.0,
-                    ),
-                    dtype=np.float32,
-                )
-                class_index = SEMANTIC_CLASS_TO_INDEX.get(
-                    semantic, SEMANTIC_CLASS_TO_INDEX["UNKNOWN"]
-                )
-                encoded.append((features, class_index))
-                current_tracks[track_id] = (expected_step, semantic, position)
-            motion_evidence_rows.append(step_has_motion_evidence)
-            previous_tracks = current_tracks
             step_tracks.append(encoded)
             maximum_tracks = max(maximum_tracks, len(encoded))
 

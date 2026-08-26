@@ -87,6 +87,9 @@ def _entity_style(role):
 
 
 class Stage2EPlayer:
+    full_path_label = "full expert path"
+    map_title = "Expert trajectory, belief, and evaluation truth"
+
     def __init__(self, root, payload, beliefs, args):
         self.root = root
         self.payload = payload
@@ -178,7 +181,7 @@ class Stage2EPlayer:
             path[:, 1],
             color="lightgray",
             linewidth=1.0,
-            label="full expert path",
+            label=self.full_path_label,
         )
         axis.plot(
             path[: self.index + 1, 0],
@@ -251,7 +254,7 @@ class Stage2EPlayer:
         axis.set_ylim(120.0, -120.0)
         axis.set_xlabel("start-local forward (m)")
         axis.set_ylabel("start-local right (m, positive downward)")
-        axis.set_title("Expert trajectory, belief, and evaluation truth")
+        axis.set_title(self.map_title)
         axis.grid(alpha=0.2)
         axis.legend(fontsize=7, loc="best")
 

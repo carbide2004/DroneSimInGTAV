@@ -125,6 +125,7 @@ class Stage2EValidationRecorder:
         grounded,
         decision,
         evaluation_truth,
+        step_timing=None,
     ):
         if self._finished:
             raise RuntimeError("Stage 2E trajectory recorder is closed")
@@ -178,6 +179,7 @@ class Stage2EValidationRecorder:
                 "odometry": _json_value(observation.odometry),
                 "grounded_tracks": _json_value(grounded.tracks),
                 "awareness": _json_value(decision.awareness),
+                "timing": _json_value({} if step_timing is None else step_timing),
                 "evaluation_truth": {
                     "event_active": bool(
                         evaluation_truth["event_active"]
@@ -197,7 +199,7 @@ class Stage2EValidationRecorder:
             np.asarray(decision.belief, dtype=np.float32).copy()
         )
 
-    def mark_last_action_executed(self):
+    def mark_last_action_executed(self, action_timing=None):
         if self._finished:
             raise RuntimeError("Stage 2E trajectory recorder is closed")
         if not self._frames:
@@ -206,10 +208,24 @@ class Stage2EValidationRecorder:
         if frame["action_execution"] != "PROPOSED":
             raise RuntimeError("Stage 2E action was already marked executed")
         frame["action_execution"] = "EXECUTED"
+        if action_timing is not None:
+            frame["timing"]["action"] = _json_value(action_timing)
 
     def finish(self, status, result=None, error=None):
         if self._finished:
             raise RuntimeError("Stage 2E trajectory recorder is closed")
+        frame_count = len(self._frames)
+        if len(self._beliefs) != frame_count:
+            raise RuntimeError("Trajectory belief/frame count mismatch")
+        for view_name in ("oblique", "nadir"):
+            image_count = sum(
+                1 for path in (self.partial_root / view_name).glob("*.jpg")
+            )
+            if image_count != frame_count:
+                raise RuntimeError(
+                    f"Trajectory {view_name} RGB/frame count mismatch: "
+                    f"images={image_count}, frames={frame_count}"
+                )
         payload = {
             "schema_version": SCHEMA_VERSION,
             "status": str(status),

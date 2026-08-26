@@ -20,8 +20,9 @@ pairwise track-cell encoder and belief-only Spatial ConvGRU, so it can preserve,
 correct, or replace an earlier hypothesis. Both are entity-token upper
 baselines, not end-to-end perception models.
 
-This delivery trains and evaluates recorded schema-4 episodes only. It does not
-replace the online GTA expert inside `run_expert_episode`.
+Stage 3B additionally runs a trained Spatial RNN in an online lockstep episode.
+It leaves the Stage 2 expert entry point unchanged and composes the RNN posterior
+with a shared fixed `BeliefNavigationController`.
 
 ## Input contract
 
@@ -106,6 +107,37 @@ the whole inference interval and its final source-blind step: NLL, MAP error,
 event-cell rank, top-10/50/100 recall, entropy, and 50/80/90 percent credible
 region coverage and area. Teacher KL is explicitly diagnostic.
 
+
+## Online runtime
+
+`StreamingGroundedTrackEncoder` is shared by the Dataset and online runtime.
+Its state contains only the immediately previous anonymous tracks, evidence
+ages, and source boundary. `OnlineSpatialBeliefRuntime` calls `forward_step`
+once per observation and owns one recurrent tensor: the normalized one-channel
+log-belief. It does not replay the sequence prefix.
+
+The online agent is split into strict boundaries:
+
+```text
+visibility-assisted RGB-D grounder
+  -> source-blind streaming features
+  -> Spatial RNN belief
+  -> shared fixed navigation controller
+  -> one strict action
+```
+
+The controller sees normalized belief, odometry, grounded tracks, action limits,
+and static collision queries. It cannot read scenario snapshots, event truth,
+visibility target lists, teacher belief, evidence maps, or recurrent gates.
+`FIRE_SOURCE` is handled only by the independent two-observation source
+confirmation/approach/STOP logic. The RNN belief freezes at its first grounded
+appearance.
+
+`shadow` mode retains the hand-written Stage 2 belief/controller for actions
+while recording the RNN posterior. `control` mode replaces only the belief
+backend; the fixed action policy is shared. The current planar posterior does
+not learn altitude control, so ascent/descent remain bounded heuristics.
+
 ## Commands
 
 ```powershell
@@ -134,10 +166,34 @@ python learning\compare_belief_models.py `
 python validation\validate_spatial_belief.py dataset\stage2e_multi_anchor
 ```
 
+Online feature/step parity and GTA execution:
+
+```powershell
+python validation\validate_online_spatial_belief_offline.py `
+  dataset\stage2e_5x20_v4 --devices auto
+
+python validation\validate_online_spatial_belief.py `
+  --anchor 129.64151 -9.242669 80.02359 `
+  --checkpoint learning\checkpoints\stage3_spatial_rnn.pt `
+  --mode control --episodes 1 --max-steps 65 --device cuda
+```
+
 Checkpoints record the exact semantic classes, feature layout, grid, and
 train/validation anchor lists, supervision boundary, model dimensions, and
 training hyperparameters. Evaluation rejects incompatible contracts. Checkpoint
 directories are Git-ignored.
+
+Learned control does not treat a numerically maximal grid cell as a reliable
+navigation target while the posterior is still diffuse. `FOLLOW_BELIEF` is
+enabled only when both conditions hold:
+
+- entropy is at most `6.5`;
+- the 80% credible region is at most `8000 m2`.
+
+Before that boundary, the controller may perform its finite cue scan, motion
+confirmation, altitude transition, or `HOLD`, but it cannot plan toward the
+single MAP cell. Shadow mode and the Stage 2 expert do not use this gate.
+The thresholds and decision reason are written into every online recording.
 
 ## Current limitation
 

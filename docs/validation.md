@@ -180,6 +180,48 @@ the identical anchor split. It reports performance differences without making
 one model winning an implementation acceptance condition. Teacher KL is always
 diagnostic.
 
+## Stage 3B online Spatial RNN validation
+
+First verify feature serialization and single-step recurrence offline. All 68
+episodes are checked for exact feature parity; representative short, median,
+and long episodes compare full-sequence and streaming inference:
+
+```powershell
+python validation\validate_online_spatial_belief_offline.py `
+  dataset\stage2e_5x20_v4 `
+  --checkpoint learning\checkpoints\stage3_spatial_rnn.pt `
+  --devices both
+```
+
+Then run one held-out online episode. Press `F10` first:
+
+```powershell
+python validation\validate_online_spatial_belief.py `
+  --anchor 129.64151 -9.242669 80.02359 `
+  --checkpoint learning\checkpoints\stage3_spatial_rnn.pt `
+  --mode control --episodes 1 --max-steps 65 --device cuda `
+  --record-dir recordings\stage3_online_001
+```
+
+Use `--mode shadow` to let the unchanged Stage 2 expert select actions while
+auditing the RNN posterior. Omit `--record-dir` for the 10-episode held-out
+audit; no payload is then written. The validator reports success, STOP error,
+actions, first update/source steps, final source-blind NLL/MAP error, and
+grounding/model/planner/action latency.
+
+Replay a recorded success or failure without GTA:
+
+```powershell
+python validation\visualize_online_spatial_belief.py `
+  recordings\stage3_online_001 --start-paused
+```
+
+The player reads only JPEG, JSON, and runtime beliefs. Its lower-left heatmap is
+the saved online RNN posterior, with event truth explicitly marked as an
+evaluation overlay. `Space`, `Left/Right`, `Home/End`, and `Q` have the same
+semantics as the Stage 2E player. Source-visible frames must retain the exact
+previous belief.
+
 ## Storage behavior
 
 - ordinary validators: no payload files;

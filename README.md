@@ -74,6 +74,7 @@ in [Task specification](docs/task_specification.md).
 | Occlusion-aware starts and visibility evaluation | Implemented |
 | Cue-grounded expert and dataset generation | Implemented |
 | Incremental and Spatial RNN learned 2-D belief updaters | Offline baselines implemented |
+| Spatial RNN online belief/planner loop and replay | Implemented; GTA acceptance run required |
 | Response-ecology statistical benchmark | Planned |
 | Paired counterfactual interventions | Planned |
 | Additional event types | Planned |
@@ -270,11 +271,52 @@ and five-epoch full-data smoke checks with:
 python validation\validate_spatial_belief.py dataset\stage2e_multi_anchor
 ```
 
+Validate the exact streaming feature and recurrent-step contracts of a trained
+checkpoint without connecting to GTA:
+
+```powershell
+python validation\validate_online_spatial_belief_offline.py `
+  dataset\stage2e_5x20_v4 `
+  --checkpoint learning\checkpoints\stage3_spatial_rnn.pt `
+  --devices auto
+```
+
 The Spatial RNN never receives `FIRE_SOURCE` tracks or pose tensors. Its only
 cross-time state is the normalized one-channel log-belief map; padding, missing
 motion evidence, and the source-visible phase are exact identity updates. It is
-still an entity-token, planar baseline and is not connected to the online GTA
-planner.
+still an entity-token, planar baseline.
+
+### 6. Run the Spatial RNN online
+
+The online entry point supports `shadow` (Stage 2 expert controls while the RNN
+is observed) and `control` (the RNN belief drives the shared fixed planner).
+In control mode, diffuse posteriors cannot trigger `FOLLOW_BELIEF`: entropy must
+be at most `6.5` and the 80% credible region at most `8000 m2`. Until then the
+agent performs finite cue scans, motion confirmation, altitude transition, or
+`HOLD`; the gate and its reason are stored in the trajectory diagnostics.
+The held-out `anchor_002` used by the current checkpoint is:
+
+```powershell
+python validation\validate_online_spatial_belief.py `
+  --anchor 129.64151 -9.242669 80.02359 `
+  --checkpoint learning\checkpoints\stage3_spatial_rnn.pt `
+  --mode control --episodes 1 --max-steps 65 --device cuda `
+  --record-dir recordings\stage3_online_001
+```
+
+Without `--record-dir`, the run writes no image or belief payload. A recording
+contains only two JPEG streams, `trajectory.json`, and the exact online
+`61 x 61` beliefs; it never stores Depth. Replay it offline with the same
+four-panel layout as Stage 2E:
+
+```powershell
+python validation\visualize_online_spatial_belief.py `
+  recordings\stage3_online_001 --start-paused
+```
+
+The lower-left heatmap is loaded from the runtime `beliefs.npz`; it is not a
+teacher belief and is not recomputed by the player. Event truth is displayed
+only as an evaluation overlay. Stage 3B changes no ASI code.
 
 The method, inputs, exclusions, losses, and current 2-D limitation are defined
 in [Belief learning baseline](docs/belief_learning.md).

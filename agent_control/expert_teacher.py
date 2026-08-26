@@ -1012,13 +1012,31 @@ class SpatialBelief:
         return mode_id, float(component_mass), center
 
 
-class CueGroundedExpert:
-    def __init__(self, episode_spec, geometry):
+class BeliefNavigationController:
+    """Shared fixed action policy over an explicitly supplied belief backend."""
+
+    def __init__(
+        self,
+        episode_spec,
+        geometry,
+        belief,
+        update_belief,
+        belief_navigation_allowed=None,
+    ):
         if not isinstance(episode_spec, AgentEpisodeSpec):
             raise TypeError("episode_spec must be AgentEpisodeSpec")
+        if not isinstance(belief, SpatialBelief):
+            raise TypeError("belief must satisfy the SpatialBelief contract")
         self.spec = episode_spec
         self.geometry = geometry
-        self.belief = SpatialBelief()
+        self.belief = belief
+        self._update_belief = bool(update_belief)
+        if (
+            belief_navigation_allowed is not None
+            and not callable(belief_navigation_allowed)
+        ):
+            raise TypeError("belief_navigation_allowed must be callable")
+        self._belief_navigation_allowed = belief_navigation_allowed
         self.planner = StrictLocalAStar()
         self._previous_tracks = {}
         self._track_update_counts = {}
@@ -1046,6 +1064,12 @@ class CueGroundedExpert:
     @staticmethod
     def _action_name(action):
         return type(action).__name__.removesuffix("Action").upper()
+
+    def _can_follow_belief(self):
+        return (
+            self._belief_navigation_allowed is None
+            or bool(self._belief_navigation_allowed())
+        )
 
     def _motion_evidence(self, grounded):
         raw = []
@@ -1325,7 +1349,8 @@ class CueGroundedExpert:
         )
         yaw = float(observation.odometry.yaw_from_start_degrees)
         evidence = self._motion_evidence(grounded)
-        self.belief.update(evidence)
+        if self._update_belief:
+            self.belief.update(evidence)
         if evidence:
             self._last_evidence_step = step_index
         evidence_ids = frozenset(item.track_id for item in evidence)
@@ -1415,6 +1440,11 @@ class CueGroundedExpert:
                 self._cached_actions.clear()
             else:
                 intent = ExpertIntent.FOLLOW_BELIEF
+        elif (
+            self._last_evidence_step is not None
+            and not self._can_follow_belief()
+        ):
+            intent = ExpertIntent.REACQUIRE_CUE
         elif evidence and self.belief.ambiguous:
             intent = ExpertIntent.REACQUIRE_CUE
         elif evidence:
@@ -1448,41 +1478,52 @@ class CueGroundedExpert:
                     if (
                         intent == ExpertIntent.REACQUIRE_CUE
                         and hypothesis is not None
+                        and self._can_follow_belief()
                     ):
                         intent = ExpertIntent.FOLLOW_BELIEF
                         scan_exit_reason = "FINITE_SCAN_COMPLETE_FOLLOW_BELIEF"
                     else:
                         if signature in self._scan_transition_used:
-                            raise ExpertGenerationError(
-                                "CUE_SEARCH_EXHAUSTED: no RGB-D-grounded "
-                                "response track was found after two finite "
-                                f"scans for {intent.value} mode={mode_id}"
-                            )
-                        candidate, _candidate_yaw = _action_pose_local(
-                            position,
-                            yaw,
-                            AscendAction(),
-                        )
-                        if (
-                            not self._search_altitude_change_used
-                            and self._estimated_agl(observation) < 45.0
-                            and self._inside_activity(candidate)
-                            and self.geometry.action_clear(
+                            if not self._can_follow_belief():
+                                action = HoldAction()
+                                scan_exit_reason = (
+                                    "LOW_CONFIDENCE_SCAN_COMPLETE_HOLD"
+                                )
+                                self._scan_intent = None
+                                self._completed_scan = None
+                                self._consecutive_scan_turns = 0
+                            else:
+                                raise ExpertGenerationError(
+                                    "CUE_SEARCH_EXHAUSTED: no RGB-D-grounded "
+                                    "response track was found after two finite "
+                                    f"scans for {intent.value} mode={mode_id}"
+                                )
+                        else:
+                            candidate, _candidate_yaw = _action_pose_local(
                                 position,
                                 yaw,
                                 AscendAction(),
                             )
-                        ):
-                            action = AscendAction()
-                            scan_exit_reason = "FINITE_SCAN_COMPLETE_ASCEND"
-                            self._search_altitude_change_used = True
-                        else:
-                            action = HoldAction()
-                            scan_exit_reason = "FINITE_SCAN_COMPLETE_HOLD"
-                        self._scan_transition_used.add(signature)
-                        self._scan_intent = None
-                        self._completed_scan = None
-                        self._consecutive_scan_turns = 0
+                            if (
+                                not self._search_altitude_change_used
+                                and self._estimated_agl(observation) < 45.0
+                                and self._inside_activity(candidate)
+                                and self.geometry.action_clear(
+                                    position,
+                                    yaw,
+                                    AscendAction(),
+                                )
+                            ):
+                                action = AscendAction()
+                                scan_exit_reason = "FINITE_SCAN_COMPLETE_ASCEND"
+                                self._search_altitude_change_used = True
+                            else:
+                                action = HoldAction()
+                                scan_exit_reason = "FINITE_SCAN_COMPLETE_HOLD"
+                            self._scan_transition_used.add(signature)
+                            self._scan_intent = None
+                            self._completed_scan = None
+                            self._consecutive_scan_turns = 0
                 if intent in (
                     ExpertIntent.SEARCH_CUE,
                     ExpertIntent.REACQUIRE_CUE,
@@ -1630,4 +1671,16 @@ class CueGroundedExpert:
             action=action,
             awareness=awareness,
             belief=self.belief.probability.copy(),
+        )
+
+
+class CueGroundedExpert(BeliefNavigationController):
+    """Stage 2 expert: fixed controller backed by the hand-written updater."""
+
+    def __init__(self, episode_spec, geometry):
+        super().__init__(
+            episode_spec,
+            geometry,
+            belief=SpatialBelief(),
+            update_belief=True,
         )
