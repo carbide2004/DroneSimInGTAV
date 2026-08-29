@@ -222,6 +222,81 @@ evaluation overlay. `Space`, `Left/Right`, `Home/End`, and `Q` have the same
 semantics as the Stage 2E player. Source-visible frames must retain the exact
 previous belief.
 
+## Stage 3C explicit-belief policy validation
+
+Run the architecture and intervention contract, then compare the complete
+recorded sequence with the stateful online runtime:
+
+```powershell
+python validation\validate_explicit_belief_policy.py `
+  dataset\stage2e_5x5_0824 `
+  learning\checkpoints\stage3c_explicit_belief_policy_bc.pt --device cuda
+
+python validation\validate_online_belief_policy_offline.py `
+  dataset\stage2e_5x5_0824 `
+  learning\checkpoints\stage3c_explicit_belief_policy_bc.pt --device cuda
+
+python validation\validate_stage3c_dagger.py `
+  dataset\stage2e_5x5_0824 `
+  learning\checkpoints\stage3c_explicit_belief_policy_bc.pt --device cpu
+
+python learning\evaluate_explicit_belief_policy.py `
+  dataset\stage2e_5x5_0824 `
+  learning\checkpoints\stage3c_explicit_belief_policy_bc.pt --split validation `
+  --ablations normal uniform teacher no-depth rotate
+```
+
+These checks cover observation/action/history alignment, D4 invertibility,
+track permutation, source exclusion from belief, `forward_sequence` versus
+`forward_step`, agent-centric left/right warp, preservation of mirrored belief
+modes through the policy's `4 x 4` spatial bottleneck, belief intervention
+sensitivity, exact frozen belief after the source boundary, STOP legality,
+runtime reset, DAgger action/value label masks, geometry
+quantization, atomic shard publication, and the no-RGB/Depth shard contract.
+The streaming parity validator defaults to `--split auto`: it prefers a
+held-out episode whose RGB-D size equals the checkpoint's canonical online
+resolution, then uses a matching training episode if the historical held-out
+records have only a different resolution. The online runtime itself never
+relaxes its exact resolution check.
+
+Run GTA in `shadow` first, then `control`:
+
+```powershell
+python validation\validate_online_belief_policy.py `
+  --anchor 228.825653 -610.282898 51.108658 `
+  --checkpoint learning\checkpoints\stage3c_explicit_belief_policy_bc.pt `
+  --mode shadow --episodes 1 --max-steps 80 --device cuda
+
+python validation\validate_online_belief_policy.py `
+  --anchor 228.825653 -610.282898 51.108658 `
+  --checkpoint learning\checkpoints\stage3c_explicit_belief_policy_bc.pt `
+  --mode control --episodes 1 --max-steps 80 --device cuda `
+  --start-pool dataset\stage2e_5x5_0824\anchor_004\start_pool.json `
+  --record-dir recordings\stage3c_online_001
+```
+
+Control mode never constructs the Stage 2E expert, `StrictLocalAStar`, fixed
+belief controller, or geometry action mask. Every non-STOP action executes
+once and advances 250 ms. A blocked action terminates explicitly rather than
+being replaced. STOP is legal only with a currently grounded source.
+`--start-pool` is optional for an ad-hoc anchor; use the matching schema-4 pool
+for repeated audits to avoid rebuilding static occlusion geometry. The DAgger
+collector resolves, validates, and reuses these pools automatically.
+
+Replay the saved runtime belief and policy diagnostics offline:
+
+```powershell
+python validation\visualize_online_belief_policy.py `
+  recordings\stage3c_online_001 --start-paused
+```
+
+The lower-left posterior comes directly from the recording's `beliefs.npz`.
+The player does not rerun the model or read teacher belief. The final research
+audit is 10 unrecorded control episodes on held-out anchors and reports success,
+localization error, action count/frequency, failure categories, cue/source
+steps, belief metrics, action entropy, and per-step latency. Zero successes is
+a valid negative result and must not activate a fixed-planner fallback.
+
 ## Storage behavior
 
 - ordinary validators: no payload files;

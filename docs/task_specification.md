@@ -155,9 +155,15 @@ oracle-association/entity-token baseline: stable track association is provided
 by the dataset, while event coordinates, event affiliation, GTA velocity,
 task state, and teacher-inferred event direction remain excluded.
 
-The current implementation trains and evaluates this learned posterior
-offline; online GTA rollout still uses the hand-written belief until a selected
-checkpoint is connected to the otherwise unchanged analytical planner.
+Stage 3A trains and evaluates this learned posterior offline. Stage 3B runs the
+same posterior online behind the unchanged analytical planner as a controlled
+baseline. Stage 3C adds a separate planner-free policy whose only route from
+response tracks to action is the explicit predicted belief. Its other inputs
+are observation-derived dual-view Depth geometry, odometry/action history, and
+a separately grounded fire-source token used for terminal localization. The
+Stage 3C control path does not call the analytical planner, confidence state
+machine, GTA geometry action mask, teacher belief, or event truth. The current
+visibility-assisted RGB-D grounder remains a structured perception upper bound.
 
 Its posterior is 2-D. Although the environment action contract remains 3-D,
 the present Stage 2 trajectories contain essentially no vertical exploration;

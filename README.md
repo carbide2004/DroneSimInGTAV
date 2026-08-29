@@ -75,6 +75,7 @@ in [Task specification](docs/task_specification.md).
 | Cue-grounded expert and dataset generation | Implemented |
 | Incremental and Spatial RNN learned 2-D belief updaters | Offline baselines implemented |
 | Spatial RNN online belief/planner loop and replay | Implemented; GTA acceptance run required |
+| Explicit-belief learned seven-action policy | Implemented; offline and GTA acceptance runs required |
 | Response-ecology statistical benchmark | Planned |
 | Paired counterfactual interventions | Planned |
 | Additional event types | Planned |
@@ -318,6 +319,95 @@ The lower-left heatmap is loaded from the runtime `beliefs.npz`; it is not a
 teacher belief and is not recomputed by the player. Event truth is displayed
 only as an evaluation overlay. Stage 3B changes no ASI code.
 
+### 7. Train and run the explicit-belief action policy
+
+Stage 3C replaces the fixed confidence state machine and A* with a learned
+seven-action policy while retaining an explicit causal bottleneck:
+
+```text
+grounded response tracks -> Spatial RNN belief -> learned policy -> strict action
+dual-view Depth ---------> local geometry ------^
+```
+
+Response tracks can enter the policy only through the normalized `61 x 61`
+belief. The policy additionally receives current Depth-derived local geometry,
+odometry, the last four executed actions, and a separate directly grounded
+fire-source token. It cannot read response tracks, evidence maps, recurrent
+gates, teacher belief, event truth, A*, or GTA geometry action masks.
+
+Train behavior cloning from a schema-4 dataset and an existing Spatial RNN:
+
+```powershell
+python learning\train_explicit_belief_policy.py `
+  dataset\stage2e_5x5_0824 `
+  --belief-checkpoint learning\checkpoints\stage3_spatial_rnn_5x5_0824.pt `
+  --output learning\checkpoints\stage3c_explicit_belief_policy_bc.pt `
+  --device cuda
+```
+
+Run the strict offline model, streaming, and compact-DAgger contracts, then
+evaluate the held-out anchors:
+
+```powershell
+python validation\validate_explicit_belief_policy.py `
+  dataset\stage2e_5x5_0824 `
+  learning\checkpoints\stage3c_explicit_belief_policy_bc.pt --device cuda
+
+python validation\validate_online_belief_policy_offline.py `
+  dataset\stage2e_5x5_0824 `
+  learning\checkpoints\stage3c_explicit_belief_policy_bc.pt --device cuda
+
+python validation\validate_stage3c_dagger.py `
+  dataset\stage2e_5x5_0824 `
+  learning\checkpoints\stage3c_explicit_belief_policy_bc.pt --device cuda
+
+python learning\evaluate_explicit_belief_policy.py `
+  dataset\stage2e_5x5_0824 `
+  learning\checkpoints\stage3c_explicit_belief_policy_bc.pt --split validation `
+  --ablations normal uniform teacher no-depth rotate
+```
+
+Run one planner-free GTA episode and optionally record the same four-panel
+diagnostic layout. Without `--record-dir`, no image or belief payload is saved:
+
+```powershell
+python validation\validate_online_belief_policy.py `
+  --anchor 228.825653 -610.282898 51.108658 `
+  --checkpoint learning\checkpoints\stage3c_explicit_belief_policy_bc.pt `
+  --mode control --episodes 1 --max-steps 80 --device cuda `
+  --start-pool dataset\stage2e_5x5_0824\anchor_004\start_pool.json `
+  --record-dir recordings\stage3c_online_001
+
+python validation\visualize_online_belief_policy.py `
+  recordings\stage3c_online_001 --start-paused
+```
+
+Collect DAgger only on the checkpoint's recorded training anchors. The three
+rounds default to expert execution probabilities `0.50`, `0.25`, and `0.00`:
+
+```powershell
+python validation\collect_stage3c_dagger.py `
+  dataset\stage2e_5x5_0824 `
+  --checkpoint learning\checkpoints\stage3c_explicit_belief_policy_bc.pt `
+  --round 1 --output-dir dataset\stage3c_dagger_round_01 --device cuda
+
+python learning\train_explicit_belief_policy.py `
+  dataset\stage2e_5x5_0824 `
+  --belief-checkpoint learning\checkpoints\stage3_spatial_rnn_5x5_0824.pt `
+  --policy-initialization learning\checkpoints\stage3c_explicit_belief_policy_bc.pt `
+  --dagger-root dataset\stage3c_dagger_round_01 --dagger-iteration 1 `
+  --output learning\checkpoints\stage3c_explicit_belief_policy_dagger_01.pt `
+  --device cuda
+```
+
+DAgger shards contain structured features and compressed `uint8` local
+geometry only. They do not contain RGB, Depth, point clouds, or teacher belief;
+rows without an expert label are retained but excluded from action loss. Since
+the remaining expert path is undefined after learner deviations, all DAgger
+rows are also excluded from the auxiliary remaining-action value loss. The
+collector validates and reuses each schema-4 anchor's recorded static start
+pool instead of rebuilding it for every episode.
+
 The method, inputs, exclusions, losses, and current 2-D limitation are defined
 in [Belief learning baseline](docs/belief_learning.md).
 
@@ -377,9 +467,9 @@ docs/            task, architecture, scenario, dataset, and validation docs
 - particle rendering is diagnostic appearance, not geometric truth;
 - native response ecology and counterfactual conditions have not yet been
   statistically validated;
-- the first learned component updates a 2-D belief from structured tracks; raw
-  RGB-D perception, vertical belief, learned action selection, and causal
-  Awareness are not included yet;
+- learned belief and action selection remain structured-observation baselines;
+  raw RGB-D perception, vertical belief, and causal Awareness are not included;
+- current data contain too few vertical actions to claim reliable 3-D control;
 - GTA V, ScriptHookV, and game assets are not distributed by this repository.
 
 ## Documentation

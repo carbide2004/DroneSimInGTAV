@@ -176,6 +176,37 @@ class SpatialRecurrentBeliefUpdater(nn.Module):
             & (track_classes != pad)
         )
 
+    @staticmethod
+    def _canonicalize_tracks(
+        track_features: torch.Tensor,
+        track_classes: torch.Tensor,
+        track_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Give permutation-equivalent track sets one numerical reduction order."""
+        batch_size, track_count = track_classes.shape
+        order = torch.arange(track_count, device=track_classes.device)[None].expand(
+            batch_size, -1
+        )
+        # Stable sorts are applied from the least-significant to the
+        # most-significant field, yielding a lexicographic order. If two rows
+        # have every field equal, their pairwise encodings are also identical,
+        # so their residual order cannot change the reduction.
+        keys = [
+            track_mask.to(torch.int64),
+            track_classes,
+            *(track_features[..., index] for index in range(track_features.shape[-1])),
+        ]
+        for key in reversed(keys):
+            values = torch.gather(key, 1, order)
+            positions = torch.argsort(values, dim=1, stable=True)
+            order = torch.gather(order, 1, positions)
+        feature_order = order[..., None].expand(-1, -1, track_features.shape[-1])
+        return (
+            torch.gather(track_features, 1, feature_order),
+            torch.gather(track_classes, 1, order),
+            torch.gather(track_mask, 1, order),
+        )
+
     def evidence_for_step(
         self,
         track_features: torch.Tensor,
@@ -188,6 +219,9 @@ class SpatialRecurrentBeliefUpdater(nn.Module):
             raise ValueError("Unexpected track feature layout")
         if track_classes.shape != track_mask.shape:
             raise ValueError("Track class and mask shapes do not match")
+        track_features, track_classes, track_mask = self._canonicalize_tracks(
+            track_features, track_classes, track_mask
+        )
         valid_tracks = self._valid_track_mask(
             track_features, track_classes, track_mask
         )

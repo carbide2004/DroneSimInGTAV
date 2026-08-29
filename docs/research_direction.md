@@ -68,6 +68,9 @@ The repository currently provides:
 - a strict seven-action task environment;
 - a cue-grounded belief expert and replayable successful trajectories;
 - validation for capture, geometry, timing, scenarios, starts, and expert data.
+- source-blind incremental and Spatial RNN belief baselines;
+- online Spatial RNN plus fixed-planner evaluation;
+- a planner-free learned seven-action policy with an explicit belief bottleneck.
 
 The controlled pedestrian wave and fire-truck task are experimental structure,
 not claims about GTA's native response ecology. The current expert is a data
@@ -103,8 +106,11 @@ from the first valid dynamic cue to immediately before direct source grounding.
 
 These remain entity-token, planar baselines. They are not final perception
 models and categorical embeddings are not evidence of open-vocabulary
-generalization. Online planner integration follows only after offline
-calibration and held-out-anchor behavior are understood.
+generalization. Stage 3B retains the fixed planner as an online baseline;
+Stage 3C learns the seven-action policy from predicted belief, observation-only
+Depth geometry, odometry/history, and a separate source token. Offline
+interventions, held-out online audits, and DAgger diagnose whether the explicit
+bottleneck is sufficient rather than replacing a negative result with a planner.
 
 ### 2. Deferred benchmark and vertical audit
 

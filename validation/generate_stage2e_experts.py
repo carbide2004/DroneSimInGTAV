@@ -58,8 +58,17 @@ from agent_control.task_starts import (  # noqa: E402
 )
 
 
-COLLECTION_SCHEMA_VERSION = 4
+COLLECTION_SCHEMA_VERSION = 5
 UINT64_MASK = 0xFFFFFFFFFFFFFFFF
+OBSERVATION_CONTRACT_FIELDS = (
+    "width",
+    "height",
+    "fov_degrees",
+    "near_clip",
+    "far_clip",
+    "oblique_pitch_degrees",
+    "nadir_pitch_degrees",
+)
 
 
 class CollectionInvariantError(RuntimeError):
@@ -527,6 +536,27 @@ def _atomic_json(path, payload):
     os.replace(temporary, path)
 
 
+def _observation_contract(spec):
+    if not isinstance(spec, ObservationSpec):
+        raise TypeError("spec must be an ObservationSpec")
+    return {
+        field: getattr(spec, field)
+        for field in OBSERVATION_CONTRACT_FIELDS
+    }
+
+
+def _require_observation_contract(spec, expected, context):
+    actual = _observation_contract(spec)
+    if actual != expected:
+        raise CollectionInvariantError(
+            "OBSERVATION_CONTRACT_CHANGED: "
+            f"{context}; expected={expected}, actual={actual}. "
+            "Keep the GTA screen mode and backbuffer resolution fixed for "
+            "the entire collection."
+        )
+    return actual
+
+
 def _manifest_config(args):
     return {
         "anchors": [
@@ -603,6 +633,7 @@ def _new_manifest(args):
         "collection_type": "stage2e_grouped_scenarios",
         "config": _manifest_config(args),
         "status": "IN_PROGRESS",
+        "observation_contract": None,
         "anchor_pools": [],
         "scenes": scenes,
     }
@@ -614,8 +645,8 @@ def _load_manifest(path):
     schema_version = payload.get("schema_version")
     if schema_version != COLLECTION_SCHEMA_VERSION:
         raise RuntimeError(
-            "Grouped manifest schema 1/2/3 cannot be resumed with the "
-            "source-shadow start-pool generator; create a new output directory"
+            "Grouped manifest schema 1/2/3/4 cannot be resumed with the "
+            "observation-locked generator; create a new output directory"
         )
     if payload.get("collection_type") != "stage2e_grouped_scenarios":
         raise RuntimeError("Output manifest is not a Stage 2E grouped collection")
@@ -658,6 +689,12 @@ def _validate_resume(output_root, manifest, args):
         raise RuntimeError(
             "Resume configuration does not exactly match dataset_manifest.json"
         )
+    observation_contract = manifest.get("observation_contract")
+    if (
+        not isinstance(observation_contract, dict)
+        or set(observation_contract) != set(OBSERVATION_CONTRACT_FIELDS)
+    ):
+        raise RuntimeError("Grouped manifest observation contract is invalid")
     scenes = manifest.get("scenes")
     expected_scene_count = len(args.anchors) * args.scenario_count
     if not isinstance(scenes, list) or len(scenes) != expected_scene_count:
@@ -862,6 +899,7 @@ def _run_attempt(
     anchor=None,
     runtime_blueprint_id=0,
     expected_signature=None,
+    expected_observation_contract=None,
     scene_index=None,
     start_pool=None,
     scene_catalog=None,
@@ -952,6 +990,12 @@ def _run_attempt(
             session.advance()
             calibration = session.capture_rgbd_pair()
             observation_spec = ObservationSpec.from_pair(calibration)
+            if expected_observation_contract is not None:
+                _require_observation_contract(
+                    observation_spec,
+                    expected_observation_contract,
+                    f"episode attempt {attempt_index + 1}",
+                )
             scenario = client.get_scenario_state(scenario_id)
             attempt_timing["lockstep_setup"] = (
                 time.perf_counter() - phase_started
@@ -1323,6 +1367,7 @@ def _preflight_anchor_pools(client, args, original_pose):
     accepted = []
     pools = []
     rejected = []
+    observation_contract = None
     for original_index, anchor in enumerate(args.anchors):
         scenario_id = None
         session = None
@@ -1353,6 +1398,16 @@ def _preflight_anchor_pools(client, args, original_pose):
             session = LockstepSession(client)
             session.__enter__()
             calibration = session.capture_rgbd_pair()
+            observation_spec = ObservationSpec.from_pair(calibration)
+            current_contract = _observation_contract(observation_spec)
+            if observation_contract is None:
+                observation_contract = current_contract
+            else:
+                _require_observation_contract(
+                    observation_spec,
+                    observation_contract,
+                    f"anchor preflight {original_index + 1}",
+                )
             pool = build_static_start_pool(
                 client,
                 session,
@@ -1360,7 +1415,7 @@ def _preflight_anchor_pools(client, args, original_pose):
                 minimum_entries=min(
                     START_POOL_MAX_ENTRIES, args.episodes_per_scenario,
                 ),
-                observation_spec=ObservationSpec.from_pair(calibration),
+                observation_spec=observation_spec,
                 horizon_steps=args.max_steps,
                 progress_callback=_progress,
             )
@@ -1417,7 +1472,9 @@ def _preflight_anchor_pools(client, args, original_pose):
         )
     if not accepted:
         raise RuntimeError("No suitable anchors remain after collection preflight")
-    return tuple(accepted), tuple(pools)
+    if observation_contract is None:
+        raise RuntimeError("Anchor preflight produced no observation contract")
+    return tuple(accepted), tuple(pools), observation_contract
 
 
 def _install_pool_manifest(output_root, manifest, pools):
@@ -1504,7 +1561,9 @@ def _validate_manifest_pool_usage(manifest, pools):
                     "candidate IDs disagree"
                 )
 
-def _revalidate_manifest_pools(client, args, original_pose, pools):
+def _revalidate_manifest_pools(
+    client, args, original_pose, pools, expected_observation_contract
+):
     for anchor_index, pool in enumerate(pools):
         scenario_id = None
         session = None
@@ -1527,6 +1586,13 @@ def _revalidate_manifest_pools(client, args, original_pose, pools):
             )
             session = LockstepSession(client)
             session.__enter__()
+            observation_spec = ObservationSpec.from_pair(
+                session.capture_rgbd_pair()
+            )
+            _require_observation_contract(
+                observation_spec, expected_observation_contract,
+                f"resume anchor revalidation {anchor_index + 1}",
+            )
             revalidate_static_start_pool(client, session, ready, pool)
             print(
                 f"ANCHOR_POOL_REVALIDATED anchor={anchor_index} "
@@ -1597,11 +1663,17 @@ def _run_grouped(args):
             output_root, manifest_path, manifest = _prepare_grouped_output(args)
             pools = _load_manifest_pools(output_root, manifest)
             _validate_manifest_pool_usage(manifest, pools)
-            _revalidate_manifest_pools(client, args, original_pose, pools)
+            observation_contract = manifest["observation_contract"]
+            _revalidate_manifest_pools(
+                client, args, original_pose, pools, observation_contract
+            )
         else:
-            accepted, pools = _preflight_anchor_pools(client, args, original_pose)
+            accepted, pools, observation_contract = _preflight_anchor_pools(
+                client, args, original_pose
+            )
             args.anchors = accepted
             output_root, manifest_path, manifest = _prepare_grouped_output(args)
+            manifest["observation_contract"] = observation_contract
             _install_pool_manifest(output_root, manifest, pools)
             _atomic_json(manifest_path, manifest)
     except BaseException:
@@ -1713,6 +1785,7 @@ def _run_grouped(args):
                     anchor=anchor,
                     runtime_blueprint_id=runtime_blueprint_id,
                     expected_signature=expected_signature,
+                    expected_observation_contract=observation_contract,
                     scene_index=scene_index,
                     start_pool=pools[anchor_index],
                     scene_catalog=active_scene_catalog,
@@ -1920,10 +1993,12 @@ def _run_flat(args):
         preflight_session.__enter__()
         try:
             calibration = preflight_session.capture_rgbd_pair()
+            observation_spec = ObservationSpec.from_pair(calibration)
+            observation_contract = _observation_contract(observation_spec)
             start_pool = build_static_start_pool(
                 client, preflight_session, preflight_ready,
                 minimum_entries=args.max_success_episodes,
-                observation_spec=ObservationSpec.from_pair(calibration),
+                observation_spec=observation_spec,
                 horizon_steps=args.max_steps,
                 progress_callback=_progress,
             )
@@ -1946,6 +2021,7 @@ def _run_flat(args):
                 start_seed,
                 attempt,
                 successes,
+                expected_observation_contract=observation_contract,
                 start_pool=start_pool,
                 scene_catalog=None,
                 attempted_pool_start_ids=(),

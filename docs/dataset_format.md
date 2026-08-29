@@ -13,7 +13,7 @@ its `.partial` directory must be new. Using a fresh root per collection run is
 recommended. Dataset and recording roots are ignored by Git because RGB-D
 collections can grow quickly.
 
-Grouped collection mode uses manifest schema 4 and stores a
+Grouped collection mode uses manifest schema 5 and stores a
 `dataset_manifest.json`, one reusable `start_pool.json` per accepted anchor,
 and directories organized by anchor and fixed scenario blueprint. The ASI
 manual camera saves
@@ -62,7 +62,14 @@ The plugin's runtime blueprint ID is persisted to accelerate a Python-only
 resume, but a GTA/plugin restart triggers a same-anchor/same-seed rebuild and
 signature check before any payload is appended. It also loads each pool,
 verifies its digest, and rechecks event position and static occlusion masks on
-first use. Schema 1/2/3 batches remain supported by offline visualization but
+first use. The RGB-D observation contract (backbuffer width/height, FOV, clip
+planes, and named pitches) is locked at fresh preflight and rechecked for every
+episode and resume. Switching GTA between fullscreen, borderless, and decorated
+window modes can change the real swap-chain backbuffer even if the menu keeps
+the same nominal resolution; collection then fails with
+`OBSERVATION_CONTRACT_CHANGED` instead of silently mixing geometries.
+
+Schema 1/2/3/4 batches remain supported by offline visualization but
 cannot be resumed for generation.
 
 ## Batch layout
@@ -167,6 +174,46 @@ IDs are used only inside the loader to associate adjacent observations and are
 never embedded as model features. The Spatial RNN additionally excludes
 `FIRE_SOURCE` tracks and pose tensors. Train/validation splitting is by anchor,
 not by randomly mixing episodes from the same location.
+
+## Stage 3C policy reader and compact DAgger shards
+
+`learning/policy_dataset.py` adds policy supervision without changing the
+Stage 3A reader. At each aligned observation it loads the strict action and
+four-action history, reconstructs a six-channel `41x41` agent-centric geometry
+map from the two float16 metric Depth payloads, and encodes the currently
+grounded fire source in a separate token. The policy receives predicted belief,
+local geometry, odometry/history, and the source token. Response tracks enter
+only the Spatial RNN, while event truth remains a loss/evaluation target.
+
+The policy dataset applies D4 consistently to global track/event coordinates,
+belief, pose, source coordinates, and local geometry. Global 90-degree rotation
+does not change body-frame action labels. Reflection swaps `TURNLEFT` and
+`TURNRIGHT` in both the current label and history.
+
+Online DAgger uses a separate compact format:
+
+```text
+dagger_round_01/
+  episode_.../
+    metadata.json
+    steps.npz
+```
+
+The NPZ contains grounded-track features, odometry/action history, compressed
+`uint8` local geometry, the current source token, expert action when available,
+learner action, executor ownership, and privileged event targets used only by
+the losses. It contains no RGB, Depth, point cloud, video, teacher belief, or
+planner state. `NO_EXPERT_LABEL` rows remain in the visited-state sequence but
+are masked out of action loss. DAgger does not invent a remaining-expert-action
+target for learner-deviated states, so its value-label mask is false; event-cell
+belief and source-visible coordinate supervision remain valid.
+
+Each shard is written to a `.partial` directory and atomically published only
+after all arrays and metadata are complete. `learning/dagger_dataset.py`
+strictly validates the format and decodes only the documented geometry
+quantization. The Stage 3C trainer accepts one or more `--dagger-root` values,
+rejects shards from held-out anchors, and records the parent policy hash and
+DAgger iteration in the next checkpoint.
 
 ## Evaluation truth
 

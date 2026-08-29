@@ -138,6 +138,103 @@ while recording the RNN posterior. `control` mode replaces only the belief
 backend; the fixed action policy is shared. The current planar posterior does
 not learn altitude control, so ascent/descent remain bounded heuristics.
 
+## Stage 3C explicit-belief action policy
+
+Stage 3C keeps the trained Spatial RNN but removes the fixed confidence gate,
+state machine, and A* from the learned-policy execution path:
+
+```text
+response tracks -> Spatial RNN -> normalized belief ----+
+dual-view Depth -> deterministic local geometry --------+-> learned policy
+odometry + last four executed actions ------------------+
+directly grounded FIRE_SOURCE --------------------------+
+```
+
+The action network cannot accept response-track tensors. They can affect
+actions only by first changing the explicit belief. The network also cannot
+accept the Spatial RNN evidence map/gates, teacher belief, event truth, expert
+intent, visibility target lists, or evaluation-only GTA geometry. The only
+learned recurrent tensor remains the one-channel normalized log-belief. Valid
+response tracks are lexicographically canonicalized before the invariant
+`mean + max + log-count` reduction so a permutation also follows the same
+floating-point reduction order.
+
+The start-local posterior is differentiably warped into an agent-centric
+three-channel image: scaled probability, clipped log-probability relative to
+the uniform prior, and valid-grid mask. Its CNN retains a coarse `4 x 4`
+spatial layout before a learned projection produces 128 features; global
+average pooling is deliberately not used because it erases whether a belief
+mode is left, ahead, or right of the vehicle. Current
+oblique/nadir metric Depth is independently backprojected into a body-aligned
+`6 x 41 x 41` map covering `+/-20 m` at `1 m/cell`: level free space, level,
+lower, and upper occupancy, mean relative surface height, and unknown. A second
+CNN uses the same `4 x 4` spatial bottleneck and produces 96 features. Explicit
+pose/budget/action history and direct-source
+MLPs produce 64 features each. Their 352-D concatenation feeds the seven-action,
+remaining-budget value, and source-relative event-coordinate heads.
+
+The source branch is intentionally separate. `FIRE_SOURCE` never enters the
+belief updater; the first grounded source permanently freezes belief. The
+coordinate head predicts a bounded `+/-8 m` residual around the source position
+recovered from current Depth and pose. Event truth enters only belief and
+coordinate losses and evaluation.
+
+Training has two phases. The policy branches first warm up while the Spatial
+RNN is frozen. Joint fine-tuning then uses a smaller belief learning rate and
+allows action gradients through the agent-centric belief warp, while retaining
+source-blind event-cell NLL so the map cannot silently become an uninterpretable
+action code. Loss weights are action `1`, belief `1`, coordinate `2`, and value
+`0.1`. The policy always consumes predicted rather than teacher belief.
+
+Online `control` uses `argmax` after only two task-legality rules: STOP is
+illegal without a currently grounded source, and the final action slot must be
+STOP or terminate as `HORIZON_EXHAUSTED`. There is no A*, confidence state
+machine, hand-written belief direction, action geometry mask, or fallback.
+Collision rejection is returned by the strict executor and is not replaced by
+another action.
+
+### DAgger
+
+`dagger` mode evaluates learner and Stage 2E expert on the same visited state.
+The configured beta chooses which action is executed; the expert action is the
+training label. `NO_EXPERT_LABEL` rows remain in the shard but are excluded
+from action loss. Because a learner-deviated state has no well-defined
+remaining expert-trajectory length, DAgger rows never supervise the auxiliary
+value head. The three standard rounds use beta `0.50`, `0.25`, and `0.00` and
+are restricted to checkpoint training anchors. The collector loads and
+validates the source dataset's schema-4 start pools once per anchor rather than
+rebuilding static occlusion geometry for every episode.
+
+Each atomic DAgger shard contains only `metadata.json` and compressed
+`steps.npz`: source-blind track features, odometry/history, `uint8` local
+geometry, source token, expert/learner action, execution owner, and event
+supervision. It stores no RGB, Depth, point cloud, video, or teacher belief.
+The trainer accepts multiple `--dagger-root` values, rejects held-out anchors,
+and records the parent policy hash and DAgger iteration in the new checkpoint.
+
+### Stage 3C commands
+
+```powershell
+python learning\train_explicit_belief_policy.py `
+  dataset\stage2e_5x5_0824 `
+  --belief-checkpoint learning\checkpoints\stage3_spatial_rnn_5x5_0824.pt `
+  --output learning\checkpoints\stage3c_explicit_belief_policy_bc.pt
+
+python learning\evaluate_explicit_belief_policy.py `
+  dataset\stage2e_5x5_0824 `
+  learning\checkpoints\stage3c_explicit_belief_policy_bc.pt
+
+python validation\validate_online_belief_policy.py `
+  --anchor 228.825653 -610.282898 51.108658 `
+  --checkpoint learning\checkpoints\stage3c_explicit_belief_policy_bc.pt `
+  --mode control --episodes 1 --max-steps 80 --device cuda
+
+python validation\collect_stage3c_dagger.py `
+  dataset\stage2e_5x5_0824 `
+  --checkpoint learning\checkpoints\stage3c_explicit_belief_policy_bc.pt `
+  --round 1 --output-dir dataset\stage3c_dagger_round_01 --device cuda
+```
+
 ## Commands
 
 ```powershell
