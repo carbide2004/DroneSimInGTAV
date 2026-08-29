@@ -382,6 +382,12 @@ python validation\visualize_online_belief_policy.py `
   recordings\stage3c_online_001 --start-paused
 ```
 
+For exact diagnostics, `--pool-start-id ID` selects one entry from the supplied
+`--start-pool` for a single episode. It fails if that entry is unavailable in
+the current dynamic catalog or fails real RGB-D verification; it never falls
+back to a different start. `--start-seed` does not select a pool entry. Failed
+terminal observations are recorded with `action_execution=NOT_EXECUTED`.
+
 Collect DAgger only on the checkpoint's recorded training anchors. The three
 rounds default to expert execution probabilities `0.50`, `0.25`, and `0.00`:
 

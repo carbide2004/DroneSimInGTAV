@@ -25,7 +25,10 @@ from agent_control.expert_starts import (  # noqa: E402
 from agent_control.online_belief_policy_episode import (  # noqa: E402
     run_online_belief_policy_episode,
 )
-from agent_control.scene_catalog import build_scene_start_catalog  # noqa: E402
+from agent_control.scene_catalog import (  # noqa: E402
+    build_scene_start_catalog,
+    scene_start_catalog_subset,
+)
 from agent_control.start_pool import (  # noqa: E402
     build_static_start_pool,
     load_pool,
@@ -66,6 +69,12 @@ def _arguments():
     parser.add_argument("--show-belief", action="store_true")
     parser.add_argument("--dagger-output-dir", type=Path)
     parser.add_argument("--start-pool", type=Path)
+    parser.add_argument(
+        "--pool-start-id",
+        type=int,
+        help=("Require one exact start-pool entry; requires --start-pool and "
+              "--episodes 1"),
+    )
     parser.add_argument("--anchor-name")
     args = parser.parse_args()
     if args.anchor is not None and not all(math.isfinite(value) for value in args.anchor):
@@ -92,6 +101,21 @@ def _arguments():
         args.start_pool = load_pool(pool_path)
     else:
         args.start_pool = None
+    if args.pool_start_id is not None:
+        if not 0 < args.pool_start_id < (1 << 64):
+            parser.error("--pool-start-id must be an unsigned non-zero 64-bit integer")
+        if args.start_pool is None:
+            parser.error("--pool-start-id requires --start-pool")
+        if args.episodes != 1:
+            parser.error("--pool-start-id requires --episodes 1")
+        available_ids = {
+            int(entry.pool_start_id) for entry in args.start_pool.entries
+        }
+        if args.pool_start_id not in available_ids:
+            parser.error(
+                "--pool-start-id is absent from the supplied --start-pool: "
+                f"{args.pool_start_id}"
+            )
     if args.record_dir is not None:
         args.record_dir = args.record_dir.resolve()
         if args.record_dir.exists() or args.record_dir.with_name(
@@ -179,6 +203,14 @@ def _run_one(client, args, anchor, episode_index):
             client, session, scenario, observation_spec, start_pool,
             minimum_entries=1, horizon_steps=args.max_steps,
         )
+        if args.pool_start_id is not None:
+            catalog = scene_start_catalog_subset(
+                catalog, (args.pool_start_id,)
+            )
+            print(
+                f"scene catalog EXACT pool_start={args.pool_start_id}",
+                flush=True,
+            )
         catalog = certify_scene_start_catalog_rgbd(
             client, session, scenario, observation_spec, start_pool, catalog,
             minimum_entries=1, horizon_steps=args.max_steps,

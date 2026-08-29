@@ -211,6 +211,22 @@ class Stage2EValidationRecorder:
         if action_timing is not None:
             frame["timing"]["action"] = _json_value(action_timing)
 
+    def mark_last_action_not_executed(self, reason):
+        if self._finished:
+            raise RuntimeError("Stage 2E trajectory recorder is closed")
+        if not self._frames:
+            raise RuntimeError("No Stage 2E action is available to mark")
+        frame = self._frames[-1]
+        if frame["action_execution"] != "PROPOSED":
+            raise RuntimeError(
+                "Stage 2E action was already assigned an execution result"
+            )
+        reason = str(reason).strip()
+        if not reason:
+            raise ValueError("A non-empty non-execution reason is required")
+        frame["action_execution"] = "NOT_EXECUTED"
+        frame["action_error"] = reason
+
     def finish(self, status, result=None, error=None):
         if self._finished:
             raise RuntimeError("Stage 2E trajectory recorder is closed")

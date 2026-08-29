@@ -364,6 +364,38 @@ def next_scene_start_candidate(catalog, attempted_pool_start_ids=()):
     )
 
 
+def scene_start_catalog_subset(catalog, pool_start_ids):
+    """Return a digest-bound catalog containing exactly the requested starts."""
+    if not isinstance(catalog, SceneStartCatalog):
+        raise TypeError("catalog must be a SceneStartCatalog")
+    requested = tuple(int(value) for value in pool_start_ids)
+    if not requested or len(set(requested)) != len(requested):
+        raise ValueError("pool_start_ids must be unique and non-empty")
+    candidates_by_id = {
+        int(candidate.pool_start_id): candidate
+        for candidate in catalog.candidates
+    }
+    missing = [
+        value for value in requested if value not in candidates_by_id
+    ]
+    if missing:
+        raise TaskStartGenerationError(
+            "REQUESTED_POOL_START_NOT_AVAILABLE: requested pool_start_id(s) "
+            f"{missing} are absent from the current dynamic scene catalog; "
+            f"catalog_candidates={len(catalog.candidates)}"
+        )
+    return _with_digest(SceneStartCatalog(
+        scenario_blueprint_id=catalog.scenario_blueprint_id,
+        scenario_seed=catalog.scenario_seed,
+        pool_digest=catalog.pool_digest,
+        step_index=catalog.step_index,
+        real_rgbd_certified=catalog.real_rgbd_certified,
+        candidates=tuple(candidates_by_id[value] for value in requested),
+        timing=catalog.timing,
+        digest="",
+    ))
+
+
 def certified_scene_start_catalog(catalog, candidates):
     """Return a digest-bound catalog containing only real RGB-D passes."""
     if not isinstance(catalog, SceneStartCatalog):

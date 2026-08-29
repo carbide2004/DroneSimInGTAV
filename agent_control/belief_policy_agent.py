@@ -237,5 +237,25 @@ class OnlineExplicitBeliefPolicyAgent:
         )
         return replace(decision, action=executed_action, awareness=awareness)
 
+    def bind_no_execution(
+        self,
+        decision,
+        expert_action=None,
+        expert_error=None,
+    ):
+        """Attach diagnostics without claiming that any action was executed."""
+        expert_name = (
+            None if expert_action is None else strict_action_name(expert_action)
+        )
+        awareness = replace(
+            decision.awareness,
+            executed_action=None,
+            executed_by=None,
+            expert_action=expert_name,
+            expert_label_available=expert_action is not None,
+            expert_error=None if expert_error is None else str(expert_error),
+        )
+        return replace(decision, awareness=awareness)
+
     def commit_executed_action(self, action):
         self.runtime.commit_action_name(strict_action_name(action))

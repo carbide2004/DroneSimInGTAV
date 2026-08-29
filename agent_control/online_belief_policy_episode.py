@@ -321,11 +321,44 @@ def run_online_belief_policy_episode(
                 == snapshot.selected_action_name
             )
 
+        truth_record = {
+            "step_index": grounded.step_index,
+            "event_active": scenario.event_active,
+            "event_position": scenario.event_position,
+            "entities": scenario.entities,
+            "valid_dynamic_cue_so_far": valid_dynamic_cue,
+        }
+        observation_timing = {
+            "visibility_seconds": visibility_step_seconds,
+            "scenario_seconds": scenario_step_seconds,
+            "grounding_seconds": grounding_step_seconds,
+            "model_seconds": learner.model_seconds,
+            "expert_seconds": expert_step_seconds,
+        }
+
         if mode == "control":
             actual_action = learner.action
             executed_by = "LEARNER"
         elif mode == "shadow":
             if expert_decision is None:
+                decision = agent.bind_no_execution(
+                    learner, expert_error=expert_error
+                )
+                if recorder is not None:
+                    phase = time.perf_counter()
+                    recorder.record_step(
+                        grounded.step_index,
+                        pair,
+                        observation,
+                        grounded,
+                        decision,
+                        truth_record,
+                        step_timing=observation_timing,
+                    )
+                    recorder.mark_last_action_not_executed(
+                        "NO_EXPERT_LABEL"
+                    )
+                    recording_seconds += time.perf_counter() - phase
                 return result(False, "NO_EXPERT_LABEL", None, expert_error)
             actual_action = expert_decision.action
             executed_by = "EXPERT"
@@ -340,12 +373,6 @@ def run_online_belief_policy_episode(
             None if expert_decision is None else expert_decision.action,
             expert_error,
         )
-        action_names = (
-            "FORWARD", "ASCEND", "DESCEND", "TURNLEFT", "TURNRIGHT", "HOLD", "STOP"
-        )
-        executed_action_counts[
-            action_names.index(strict_action_name(actual_action))
-        ] += 1
 
         if dagger_recorder is not None:
             dagger_recorder.record_step(
@@ -361,13 +388,6 @@ def run_online_belief_policy_episode(
                 event_cell=event_cell,
             )
 
-        truth_record = {
-            "step_index": grounded.step_index,
-            "event_active": scenario.event_active,
-            "event_position": scenario.event_position,
-            "entities": scenario.entities,
-            "valid_dynamic_cue_so_far": valid_dynamic_cue,
-        }
         if recorder is not None:
             phase = time.perf_counter()
             recorder.record_step(
@@ -377,19 +397,17 @@ def run_online_belief_policy_episode(
                 grounded,
                 decision,
                 truth_record,
-                step_timing={
-                    "visibility_seconds": visibility_step_seconds,
-                    "scenario_seconds": scenario_step_seconds,
-                    "grounding_seconds": grounding_step_seconds,
-                    "model_seconds": learner.model_seconds,
-                    "expert_seconds": expert_step_seconds,
-                },
+                step_timing=observation_timing,
             )
             recording_seconds += time.perf_counter() - phase
 
         if not isinstance(actual_action, StopAction) and (
             executor.action_count >= episode_spec.horizon_steps - 1
         ):
+            if recorder is not None:
+                recorder.mark_last_action_not_executed(
+                    "HORIZON_EXHAUSTED"
+                )
             return result(
                 False,
                 "HORIZON_EXHAUSTED",
@@ -399,7 +417,17 @@ def run_online_belief_policy_episode(
         try:
             step_result = executor.execute(actual_action, capture_timeout_ms)
         except Exception as error:
+            if recorder is not None:
+                recorder.mark_last_action_not_executed(
+                    f"{type(error).__name__}: {error}"
+                )
             return result(False, _status_from_error(error), None, error)
+        action_names = (
+            "FORWARD", "ASCEND", "DESCEND", "TURNLEFT", "TURNRIGHT", "HOLD", "STOP"
+        )
+        executed_action_counts[
+            action_names.index(strict_action_name(actual_action))
+        ] += 1
         action_seconds += step_result.timing.total_seconds
         agent.commit_executed_action(actual_action)
         if recorder is not None:
