@@ -275,21 +275,6 @@ python validation\validate_online_belief_policy.py `
   --record-dir recordings\stage3c_online_001
 ```
 
-For an exact single start-pool location, add `--pool-start-id` together with
-`--start-pool`. The requested entry must also be valid for the current dynamic
-scene and pass the authoritative RGB-D check; failure is explicit and never
-selects another entry. `--start-seed` controls identity and DAgger randomness,
-not pool-entry selection.
-
-```powershell
-python validation\validate_online_belief_policy.py `
-  --anchor -227.414627 -695.757202 42.965027 `
-  --start-pool dataset\stage2e_5x5_0824\anchor_005\start_pool.json `
-  --pool-start-id 1971426126223363276 `
-  --checkpoint learning\checkpoints\stage3c_explicit_belief_policy_bc.pt `
-  --mode shadow --episodes 1 --max-steps 80 --device cuda
-```
-
 Control mode never constructs the Stage 2E expert, `StrictLocalAStar`, fixed
 belief controller, or geometry action mask. Every non-STOP action executes
 once and advances 250 ms. A blocked action terminates explicitly rather than
